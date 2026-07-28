@@ -8,7 +8,10 @@ use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\AdminInvoiceController;
 use App\Http\Controllers\ExchangeAccountController;
 use App\Http\Controllers\InvoiceController;
+use App\Http\Controllers\AdminReferralController;
+use App\Http\Controllers\PayoutMethodController;
 use App\Http\Controllers\ProfileController;
+use App\Http\Controllers\ReferralController;
 use App\Http\Controllers\SandboxController;
 use App\Http\Controllers\StrategyController;
 use Illuminate\Support\Facades\Route;
@@ -40,6 +43,26 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::put('/password', [ProfileController::class, 'updatePassword']);
     });
 
+    Route::prefix('referrals')->group(function () {
+        Route::get('/', [ReferralController::class, 'index']);
+        Route::post('/code', [ReferralController::class, 'createCode']);
+        Route::get('/community', [ReferralController::class, 'community']);
+        Route::post('/community', [ReferralController::class, 'saveCommunity']);
+        Route::post('/members/remove', [ReferralController::class, 'removeMember']);
+        Route::get('/payouts', [ReferralController::class, 'payouts']);
+    });
+
+    Route::prefix('payout-methods')->group(function () {
+        Route::get('/', [PayoutMethodController::class, 'index']);
+        Route::post('/wallets', [PayoutMethodController::class, 'storeWallet']);
+        Route::put('/wallets/{id}', [PayoutMethodController::class, 'updateWallet']);
+        Route::delete('/wallets/{id}', [PayoutMethodController::class, 'destroyWallet']);
+        Route::post('/banks', [PayoutMethodController::class, 'storeBank']);
+        Route::put('/banks/{id}', [PayoutMethodController::class, 'updateBank']);
+        Route::delete('/banks/{id}', [PayoutMethodController::class, 'destroyBank']);
+        Route::post('/set-main', [PayoutMethodController::class, 'setMain']);
+    });
+
     Route::prefix('admin')->middleware('admin')->group(function () {
         Route::get('/master-stats', [AdminController::class, 'masterStats']);
         Route::get('/daily-pnl', [AdminController::class, 'dailyPnl']);
@@ -63,6 +86,18 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::post('/invoices/generate', [AdminInvoiceController::class, 'generate']);
         Route::put('/invoices/{id}', [AdminInvoiceController::class, 'update']);
         Route::delete('/invoices/{id}', [AdminInvoiceController::class, 'destroy']);
+
+        Route::prefix('affiliate')->group(function () {
+            Route::get('/overview', [AdminReferralController::class, 'overview']);
+            Route::get('/ledger', [AdminReferralController::class, 'ledger']);
+            Route::get('/ledger-stats', [AdminReferralController::class, 'ledgerStats']);
+            Route::get('/referrers/{uniId}/payouts', [AdminReferralController::class, 'referrerPayouts']);
+            Route::get('/referrers/{uniId}/releasable', [AdminReferralController::class, 'referrerReleasable']);
+            Route::post('/release', [AdminReferralController::class, 'release']);
+            Route::delete('/payouts/{id}', [AdminReferralController::class, 'destroyPayout']);
+            Route::get('/payouts/{id}/proof', [AdminReferralController::class, 'downloadProof']);
+            Route::get('/users/{uniId}/referrals', [AdminReferralController::class, 'userReferrals']);
+        });
 
         Route::get('/sandbox/users', [SandboxController::class, 'listUsers']);
         Route::post('/sandbox/users', [SandboxController::class, 'createUser']);

@@ -3,12 +3,18 @@
 namespace App\Http\Controllers;
 
 use App\Models\UserCredential;
+use App\Services\ReferralService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 
 class AuthController extends Controller
 {
+    public function __construct(private ReferralService $referrals)
+    {
+    }
+
     /**
      * POST /api/auth/register
      */
@@ -18,18 +24,27 @@ class AuthController extends Controller
             'name' => ['required', 'string', 'max:255'],
             'email' => ['required', 'email', 'max:255', 'unique:user_credentials,email'],
             'password' => ['required', 'string', 'min:8', 'confirmed'],
+            // Deliberately NOT exists-validated: invalid referral codes are
+            // silently ignored and registration proceeds (affiliate spec §2).
+            'referral_code' => ['nullable', 'string', 'max:50'],
         ]);
 
-        $user = UserCredential::create([
-            'name' => $validated['name'],
-            'email' => $validated['email'],
-            'password' => $validated['password'],
-            // Local dev: skip the email-verification flow for now.
-            'email_verified' => true,
-            // New sign-ups wait in the admin approval queue (accept → active,
-            // reject → suspended). Pending users can log in but are gated.
-            'status' => 'pending',
-        ]);
+        $user = DB::transaction(function () use ($validated) {
+            $user = UserCredential::create([
+                'name' => $validated['name'],
+                'email' => $validated['email'],
+                'password' => $validated['password'],
+                // Local dev: skip the email-verification flow for now.
+                'email_verified' => true,
+                // New sign-ups wait in the admin approval queue (accept → active,
+                // reject → suspended). Pending users can log in but are gated.
+                'status' => 'pending',
+            ]);
+
+            $this->referrals->bind($validated['referral_code'] ?? null, $user->uni_id);
+
+            return $user;
+        });
 
         $token = $user->createToken('spa')->plainTextToken;
 
