@@ -35,10 +35,21 @@ return [
         ],
     ],
 
-    // Shared secret for the Python trading engine (machine-to-machine /api/engine/*).
-    // The engine sends it as the X-Engine-Secret header; VerifyEngineSecret checks it.
+    // The Python trading engine (trading-flask, package binance_abcd).
+    //
+    // `secret`         — engine -> API auth (X-Engine-Secret, VerifyEngineSecret).
+    // `webhook_secret` — API -> engine auth, i.e. BINANCE_ABCD_WEBHOOK_SECRET.
+    //                    Stays server-side: the admin manual-trade proxy signs
+    //                    requests with it so the browser never sees it.
+    // `targets`        — the only engine URLs the proxy may post to. Admins pick
+    //                    a key, never a URL, so no arbitrary host can be reached.
     'engine' => [
         'secret' => env('ENGINE_SECRET'),
+        'webhook_secret' => env('ENGINE_WEBHOOK_SECRET'),
+        'targets' => [
+            'local' => env('ENGINE_URL_LOCAL', 'http://127.0.0.1:5010'),
+            'prod' => env('ENGINE_URL_PROD', 'http://127.0.0.1:5010'),
+        ],
     ],
 
 ];

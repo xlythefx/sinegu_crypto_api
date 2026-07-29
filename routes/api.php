@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\AdminController;
+use App\Http\Controllers\AdminManualTradeController;
 use App\Http\Controllers\AdminUserController;
 use App\Http\Controllers\AnalyticsController;
 use App\Http\Controllers\AssetController;
@@ -108,6 +109,12 @@ Route::middleware('auth:sanctum')->group(function () {
             Route::get('/payouts/{id}/proof', [AdminReferralController::class, 'downloadProof']);
             Route::get('/users/{uniId}/referrals', [AdminReferralController::class, 'userReferrals']);
         });
+
+        // Manual trade console (sandbox sub-page): proxies signed webhooks to
+        // the trading engine so the secret never reaches the browser.
+        Route::get('/manual-trade/targets', [AdminManualTradeController::class, 'targets']);
+        Route::get('/manual-trade/engine', [AdminManualTradeController::class, 'engineStatus']);
+        Route::post('/manual-trade/send', [AdminManualTradeController::class, 'send']);
 
         Route::get('/sandbox/users', [SandboxController::class, 'listUsers']);
         Route::post('/sandbox/users', [SandboxController::class, 'createUser']);
