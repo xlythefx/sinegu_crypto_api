@@ -1,10 +1,13 @@
 <?php
 
 use App\Http\Controllers\AdminController;
+use App\Http\Controllers\AdminUserController;
 use App\Http\Controllers\AnalyticsController;
 use App\Http\Controllers\AssetController;
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\DashboardController;
+use App\Http\Controllers\EngineController;
+use App\Http\Controllers\EngineSyncController;
 use App\Http\Controllers\AdminInvoiceController;
 use App\Http\Controllers\ExchangeAccountController;
 use App\Http\Controllers\InvoiceController;
@@ -66,12 +69,19 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::prefix('admin')->middleware('admin')->group(function () {
         Route::get('/master-stats', [AdminController::class, 'masterStats']);
         Route::get('/daily-pnl', [AdminController::class, 'dailyPnl']);
+        Route::get('/performance', [AdminController::class, 'performance']);
         Route::get('/positions', [AdminController::class, 'positions']);
         Route::delete('/positions/{id}', [AdminController::class, 'deletePosition']);
         Route::delete('/past-positions/{id}', [AdminController::class, 'deletePastPosition']);
         Route::get('/users', [AdminController::class, 'users']);
         Route::post('/users/{uniId}/accept', [AdminController::class, 'acceptUser']);
         Route::post('/users/{uniId}/reject', [AdminController::class, 'rejectUser']);
+        Route::get('/users/{uniId}', [AdminUserController::class, 'show']);
+        Route::get('/users/{uniId}/summary', [AdminUserController::class, 'summary']);
+        Route::get('/users/{uniId}/daily-pnl', [AdminUserController::class, 'dailyPnl']);
+        Route::get('/users/{uniId}/positions', [AdminUserController::class, 'positions']);
+        Route::get('/users/{uniId}/invoices', [AdminUserController::class, 'invoices']);
+        Route::put('/users/{uniId}', [AdminUserController::class, 'update']);
 
         Route::get('/strategies', [StrategyController::class, 'index']);
         Route::put('/strategies/{key}', [StrategyController::class, 'setEnabled']);
@@ -112,3 +122,27 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::delete('/accounts/{id}', [ExchangeAccountController::class, 'destroy']);
     });
 });
+
+// Machine-to-machine surface for the Python trading engine. No user token —
+// authenticated by X-Engine-Secret (`engine` middleware). Exchange-scoped so
+// Bybit/MEXC engines plug in without new routes; throttling is disabled
+// because pollers legitimately exceed the per-IP API limiter.
+Route::prefix('engine/{exchange}')
+    ->whereIn('exchange', ['binance', 'bybit', 'mexc'])
+    ->middleware('engine')
+    ->withoutMiddleware([\Illuminate\Routing\Middleware\ThrottleRequests::class])
+    ->group(function () {
+        Route::get('/accounts', [EngineController::class, 'accounts']);
+        Route::get('/assets', [EngineController::class, 'assets']);
+        Route::post('/trade-logs', [EngineController::class, 'storeTradeLog']);
+        Route::get('/open-strategies', [EngineController::class, 'openStrategies']);
+        Route::post('/open-strategies', [EngineController::class, 'storeOpenStrategy']);
+        Route::delete('/open-strategies', [EngineController::class, 'destroyOpenStrategy']);
+
+        Route::post('/positions/sync', [EngineSyncController::class, 'syncPositions']);
+        Route::post('/positions/upsert', [EngineSyncController::class, 'upsertPosition']);
+        Route::get('/positions/check', [EngineSyncController::class, 'checkPositions']);
+        Route::post('/past-positions/sync', [EngineSyncController::class, 'syncPastPositions']);
+        Route::post('/balances', [EngineSyncController::class, 'updateBalances']);
+        Route::post('/transactions', [EngineSyncController::class, 'insertTransactions']);
+    });

@@ -1,0 +1,160 @@
+<?php
+
+namespace Tests\Feature;
+
+use Illuminate\Support\Facades\DB;
+
+/** The engine's bookkeeping writes: positions, past positions, balances, transactions. */
+class EngineSyncTest extends EngineTestCase
+{
+    private function seedPosition(string $apiKey, string $symbol = 'BTCUSDT', float $amt = 0.5, string $side = 'LONG'): void
+    {
+        DB::table('binance_positions')->insert([
+            'api_key' => $apiKey,
+            'uni_id' => 'uni-'.$apiKey,
+            'symbol' => $symbol,
+            'position_side' => $side,
+            'position_amt' => $amt,
+            'created_at' => now(),
+        ]);
+    }
+
+    public function test_positions_sync_replaces_only_the_posted_account(): void
+    {
+        $this->seedPosition('key-a', 'ETHUSDT');
+        $this->seedPosition('key-b', 'BTCUSDT');
+
+        $this->postJson('/api/engine/binance/positions/sync', [
+            'accounts' => [[
+                'api_key' => 'key-a',
+                'uni_id' => 'uni-key-a',
+                'positions' => [
+                    ['symbol' => 'BTCUSDT', 'position_side' => 'LONG', 'position_amt' => 1.25, 'entry_price' => 60000],
+                ],
+            ]],
+        ], $this->engineHeaders())->assertOk()->assertJson(['success' => true]);
+
+        $a = DB::table('binance_positions')->where('api_key', 'key-a')->get();
+        $this->assertCount(1, $a);
+        $this->assertSame('BTCUSDT', $a[0]->symbol);
+        $this->assertSame(1.25, (float) $a[0]->position_amt);
+
+        // The other account's snapshot is untouched.
+        $this->assertSame(1, DB::table('binance_positions')->where('api_key', 'key-b')->count());
+    }
+
+    public function test_position_upsert_inserts_updates_and_deletes(): void
+    {
+        $headers = $this->engineHeaders();
+        $base = ['api_key' => 'key-a', 'symbol' => 'BTCUSDT', 'position_side' => 'LONG'];
+        $payload = $base + ['uni_id' => 'uni-key-a'];
+
+        // Insert.
+        $this->postJson('/api/engine/binance/positions/upsert', $payload + ['position_amt' => 0.5, 'entry_price' => 61000], $headers)
+            ->assertOk()->assertJson(['result' => 'inserted']);
+
+        // Update (additive amount computed engine-side).
+        $this->postJson('/api/engine/binance/positions/upsert', $payload + ['position_amt' => 0.75], $headers)
+            ->assertOk()->assertJson(['result' => 'updated']);
+        $this->assertSame(0.75, (float) DB::table('binance_positions')->where($base)->value('position_amt'));
+
+        // Zero amount removes the row.
+        $this->postJson('/api/engine/binance/positions/upsert', $payload + ['position_amt' => 0], $headers)
+            ->assertOk()->assertJson(['result' => 'deleted']);
+        $this->assertSame(0, DB::table('binance_positions')->where($base)->count());
+    }
+
+    public function test_positions_check_is_batched_per_symbol(): void
+    {
+        $this->seedPosition('key-a', 'BTCUSDT', 0.5, 'LONG');
+        $this->seedPosition('key-b', 'BTCUSDT', 0.25, 'LONG');
+        $this->seedPosition('key-c', 'BTCUSDT', 0.1, 'SHORT');
+        $this->seedPosition('key-d', 'ETHUSDT', 2.0, 'LONG');
+        $this->seedPosition('key-e', 'BTCUSDT', 0.0, 'LONG'); // dust — excluded
+
+        $positions = $this->getJson('/api/engine/binance/positions/check?symbol=BTCUSDT&position_side=LONG', $this->engineHeaders())
+            ->assertOk()
+            ->json('positions');
+
+        $this->assertEqualsCanonicalizing(
+            ['key-a', 'key-b'],
+            array_column($positions, 'api_key')
+        );
+    }
+
+    public function test_past_positions_sync_is_idempotent_and_fills_nulls_only(): void
+    {
+        $headers = $this->engineHeaders();
+        $row = [
+            'api_key' => 'key-a',
+            'uni_id' => 'uni-key-a',
+            'symbol' => 'BTCUSDT',
+            'position_side' => 'LONG',
+            'position_amt' => 0.5,
+            'entry_price' => null,
+            'exit_price' => 61000,
+            'realized_pnl' => 120.5,
+            'side' => 'SELL',
+            'order_id' => 987654,
+            'closed_at' => '2026-07-29 10:00:00',
+            'strategy' => null,
+        ];
+
+        $this->postJson('/api/engine/binance/past-positions/sync', ['rows' => [$row]], $headers)
+            ->assertOk()->assertJson(['inserted' => 1]);
+
+        // Same order again: no duplicate; null strategy gets filled, existing pnl untouched.
+        $again = array_merge($row, ['strategy' => 'VWMA-Reversion', 'realized_pnl' => 999.0]);
+        $this->postJson('/api/engine/binance/past-positions/sync', ['rows' => [$again]], $headers)
+            ->assertOk()->assertJson(['inserted' => 0, 'updated' => 1]);
+
+        $stored = DB::table('binance_pastpositions')
+            ->where('api_key', 'key-a')->where('order_id', 987654)->get();
+        $this->assertCount(1, $stored);
+        $this->assertSame('VWMA-Reversion', $stored[0]->strategy);
+        $this->assertSame(120.5, (float) $stored[0]->realized_pnl);
+    }
+
+    public function test_balances_update_guards_initial_deposit(): void
+    {
+        $user = $this->makeUser();
+        $seasoned = $this->makeAccount($user, ['initial_deposit' => 1000]);
+        $fresh = $this->makeAccount($user, ['initial_deposit' => null, 'balance' => null]);
+        [$seasonedKey, $freshKey] = [
+            DB::table('binance_accounts')->find($seasoned)->api_key,
+            DB::table('binance_accounts')->find($fresh)->api_key,
+        ];
+
+        $this->postJson('/api/engine/binance/balances', ['rows' => [
+            ['api_key' => $seasonedKey, 'balance' => 1500, 'unrealized_pnl' => 12.5, 'initial_deposit' => 777],
+            ['api_key' => $freshKey, 'balance' => 300, 'initial_deposit' => 300],
+        ]], $this->engineHeaders())->assertOk()->assertJson(['updated' => 2]);
+
+        $seasonedRow = DB::table('binance_accounts')->find($seasoned);
+        $this->assertSame(1500.0, (float) $seasonedRow->balance);
+        $this->assertSame(12.5, (float) $seasonedRow->unrealized_pnl);
+        $this->assertSame(1000.0, (float) $seasonedRow->initial_deposit); // NOT overwritten
+
+        $freshRow = DB::table('binance_accounts')->find($fresh);
+        $this->assertSame(300.0, (float) $freshRow->initial_deposit);     // first fill allowed
+    }
+
+    public function test_transactions_are_idempotent_per_tran_id(): void
+    {
+        $rows = ['rows' => [[
+            'api_key' => 'key-a',
+            'uni_id' => 'uni-key-a',
+            'type' => 'DEPOSIT',
+            'amount' => 250,
+            'tran_id' => 424242,
+            'transaction_time' => 1753776000000,
+        ]]];
+
+        $this->postJson('/api/engine/binance/transactions', $rows, $this->engineHeaders())
+            ->assertOk()->assertJson(['inserted' => 1]);
+        $this->postJson('/api/engine/binance/transactions', $rows, $this->engineHeaders())
+            ->assertOk()->assertJson(['inserted' => 0]);
+
+        $this->assertSame(1, DB::table('binance_transactions')->where('tran_id', 424242)->count());
+    }
+}

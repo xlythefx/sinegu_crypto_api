@@ -15,6 +15,7 @@ return Application::configure(basePath: dirname(__DIR__))
     ->withMiddleware(function (Middleware $middleware): void {
         $middleware->alias([
             'admin' => \App\Http\Middleware\EnsureAdmin::class,
+            'engine' => \App\Http\Middleware\VerifyEngineSecret::class,
         ]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {

@@ -35,4 +35,10 @@ return [
         ],
     ],
 
+    // Shared secret for the Python trading engine (machine-to-machine /api/engine/*).
+    // The engine sends it as the X-Engine-Secret header; VerifyEngineSecret checks it.
+    'engine' => [
+        'secret' => env('ENGINE_SECRET'),
+    ],
+
 ];
