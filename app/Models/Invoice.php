@@ -20,6 +20,7 @@ class Invoice extends Model
         'deposit_amount', 'adjusted_equity', 'capital_flow', 'performance_equity',
         'hwm_before', 'hwm_after', 'new_realized_profit', 'new_unrealized_profit',
         'fee_realized', 'fee_unrealized', 'total_fee', 'status', 'due_date',
+        'paid_at', 'payment_provider', 'payment_reference', 'paid_amount',
     ];
 
     protected function casts(): array
@@ -27,9 +28,36 @@ class Invoice extends Model
         return [
             'due_date' => 'date',
             'invoice_sent_at' => 'datetime',
+            'paid_at' => 'datetime',
             'created_at' => 'datetime',
             'updated_at' => 'datetime',
         ];
+    }
+
+    /**
+     * The amount to charge, in minor units — the single source of truth every
+     * payment path uses: what we send the provider, what the webhooks verify
+     * against, and what toApiArray() publishes.
+     *
+     * Deliberately not `(int) round((float) $total_fee * 100)`: total_fee is
+     * decimal(20,8) and arrives from PDO as a string, and that expression
+     * returns 1234 for '12.34500000' because the double is 12.34499999….
+     * bcmath keeps it exact (the extension is in the VPS provision list).
+     */
+    public function feeCents(): int
+    {
+        $fee = (string) ($this->total_fee ?? '0');
+        if ($fee === '' || ! is_numeric($fee)) {
+            return 0;
+        }
+
+        // Half-up at the cent, without ever touching binary floating point.
+        $scaled = bcmul($fee, '100', 8);
+        $rounded = bccomp($scaled, '0', 8) >= 0
+            ? bcadd($scaled, '0.5', 0)
+            : bcsub($scaled, '0.5', 0);
+
+        return (int) $rounded;
     }
 
     public function scopeForExchange($query, string $exchange)
@@ -62,7 +90,9 @@ class Invoice extends Model
     {
         $f = fn ($v) => (float) $v;
         $monthYear = (string) $this->month_year;
-        $period = Carbon::createFromFormat('Y-m', $monthYear)->startOfMonth();
+        // '!Y-m' zeroes the unspecified fields; plain 'Y-m' would take the day
+        // from today and overflow a 30-day month on the 31st.
+        $period = Carbon::createFromFormat('!Y-m', $monthYear);
         // Invoiced on the 1st of the month after the billing period.
         $invoiceDate = $period->copy()->addMonthNoOverflow()->startOfMonth();
 
@@ -90,13 +120,18 @@ class Invoice extends Model
             'invoice_date' => $invoiceDate->toDateString(),
             'due_date' => $this->due_date?->toDateString()
                 ?? $invoiceDate->copy()->addDays(7)->toDateString(),
-            'paid_date' => $paid ? $this->updated_at?->toDateString() : null,
+            // paid_at is authoritative; updated_at is the fallback for rows
+            // settled before the payment columns existed.
+            'paid_date' => $paid ? ($this->paid_at ?? $this->updated_at)?->toDateString() : null,
+            'payment_provider' => $this->payment_provider,
             'status' => $paid ? 'paid' : 'pending',
             'is_overdue' => ! $paid
                 && $this->due_date
                 && $this->due_date->isPast()
-                && $f($this->total_fee) > 0,
-            'total_fee' => round($f($this->total_fee), 2),
+                && $this->feeCents() > 0,
+            // Same cents the payment endpoints charge, so the amount the browser
+            // echoes back can never disagree with what we bill.
+            'total_fee' => $this->feeCents() / 100,
             'currency' => 'USD',
             'performance_gain' => $performanceGain,
             'current_balance' => round($f($this->equity_end), 2),

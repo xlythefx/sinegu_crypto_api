@@ -32,6 +32,16 @@ class ExchangeAccountController extends Controller
      */
     public function storeBinance(Request $request): JsonResponse
     {
+        // Only approved accounts may connect an exchange — the engine trades
+        // every non-suspended account, so pending users must not slip a key in.
+        if ($request->user()->status !== 'active') {
+            return response()->json([
+                'success' => false,
+                'error_code' => 'PENDING_APPROVAL',
+                'message' => 'Your account is pending approval. You can connect an exchange once an admin approves you.',
+            ], 403);
+        }
+
         // One Binance account per user — soft-deleted (disconnected) rows don't count.
         $alreadyConnected = BinanceAccount::where('uni_id', $request->user()->uni_id)->exists();
 
@@ -62,6 +72,43 @@ class ExchangeAccountController extends Controller
             // refresh() picks up DB defaults (currency_type, enabled, created_at)
             'account' => $account->refresh(),
         ], 201);
+    }
+
+    /**
+     * PUT /api/exchange/accounts/{id}
+     * Rename one of the user's accounts. The name is a display label only —
+     * the engine keys accounts by id/uni_id and uses the name for logs and
+     * Telegram lines — so a rename never affects trading.
+     */
+    public function update(Request $request, int $id): JsonResponse
+    {
+        $account = BinanceAccount::where('uni_id', $request->user()->uni_id)->find($id);
+
+        if (! $account) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Account not found.',
+            ], 404);
+        }
+
+        $validated = $request->validate([
+            'name' => [
+                'required',
+                'string',
+                'max:128',
+                Rule::unique('binance_accounts', 'name')->ignore($account->id),
+            ],
+        ], [
+            'name.unique' => 'An account with this name already exists.',
+        ]);
+
+        $account->update($validated);
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Account renamed',
+            'account' => $account->refresh(),
+        ]);
     }
 
     /**

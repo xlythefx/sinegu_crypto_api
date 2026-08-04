@@ -26,9 +26,7 @@ use Symfony\Component\HttpFoundation\StreamedResponse;
  */
 class AdminReferralController extends Controller
 {
-    public function __construct(private ReferralService $referrals)
-    {
-    }
+    public function __construct(private ReferralService $referrals) {}
 
     /** GET /api/admin/affiliate/overview — every referrer + nested network + flags. */
     public function overview(): JsonResponse
@@ -224,14 +222,16 @@ class AdminReferralController extends Controller
         $rows = ReferralTracking::where('referrer_uni_id', $uniId)
             ->orderByDesc('created_at')
             ->get();
-        $names = UserCredential::whereIn('uni_id', $rows->pluck('referred_user_uni_id'))
-            ->pluck('name', 'uni_id');
+        $users = UserCredential::whereIn('uni_id', $rows->pluck('referred_user_uni_id'))
+            ->get(['uni_id', 'name', 'email'])
+            ->keyBy('uni_id');
 
         return response()->json([
             'success' => true,
             'referrals' => $rows->map(fn (ReferralTracking $r) => [
                 'referred_user_uni_id' => $r->referred_user_uni_id,
-                'name' => $names[$r->referred_user_uni_id] ?? 'Unknown user',
+                'name' => $users->get($r->referred_user_uni_id)->name ?? 'Unknown user',
+                'email' => $users->get($r->referred_user_uni_id)->email ?? null,
                 'referral_code' => $r->referral_code,
                 'referred_at' => $r->created_at?->toDateTimeString(),
             ])->values(),

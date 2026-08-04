@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Services\UserStatsService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
@@ -9,35 +10,93 @@ use Illuminate\Support\Facades\DB;
 
 class AnalyticsController extends Controller
 {
+    /** Bucket label for closed trades that carry no strategy tag. */
+    private const UNTAGGED = 'Untagged';
+
+    public function __construct(private UserStatsService $stats) {}
+
     /**
      * GET /api/analytics
      * Aggregated performance analytics for the authenticated user,
-     * computed from the binance_* tables (live accounts only).
+     * computed from the binance_* tables (all connected accounts).
      * Per-exchange data is shaped as arrays so mexc / bybit tables
      * can append later without contract changes.
+     *
+     * Query filters — every one of them narrows the closed-trade set that
+     * feeds EVERY metric below, so the page can never mix a filtered headline
+     * with unfiltered detail:
+     *   exchange       all | binance (anything else has no tables yet)
+     *   from, to       inclusive 'YYYY-MM-DD' bounds on the close date
+     *   symbols[]      + symbol_mode   = include | exclude (default exclude)
+     *   strategies[]   + strategy_mode = include | exclude (default exclude)
+     * An empty chip list means "no filter", matching the UI.
      */
     public function index(Request $request): JsonResponse
     {
         $uniId = $request->user()->uni_id;
 
-        $accounts = DB::table('binance_accounts')
-            ->where('uni_id', $uniId)
-            ->whereNull('deleted_at')
-            ->where('demo', 0)
-            ->where('enabled', 1)
-            ->get();
+        $rawExchange = $request->query('exchange', 'all');
+        $exchange = is_string($rawExchange) ? strtolower(trim($rawExchange)) : '';
+        $from = $this->date($request->query('from'));
+        $to = $this->date($request->query('to'));
+        $symbols = $this->chips($request->query('symbols'));
+        $symbolMode = $this->mode($request->query('symbol_mode'));
+        $strategies = $this->chips($request->query('strategies'));
+        $strategyMode = $this->mode($request->query('strategy_mode'));
 
-        $past = DB::table('binance_pastpositions')
-            ->where('uni_id', $uniId)
-            ->orderBy('closed_at')
-            ->get();
+        // Only the binance_* tables exist today. Asking for another exchange
+        // yields an empty dataset rather than silently serving Binance numbers.
+        $supported = $exchange === 'all' || $exchange === 'binance';
 
-        $transactions = DB::table('binance_transactions')
-            ->where('uni_id', $uniId)
-            ->orderBy('created_at')
-            ->get();
+        $accounts = $supported ? $this->stats->displayAccounts($uniId) : collect();
+
+        $everyTrade = $supported
+            ? DB::table('binance_pastpositions')
+                ->where('uni_id', $uniId)
+                ->orderBy('closed_at')
+                ->get()
+            : collect();
+
+        $transactions = $supported
+            ? DB::table('binance_transactions')
+                ->where('uni_id', $uniId)
+                ->orderBy('created_at')
+                ->get()
+            : collect();
+
+        $passesChips = fn ($p) => $this->passes($symbols, $symbolMode, trim((string) $p->symbol))
+            && $this->passes($strategies, $strategyMode, $this->strategyKey($p->strategy));
+
+        // Date-scoped but NOT chip-scoped: this is what the chip lists are built
+        // from, so a chip never vanishes the moment you click it.
+        $inRange = $everyTrade->filter(
+            fn ($p) => $this->withinRange((string) $p->closed_at, $from, $to)
+        );
+
+        // The fully filtered set every metric below is computed from.
+        $past = $inRange->filter($passesChips)->values();
+
+        // Chip-filtered but ALL-TIME — only the Return on Deposit card uses it.
+        $allTimeChipped = $everyTrade->filter($passesChips)->values();
+
+        $availableSymbols = $inRange
+            ->map(fn ($p) => trim((string) $p->symbol))
+            ->filter()
+            ->unique()
+            ->sort()
+            ->values()
+            ->all();
+
+        $availableStrategies = $inRange
+            ->map(fn ($p) => $this->strategyKey($p->strategy))
+            ->unique()
+            ->sort()
+            ->values()
+            ->all();
 
         // ---- Capital & returns ----------------------------------------
+        // Deliberately all-time: committed capital is a lifetime figure, so
+        // narrowing the date range must not shrink the denominator.
         $deposits = (float) $transactions->where('type', 'DEPOSIT')->sum('amount');
         $withdrawals = (float) $transactions->where('type', 'WITHDRAWAL')->sum('amount');
         $baseline = $deposits - $withdrawals;
@@ -45,8 +104,26 @@ class AnalyticsController extends Controller
         $currentCapital = (float) $accounts->sum('balance');
         $totalUnrealized = (float) $accounts->sum('unrealized_pnl');
         $totalRealized = (float) $past->sum('realized_pnl');
-        $totalReturnAbs = $totalRealized + $totalUnrealized;
+
+        // Open positions carry a symbol but no strategy tag, so unrealized P&L
+        // cannot be attributed to a chip selection. Whenever a chip filter is
+        // active the headline drops to the filtered *realized* return instead
+        // of mixing filtered realized with whole-account unrealized.
+        $chipFiltered = $symbols !== [] || $strategies !== [];
+        $totalReturnAbs = $chipFiltered ? $totalRealized : $totalRealized + $totalUnrealized;
         $totalReturnPct = $baseline > 0 ? round($totalReturnAbs / $baseline * 100, 2) : null;
+
+        // ---- Return on deposit ----------------------------------------
+        // Realized P&L measured against money actually paid in: deposits only,
+        // withdrawals ignored. Honors the chip filters but stays all-time —
+        // a deposit is a lifetime concept, so the date range is not applied.
+        $depositRealized = (float) $allTimeChipped->sum('realized_pnl');
+        $returnOnDeposit = [
+            'pct' => $deposits > 0 ? round($depositRealized / $deposits * 100, 2) : null,
+            'realized' => round($depositRealized, 2),
+            'deposits' => round($deposits, 2),
+            'trades' => $allTimeChipped->count(),
+        ];
 
         // ---- Daily realized P&L (ascending by close date) -------------
         $dailyPnl = $past
@@ -178,24 +255,9 @@ class AnalyticsController extends Controller
             : null;
 
         // Streaks: longest runs of consecutive winning / losing days.
-        $bestStreak = 0;
-        $worstStreak = 0;
-        $winRun = 0;
-        $lossRun = 0;
-        foreach ($dailyPnl as $pnl) {
-            if ($pnl > 0) {
-                $winRun++;
-                $lossRun = 0;
-            } elseif ($pnl < 0) {
-                $lossRun++;
-                $winRun = 0;
-            } else {
-                $winRun = 0;
-                $lossRun = 0;
-            }
-            $bestStreak = max($bestStreak, $winRun);
-            $worstStreak = max($worstStreak, $lossRun);
-        }
+        $streaks = $this->stats->dayStreaks($dailyPnl);
+        $bestStreak = $streaks['max_win_streak_days'];
+        $worstStreak = $streaks['max_loss_streak_days'];
 
         // ---- Risk: return-based ratios (daily fractional returns) -----
         // Reuse the same daily P&L series (ascending). Walk an equity
@@ -273,6 +335,14 @@ class AnalyticsController extends Controller
                 'total_realized' => round($totalRealized, 2),
                 'total_return_abs' => round($totalReturnAbs, 2),
                 'total_return_pct' => $totalReturnPct,
+                'return_on_deposit' => $returnOnDeposit,
+                'filters' => [
+                    // True once any chip is picked — the UI relabels the
+                    // headline "Filtered Return" and drops the unrealized note.
+                    'filtered' => $chipFiltered,
+                    'available_symbols' => $availableSymbols,
+                    'available_strategies' => $availableStrategies,
+                ],
                 'trading_days' => $tradingDays,
                 'avg_daily_pnl' => $avgDailyPnl,
                 'best_day' => $bestDay,
@@ -287,5 +357,71 @@ class AnalyticsController extends Controller
                 'risk' => $risk,
             ],
         ]);
+    }
+
+    /* ================= Filter-input parsing ============================
+     * Filters are a view preference, not a command: anything unparseable is
+     * ignored so a malformed query still renders a page instead of a 422.
+     * ==================================================================*/
+
+    /** A 'YYYY-MM-DD' bound, or null when absent / malformed. */
+    private function date(mixed $raw): ?string
+    {
+        $value = is_string($raw) ? trim($raw) : '';
+
+        return preg_match('/^\d{4}-\d{2}-\d{2}$/', $value) === 1 ? $value : null;
+    }
+
+    /** Chips arrive as `symbols[]=A&symbols[]=B`; a bare scalar is tolerated. */
+    private function chips(mixed $raw): array
+    {
+        $values = is_array($raw) ? $raw : (is_string($raw) && $raw !== '' ? [$raw] : []);
+
+        $out = [];
+        foreach ($values as $value) {
+            if (! is_string($value)) {
+                continue;
+            }
+            $value = trim($value);
+            if ($value !== '') {
+                $out[] = $value;
+            }
+        }
+
+        return array_values(array_unique($out));
+    }
+
+    /** Exclude is the default — it is the non-destructive reading of a chip. */
+    private function mode(mixed $raw): string
+    {
+        return $raw === 'include' ? 'include' : 'exclude';
+    }
+
+    /** An empty selection passes everything, matching "no chips = no filter". */
+    private function passes(array $selected, string $mode, string $value): bool
+    {
+        if ($selected === []) {
+            return true;
+        }
+
+        $has = in_array($value, $selected, true);
+
+        return $mode === 'include' ? $has : ! $has;
+    }
+
+    /** Untagged trades still need a chip, or they could never be filtered. */
+    private function strategyKey(?string $raw): string
+    {
+        $key = trim((string) $raw);
+
+        return $key === '' ? self::UNTAGGED : $key;
+    }
+
+    /** Inclusive on both ends, compared on the close DATE only. */
+    private function withinRange(string $closedAt, ?string $from, ?string $to): bool
+    {
+        $day = substr($closedAt, 0, 10);
+
+        return ($from === null || $day >= $from) && ($to === null || $day <= $to);
     }
 }

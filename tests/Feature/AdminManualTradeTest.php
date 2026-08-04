@@ -2,7 +2,8 @@
 
 namespace Tests\Feature;
 
-use Illuminate\Support\Facades\DB;
+use App\Models\UserCredential;
+use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\Http;
 
 /** Admin manual-trade console: recipient list + signed webhook proxy. */
@@ -12,7 +13,7 @@ class AdminManualTradeTest extends EngineTestCase
     {
         parent::setUp();
         config([
-            'services.engine.webhook_secret' => 'engine-hook-secret',
+            'services.engine.webhook_secrets.binance' => 'engine-hook-secret',
             'services.engine.targets.local' => 'http://engine.test:5010',
             'services.engine.targets.prod' => 'http://prod.engine.test:5010',
         ]);
@@ -22,7 +23,7 @@ class AdminManualTradeTest extends EngineTestCase
     private function admin(): array
     {
         $uniId = $this->makeUser(['type' => 'admin']);
-        $user = \App\Models\UserCredential::find($uniId);
+        $user = UserCredential::find($uniId);
 
         return ['Authorization' => 'Bearer '.$user->createToken('spa')->plainTextToken];
     }
@@ -32,7 +33,7 @@ class AdminManualTradeTest extends EngineTestCase
         $this->getJson('/api/admin/manual-trade/targets')->assertStatus(401);
 
         $plainUniId = $this->makeUser();
-        $plain = \App\Models\UserCredential::find($plainUniId);
+        $plain = UserCredential::find($plainUniId);
         $this->getJson('/api/admin/manual-trade/targets', [
             'Authorization' => 'Bearer '.$plain->createToken('spa')->plainTextToken,
         ])->assertStatus(403)->assertJson(['error_code' => 'FORBIDDEN']);
@@ -128,7 +129,7 @@ class AdminManualTradeTest extends EngineTestCase
 
     public function test_missing_webhook_secret_fails_closed(): void
     {
-        config(['services.engine.webhook_secret' => null]);
+        config(['services.engine.webhook_secrets.binance' => null]);
         Http::fake();
 
         $this->postJson('/api/admin/manual-trade/send', [
@@ -164,7 +165,7 @@ class AdminManualTradeTest extends EngineTestCase
 
     public function test_engine_status_handles_unreachable_engine(): void
     {
-        Http::fake(fn () => throw new \Illuminate\Http\Client\ConnectionException('connection refused'));
+        Http::fake(fn () => throw new ConnectionException('connection refused'));
 
         $this->getJson('/api/admin/manual-trade/engine?target=local', $this->admin())
             ->assertOk()

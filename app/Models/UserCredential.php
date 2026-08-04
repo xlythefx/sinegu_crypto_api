@@ -4,6 +4,7 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Foundation\Auth\User as Authenticatable;
+use Illuminate\Support\Facades\Storage;
 use Laravel\Sanctum\HasApiTokens;
 
 class UserCredential extends Authenticatable
@@ -51,6 +52,15 @@ class UserCredential extends Authenticatable
     }
 
     /**
+     * Connected (non-deleted) exchange accounts. SoftDeletes on BinanceAccount
+     * means disconnected accounts drop out automatically.
+     */
+    public function binanceAccounts()
+    {
+        return $this->hasMany(BinanceAccount::class, 'uni_id', 'uni_id');
+    }
+
+    /**
      * The user shape returned by auth/profile endpoints.
      */
     public function toAuthPayload(): array
@@ -64,6 +74,7 @@ class UserCredential extends Authenticatable
             'created_at' => $this->created_at?->toISOString(),
             'user_profile' => $this->imageUrl($this->user_profile),
             'user_banner' => $this->imageUrl($this->user_banner),
+            'has_exchange_account' => $this->binanceAccounts()->exists(),
         ];
     }
 
@@ -80,6 +91,6 @@ class UserCredential extends Authenticatable
             return $path;
         }
 
-        return url(\Illuminate\Support\Facades\Storage::url($path));
+        return url(Storage::url($path));
     }
 }

@@ -6,6 +6,7 @@ use App\Models\BinanceAccount;
 use App\Models\UserCredential;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 
@@ -22,6 +23,14 @@ class SandboxController extends Controller
 
     /** Strategy labels used when randomizing positions (null = unlabeled). */
     private const STRATEGIES = ['Momentum', 'MeanRev', 'Breakout', 'Scalp', null];
+
+    /** Default realized-P&L bounds used by the date-range randomizer. */
+    private const PNL_MIN = -400.0;
+
+    private const PNL_MAX = 700.0;
+
+    /** Hard cap on the rows one date-range insert may produce (~a year). */
+    private const MAX_RANGE_DAYS = 366;
 
     /**
      * GET /api/admin/sandbox/users
@@ -61,7 +70,7 @@ class SandboxController extends Controller
             'email' => ['nullable', 'email', 'unique:user_credentials,email'],
             'password' => ['nullable', 'string', 'min:6'],
             'status' => ['nullable', 'in:pending,active,suspended'],
-            'type' => ['nullable', 'in:user,admin,master'],
+            'type' => ['nullable', 'in:user,admin,master,developer'],
         ]);
 
         $email = $validated['email'] ?? null;
@@ -141,12 +150,23 @@ class SandboxController extends Controller
      * POST /api/admin/sandbox/positions
      * Insert closed positions for a user — either from an explicit position
      * template or randomized — resolving/creating a sandbox account to own them.
+     *
+     * Two modes:
+     *  - count (default): insert `count` rows walking backwards from closed_at.
+     *  - range: insert exactly one row per calendar day between date_from and
+     *    date_to (inclusive), each with a realized P&L randomized inside
+     *    [pnl_min, pnl_max] and an exit price derived to match it.
      */
     public function insertPositions(Request $request): JsonResponse
     {
         $validated = $request->validate([
             'uni_id' => ['required', 'exists:user_credentials,uni_id'],
+            'mode' => ['nullable', 'in:count,range'],
             'count' => ['nullable', 'integer', 'min:1', 'max:200'],
+            'date_from' => ['required_if:mode,range', 'date'],
+            'date_to' => ['required_if:mode,range', 'date', 'after_or_equal:date_from'],
+            'pnl_min' => ['nullable', 'numeric'],
+            'pnl_max' => ['nullable', 'numeric', 'gte:pnl_min'],
             'randomize' => ['nullable', 'boolean'],
             'position' => ['nullable', 'array'],
             'position.symbol' => ['string'],
@@ -161,6 +181,8 @@ class SandboxController extends Controller
         ]);
 
         $uniId = $validated['uni_id'];
+        $mode = $validated['mode'] ?? 'count';
+        $isRange = $mode === 'range';
         $count = $validated['count'] ?? 1;
         $randomize = $validated['randomize'] ?? false;
         $position = $validated['position'] ?? null;
@@ -171,6 +193,29 @@ class SandboxController extends Controller
                 'error_code' => 'POSITION_REQUIRED',
                 'message' => 'A position template is required when randomize is false.',
             ], 422);
+        }
+
+        // Range mode drives the row count off the calendar: one row per day.
+        $rangeStart = null;
+        $pnlMin = (float) ($validated['pnl_min'] ?? self::PNL_MIN);
+        $pnlMax = (float) ($validated['pnl_max'] ?? self::PNL_MAX);
+        if ($pnlMin > $pnlMax) {
+            [$pnlMin, $pnlMax] = [$pnlMax, $pnlMin];
+        }
+
+        if ($isRange) {
+            $rangeStart = Carbon::parse($validated['date_from'])->startOfDay();
+            $rangeEnd = Carbon::parse($validated['date_to'])->startOfDay();
+            // Inclusive day count; rounded so a DST-shifted diff can't drop a day.
+            $count = (int) round($rangeStart->diffInDays($rangeEnd)) + 1;
+
+            if ($count > self::MAX_RANGE_DAYS) {
+                return response()->json([
+                    'success' => false,
+                    'error_code' => 'RANGE_TOO_LONG',
+                    'message' => 'The date range covers '.$count.' days; the maximum is '.self::MAX_RANGE_DAYS.'.',
+                ], 422);
+            }
         }
 
         $user = UserCredential::find($uniId);
@@ -234,11 +279,26 @@ class SandboxController extends Controller
                 $pnl = $position['realized_pnl'];
                 $strategy = $position['strategy'] ?? null;
                 $baseClosed = isset($position['closed_at'])
-                    ? \Illuminate\Support\Carbon::parse($position['closed_at'])
+                    ? Carbon::parse($position['closed_at'])
                     : $now->copy();
                 // Spread rows over time so they don't collide / stack on one day.
                 $closedAt = $baseClosed->copy()->subDays($i);
                 $closeSide = $position['side'] ?? ($side === 'LONG' ? 'SELL' : 'BUY');
+            }
+
+            // Range mode owns the P&L and the timing regardless of where the
+            // instrument came from: one row per day, P&L rolled in-range and
+            // the exit price back-solved so entry/exit/P&L stay coherent.
+            if ($isRange) {
+                $pnl = round(mt_rand((int) round($pnlMin * 100), (int) round($pnlMax * 100)) / 100, 8);
+                $closedAt = $rangeStart->copy()
+                    ->addDays($i)
+                    ->setTime(mt_rand(9, 20), mt_rand(0, 59));
+
+                if ($entry !== null && (float) $amt > 0) {
+                    $move = $pnl / (float) $amt;
+                    $exit = round((float) $entry + ($side === 'LONG' ? $move : -$move), 8);
+                }
             }
 
             $rows[] = [
@@ -263,7 +323,8 @@ class SandboxController extends Controller
 
         return response()->json([
             'success' => true,
-            'inserted' => $count,
+            'inserted' => count($rows),
+            'mode' => $mode,
             'account' => [
                 'api_key' => $acct->api_key,
                 'name' => $acct->name,

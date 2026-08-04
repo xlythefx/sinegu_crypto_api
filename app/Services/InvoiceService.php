@@ -40,7 +40,10 @@ class InvoiceService
         array $rates,
         string $exchange = 'binance'
     ): Invoice {
-        $period = Carbon::createFromFormat('Y-m', $monthYear)->startOfMonth();
+        // '!Y-m', never 'Y-m': without the '!' PHP fills the missing day from
+        // TODAY, so parsing '2026-06' on the 31st overflows to 2026-07-01 and
+        // the invoice would bill the wrong month's trades.
+        $period = Carbon::createFromFormat('!Y-m', $monthYear);
         $monthStart = $period->copy()->startOfMonth();
         $monthEnd = $period->copy()->endOfMonth();
 
@@ -74,30 +77,37 @@ class InvoiceService
         $hwmAfter = $chargeable ? max($hwmBefore, $equityEnd) : $hwmBefore;
         $dueDate = $period->copy()->addMonthNoOverflow()->startOfMonth()->addDays(7);
 
-        return Invoice::updateOrCreate(
-            ['exchange' => $exchange, 'account_id' => $account->id, 'month_year' => $monthYear],
-            [
-                'user_id' => $account->uni_id,
-                'api_key' => $account->api_key,
-                'equity_start' => $hwmBefore,
-                'equity_end' => $equityEnd,
-                'realized_pnl' => $snap['realized'],
-                'unrealized_pnl' => $snap['unrealized'],
-                'deposit_amount' => $snap['adjustedDeposit'],
-                'adjusted_equity' => $equityEnd,
-                'capital_flow' => $snap['capitalFlow'],
-                'performance_equity' => $equityEnd,
-                'hwm_before' => $hwmBefore,
-                'hwm_after' => $hwmAfter,
-                'new_realized_profit' => $newRealizedProfit,
-                'new_unrealized_profit' => $newUnrealizedProfit,
-                'fee_realized' => $feeRealized,
-                'fee_unrealized' => $feeUnrealized,
-                'total_fee' => $totalFee,
-                'status' => $totalFee > 0 ? 'pending' : 'paid',
-                'due_date' => $dueDate->toDateString(),
-            ]
-        );
+        $key = ['exchange' => $exchange, 'account_id' => $account->id, 'month_year' => $monthYear];
+        $existing = Invoice::where($key)->first();
+
+        $attributes = [
+            'user_id' => $account->uni_id,
+            'api_key' => $account->api_key,
+            'equity_start' => $hwmBefore,
+            'equity_end' => $equityEnd,
+            'realized_pnl' => $snap['realized'],
+            'unrealized_pnl' => $snap['unrealized'],
+            'deposit_amount' => $snap['adjustedDeposit'],
+            'adjusted_equity' => $equityEnd,
+            'capital_flow' => $snap['capitalFlow'],
+            'performance_equity' => $equityEnd,
+            'hwm_before' => $hwmBefore,
+            'hwm_after' => $hwmAfter,
+            'new_realized_profit' => $newRealizedProfit,
+            'new_unrealized_profit' => $newUnrealizedProfit,
+            'fee_realized' => $feeRealized,
+            'fee_unrealized' => $feeUnrealized,
+            'total_fee' => $totalFee,
+            'due_date' => $dueDate->toDateString(),
+        ];
+
+        // Regenerating a month refreshes the figures but must never wipe a real
+        // payment — a paid row keeps its status and its provenance.
+        if (! $existing || $existing->status !== 'paid') {
+            $attributes['status'] = $totalFee > 0 ? 'pending' : 'paid';
+        }
+
+        return Invoice::updateOrCreate($key, $attributes);
     }
 
     /**
@@ -133,20 +143,37 @@ class InvoiceService
 
     /**
      * Mark an invoice paid — idempotently. Locks the row, no-ops if already paid,
-     * flips status, and re-enables the owning account. HWM already lives on the
-     * row from generation, so nothing else recomputes.
+     * flips status, records who took the money, and re-enables the owning
+     * account. HWM already lives on the row from generation, so nothing else
+     * recomputes.
      *
+     * Every parameter after the invoice is optional, so the admin manual path
+     * (`settle($invoice, 'manual')`) is unchanged. The lock + already-paid
+     * short-circuit still runs first, so a replayed webhook returns false and
+     * cannot overwrite the provenance: the FIRST successful settlement owns it.
+     *
+     * @param  string       $method     'manual' | 'stripe' | 'coinsbuy'
+     * @param  string|null  $reference  provider handle (cs_… / Coinsbuy deposit id)
+     * @param  float|null   $paid       amount actually received; defaults to total_fee
      * @return bool  true if this call did the settling, false if already settled
      */
-    public function settle(Invoice $invoice, string $method = 'manual'): bool
-    {
-        return DB::transaction(function () use ($invoice) {
+    public function settle(
+        Invoice $invoice,
+        string $method = 'manual',
+        ?string $reference = null,
+        ?float $paid = null
+    ): bool {
+        return DB::transaction(function () use ($invoice, $method, $reference, $paid) {
             $locked = Invoice::whereKey($invoice->getKey())->lockForUpdate()->first();
             if (! $locked || $locked->status === 'paid') {
                 return false;
             }
 
             $locked->status = 'paid';
+            $locked->paid_at = now();
+            $locked->payment_provider = $method;
+            $locked->payment_reference = $reference;
+            $locked->paid_amount = $paid ?? $locked->feeCents() / 100;
             $locked->save();
 
             if ($locked->account_id) {

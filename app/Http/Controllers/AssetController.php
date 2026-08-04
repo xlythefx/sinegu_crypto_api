@@ -22,6 +22,33 @@ class AssetController extends Controller
         ]);
     }
 
+    /**
+     * GET /api/assets — trader-facing catalog (auth, no admin role required).
+     *
+     * Only enabled assets, and deliberately WITHOUT the sizing columns
+     * (base_size / max_increments): traders see what the bot trades, never how
+     * large it trades it.
+     */
+    public function catalog(): JsonResponse
+    {
+        $assets = Asset::where('enabled', true)
+            ->orderBy('ticker')
+            ->get(['asset_id', 'ticker', 'type', 'broker', 'side', 'asset_image'])
+            ->map(fn (Asset $a) => [
+                'asset_id' => $a->asset_id,
+                'ticker' => $a->ticker,
+                'type' => $a->type,
+                'broker' => $a->broker,
+                'side' => $a->side,
+                'asset_image' => $a->asset_image,
+            ]);
+
+        return response()->json([
+            'success' => true,
+            'assets' => $assets,
+        ]);
+    }
+
     /** POST /api/admin/assets */
     public function store(Request $request): JsonResponse
     {

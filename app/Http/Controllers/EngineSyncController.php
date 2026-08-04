@@ -31,6 +31,8 @@ class EngineSyncController extends Controller
             return $guard;
         }
 
+        // Every optional field needs a rule: validate() returns ONLY validated
+        // keys, so an unlisted field would be stripped and stored as NULL.
         $data = $request->validate([
             'accounts' => ['required', 'array'],
             'accounts.*.api_key' => ['required', 'string', 'max:128'],
@@ -39,6 +41,15 @@ class EngineSyncController extends Controller
             'accounts.*.positions.*.symbol' => ['required', 'string', 'max:32'],
             'accounts.*.positions.*.position_side' => ['required', 'string', 'max:16'],
             'accounts.*.positions.*.position_amt' => ['required', 'numeric'],
+            'accounts.*.positions.*.entry_price' => ['nullable', 'numeric'],
+            'accounts.*.positions.*.mark_price' => ['nullable', 'numeric'],
+            'accounts.*.positions.*.unrealized_profit' => ['nullable', 'numeric'],
+            'accounts.*.positions.*.notional' => ['nullable', 'numeric'],
+            'accounts.*.positions.*.initial_margin' => ['nullable', 'numeric'],
+            'accounts.*.positions.*.maint_margin' => ['nullable', 'numeric'],
+            'accounts.*.positions.*.isolated_margin' => ['nullable', 'numeric'],
+            'accounts.*.positions.*.isolated_wallet' => ['nullable', 'numeric'],
+            'accounts.*.positions.*.update_time' => ['nullable', 'integer'],
         ]);
 
         $numeric = [

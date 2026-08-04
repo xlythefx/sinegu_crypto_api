@@ -13,15 +13,16 @@ class AssetSeeder extends Seeder
     public function run(): void
     {
         $assets = [
-            // [ticker, side, max_increments (max position size), base_size, enabled]
-            ['BTCUSDT', 'ALL', 0.500, 0.005, true],
-            ['ETHUSDT', 'ALL', 5.000, 0.050, true],
-            ['SOLUSDT', 'ALL', 100.000, 1.000, true],
-            ['XRPUSDT', 'LONG', 5000.000, 100.000, true],
-            ['BNBUSDT', 'ALL', 20.000, 0.200, true],
-            ['DOGEUSDT', 'LONG', 20000.000, 500.000, true],
-            ['ADAUSDT', 'ALL', 8000.000, 200.000, false],
-            ['LINKUSDT', 'SHORT', 300.000, 5.000, true],
+            // Real asset set from the mother dashboard (all enabled).
+            // NOTE: in the binance_abcd engine, max_increments is a STACK COUNT
+            // (how many base_size entries may stack), not an absolute max size.
+            // BTCUSDT uses the mother's intent: 0.012 max / 0.004 base = 3 stacks.
+            // [ticker, side, max_increments (stacks), base_size, enabled]
+            ['ALGOUSDT', 'ALL', 3.000, 8500.000, true],
+            ['BTCUSDT', 'ALL', 3.000, 0.004, true],
+            ['ETHUSDT', 'ALL', 3.000, 0.050, true],
+            ['FETUSDT', 'ALL', 3.000, 120.000, true],
+            ['LTCUSDT', 'ALL', 3.000, 14.000, true],
         ];
 
         foreach ($assets as [$ticker, $side, $maxIncrements, $baseSize, $enabled]) {

@@ -9,6 +9,7 @@ use App\Models\OpenStrategy;
 use App\Models\TradeLog;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 
 /**
  * Machine-to-machine reads + logging for the Python trading engine.
@@ -52,20 +53,61 @@ class EngineController extends Controller
                 'binance_accounts.enabled',
             ]);
 
+        $netFlow = $this->netTransferFlow($accounts->pluck('api_key')->all());
+
         return response()->json([
             'success' => true,
-            'accounts' => $accounts->map(fn (BinanceAccount $a) => [
-                'api_key' => $a->api_key,
-                'secret_key' => $a->secret_key,
-                'name' => $a->name,
-                'uni_id' => $a->uni_id,
-                'balance' => $a->balance !== null ? (float) $a->balance : null,
-                'initial_deposit' => $a->initial_deposit !== null ? (float) $a->initial_deposit : null,
-                'currency_type' => $a->currency_type,
-                'demo' => (bool) $a->demo,
-                'enabled' => (bool) $a->enabled,
-            ])->values(),
+            'accounts' => $accounts->map(function (BinanceAccount $a) use ($netFlow) {
+                $initial = $a->initial_deposit !== null ? (float) $a->initial_deposit : null;
+
+                return [
+                    'api_key' => $a->api_key,
+                    'secret_key' => $a->secret_key,
+                    'name' => $a->name,
+                    'uni_id' => $a->uni_id,
+                    'balance' => $a->balance !== null ? (float) $a->balance : null,
+                    'initial_deposit' => $initial,
+                    // Capital the account has actually been funded with, net of
+                    // withdrawals — the engine's minimum-deposit gate reads this,
+                    // not initial_deposit (which is a one-shot snapshot that never
+                    // grows, so top-ups would otherwise never count). Same figure
+                    // invoicing bills against (BinancePnlSource::adjustedDeposit).
+                    // null when unknown: the engine fails closed on it.
+                    'total_deposit' => $initial === null
+                        ? null
+                        : round($initial + ($netFlow[$a->api_key] ?? 0.0), 8),
+                    'currency_type' => $a->currency_type,
+                    'demo' => (bool) $a->demo,
+                    'enabled' => (bool) $a->enabled,
+                ];
+            })->values(),
         ]);
+    }
+
+    /**
+     * api_key => (deposits - withdrawals) across binance_transactions.
+     * One grouped query for the whole account set, not one per account.
+     *
+     * @param  list<string>  $apiKeys
+     * @return array<string, float>
+     */
+    private function netTransferFlow(array $apiKeys): array
+    {
+        if (! $apiKeys) {
+            return [];
+        }
+
+        return DB::table('binance_transactions')
+            ->whereIn('api_key', $apiKeys)
+            ->groupBy('api_key')
+            ->selectRaw('api_key')
+            ->selectRaw(
+                "COALESCE(SUM(CASE WHEN type = 'DEPOSIT' THEN amount ".
+                "WHEN type = 'WITHDRAWAL' THEN -amount ELSE 0 END), 0) AS net"
+            )
+            ->pluck('net', 'api_key')
+            ->map(fn ($v) => (float) $v)
+            ->all();
     }
 
     /** GET /api/engine/{exchange}/assets?broker=Binance — enabled tradeable assets. */

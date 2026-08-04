@@ -49,4 +49,87 @@ class EngineAccountsTest extends EngineTestCase
         $this->assertArrayHasKey('initial_deposit', $account);
         $this->assertArrayHasKey('currency_type', $account);
     }
+
+    /** Insert a DEPOSIT/WITHDRAWAL row against an account's api_key. */
+    private function transaction(int $accountId, string $type, float $amount): void
+    {
+        $row = DB::table('binance_accounts')->find($accountId);
+
+        DB::table('binance_transactions')->insert([
+            'api_key' => $row->api_key,
+            'uni_id' => $row->uni_id,
+            'type' => $type,
+            'amount' => $amount,
+            'currency' => 'USDT',
+            'created_at' => now(),
+        ]);
+    }
+
+    /**
+     * total_deposit drives the engine's minimum-deposit gate. It must track
+     * later top-ups and withdrawals — initial_deposit alone never changes once
+     * set, so an account topped up past the minimum would stay blocked forever.
+     */
+    public function test_total_deposit_includes_later_deposits_and_withdrawals(): void
+    {
+        $user = $this->makeUser();
+        $id = $this->makeAccount($user, ['initial_deposit' => 600]);
+        $this->transaction($id, 'DEPOSIT', 700);
+        $this->transaction($id, 'WITHDRAWAL', 100);
+
+        $account = $this->getJson('/api/engine/binance/accounts', $this->engineHeaders())
+            ->assertOk()
+            ->json('accounts.0');
+
+        // 600 + 700 - 100 = 1200 — over the gate, though it started under it.
+        $this->assertSame(1200.0, (float) $account['total_deposit']);
+        $this->assertSame(600.0, (float) $account['initial_deposit']);
+    }
+
+    public function test_total_deposit_equals_initial_deposit_without_transactions(): void
+    {
+        $user = $this->makeUser();
+        $this->makeAccount($user, ['initial_deposit' => 1500]);
+
+        $account = $this->getJson('/api/engine/binance/accounts', $this->engineHeaders())
+            ->assertOk()
+            ->json('accounts.0');
+
+        $this->assertSame(1500.0, (float) $account['total_deposit']);
+    }
+
+    /** Unknown deposit stays null — the engine fails closed on it. */
+    public function test_total_deposit_is_null_when_the_account_has_no_deposit(): void
+    {
+        $user = $this->makeUser();
+        $this->makeAccount($user, ['initial_deposit' => null]);
+
+        $account = $this->getJson('/api/engine/binance/accounts', $this->engineHeaders())
+            ->assertOk()
+            ->json('accounts.0');
+
+        $this->assertNull($account['total_deposit']);
+    }
+
+    /** Transactions must not bleed across accounts. */
+    public function test_total_deposit_is_scoped_per_account(): void
+    {
+        $user = $this->makeUser();
+        $a = $this->makeAccount($user, ['initial_deposit' => 1000]);
+        $this->makeAccount($user, ['initial_deposit' => 1000]);
+        $this->transaction($a, 'DEPOSIT', 5000);
+
+        $accounts = collect(
+            $this->getJson('/api/engine/binance/accounts', $this->engineHeaders())
+                ->assertOk()
+                ->json('accounts')
+        )->keyBy('api_key');
+
+        $aKey = DB::table('binance_accounts')->find($a)->api_key;
+        $this->assertSame(6000.0, (float) $accounts[$aKey]['total_deposit']);
+        $this->assertSame(
+            1000.0,
+            (float) $accounts->first(fn ($x) => $x['api_key'] !== $aKey)['total_deposit']
+        );
+    }
 }

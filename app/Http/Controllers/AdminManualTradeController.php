@@ -13,8 +13,9 @@ use Illuminate\Support\Facades\Http;
  *
  * The webhook secret NEVER reaches the browser: the frontend posts an intent
  * (exchange, action, symbol, recipients, target key) and this controller signs
- * and forwards it to the engine. Admins choose a target *key*, never a URL, so
- * the proxy can only ever reach hosts configured in services.engine.targets.
+ * and forwards it to the engine. The console only ever sees a masked copy for
+ * its payload preview. Admins choose a target *key*, never a URL, so the proxy
+ * can only ever reach hosts configured in services.engine.targets.
  */
 class AdminManualTradeController extends Controller
 {
@@ -29,6 +30,28 @@ class AdminManualTradeController extends Controller
         $url = config("services.engine.targets.{$key}");
 
         return is_string($url) && $url !== '' ? rtrim($url, '/') : null;
+    }
+
+    /** The webhook token for one exchange, e.g. BINANCE_ENGINE_WEBHOOK_SECRET. */
+    private function webhookSecret(string $exchange): string
+    {
+        return (string) config("services.engine.webhook_secrets.{$exchange}");
+    }
+
+    /**
+     * Middle-masked secret for the console's payload preview: enough to eyeball
+     * a mismatch against the engine's .env, useless to anyone who scrapes it.
+     * The full value never leaves the server.
+     */
+    private function maskSecret(string $secret): ?string
+    {
+        if ($secret === '') {
+            return null;
+        }
+
+        return strlen($secret) <= 12
+            ? str_repeat('•', 10)
+            : substr($secret, 0, 6).str_repeat('•', 10).substr($secret, -4);
     }
 
     /**
@@ -81,8 +104,13 @@ class AdminManualTradeController extends Controller
     }
 
     /**
-     * GET /api/admin/manual-trade/engine?target=local — is the engine reachable?
-     * Proxied so the browser never has to talk to the engine host directly.
+     * GET /api/admin/manual-trade/engine?target=local&exchange=binance
+     * Is the engine reachable? Proxied so the browser never has to talk to the
+     * engine host directly.
+     *
+     * Also returns a *masked* webhook secret so the console's payload preview
+     * shows the shape of the real signal. The full token stays server-side —
+     * copy it from CLAUDE.md when setting a TradingView alert up.
      */
     public function engineStatus(Request $request): JsonResponse
     {
@@ -96,12 +124,22 @@ class AdminManualTradeController extends Controller
             ], 400);
         }
 
+        $exchange = (string) $request->query('exchange', 'binance');
+        $masked = isset(self::WEBHOOK_PATHS[$exchange])
+            ? $this->maskSecret($this->webhookSecret($exchange))
+            : null;
+
         try {
             $response = Http::timeout(5)->get("{$base}/health");
         } catch (\Throwable $e) {
             return response()->json([
                 'success' => true,
-                'engine' => ['reachable' => false, 'url' => $base, 'error' => $e->getMessage()],
+                'engine' => [
+                    'reachable' => false,
+                    'url' => $base,
+                    'error' => $e->getMessage(),
+                    'webhook_secret_masked' => $masked,
+                ],
             ]);
         }
 
@@ -111,6 +149,7 @@ class AdminManualTradeController extends Controller
                 'reachable' => $response->successful(),
                 'url' => $base,
                 'health' => $response->successful() ? $response->json() : null,
+                'webhook_secret_masked' => $masked,
             ],
         ]);
     }
@@ -138,12 +177,14 @@ class AdminManualTradeController extends Controller
             'target_uni_ids.*' => ['string', 'max:36'],
         ]);
 
-        $secret = (string) config('services.engine.webhook_secret');
+        $secret = $this->webhookSecret($data['exchange']);
         if ($secret === '') {
+            $envVar = strtoupper($data['exchange']).'_ENGINE_WEBHOOK_SECRET';
+
             return response()->json([
                 'success' => false,
                 'error_code' => 'ENGINE_WEBHOOK_SECRET_MISSING',
-                'message' => 'ENGINE_WEBHOOK_SECRET is not configured on the API.',
+                'message' => "{$envVar} is not configured on the API.",
             ], 503);
         }
 
