@@ -26,7 +26,14 @@ class AnalyticsFiltersTest extends EngineTestCase
         parent::setUp();
 
         $this->uniId = $this->makeUser();
-        $this->makeAccount($this->uniId, ['balance' => 1000, 'unrealized_pnl' => 50]);
+        // api_key pinned to the one trade()/transaction() below write, so the
+        // seeded rows actually belong to this account. Analytics scopes trades
+        // by the user's connected accounts, not by uni_id alone.
+        $this->makeAccount($this->uniId, [
+            'balance' => 1000,
+            'unrealized_pnl' => 50,
+            'api_key' => 'test-api-key',
+        ]);
         Sanctum::actingAs(UserCredential::query()->find($this->uniId));
     }
 

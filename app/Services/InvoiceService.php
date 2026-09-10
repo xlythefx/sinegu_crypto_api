@@ -17,7 +17,10 @@ use Illuminate\Support\Facades\DB;
  */
 class InvoiceService
 {
-    public function __construct(private BinancePnlSource $binance) {}
+    public function __construct(
+        private BinancePnlSource $binance,
+        private EngineCache $engineCache,
+    ) {}
 
     private function sourceFor(string $exchange): PnlSource
     {
@@ -163,7 +166,7 @@ class InvoiceService
         ?string $reference = null,
         ?float $paid = null
     ): bool {
-        return DB::transaction(function () use ($invoice, $method, $reference, $paid) {
+        $settled = DB::transaction(function () use ($invoice, $method, $reference, $paid) {
             $locked = Invoice::whereKey($invoice->getKey())->lockForUpdate()->first();
             if (! $locked || $locked->status === 'paid') {
                 return false;
@@ -182,5 +185,16 @@ class InvoiceService
 
             return true;
         });
+
+        // AFTER the commit, never inside it: the engine reloads the moment it
+        // is told to, and from inside the transaction it would read the
+        // pre-commit rows and cache the account as still disabled — the exact
+        // staleness this is meant to remove. Trading resumes on the next signal
+        // rather than at the next TTL expiry.
+        if ($settled) {
+            $this->engineCache->refreshAccounts();
+        }
+
+        return $settled;
     }
 }

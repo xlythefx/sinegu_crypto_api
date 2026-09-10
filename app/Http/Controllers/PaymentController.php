@@ -3,10 +3,16 @@
 namespace App\Http\Controllers;
 
 use App\Models\Invoice;
+use App\Models\PaymentIntent;
+use App\Models\TronTransfer;
 use App\Services\Payments\CoinsbuyGateway;
 use App\Services\Payments\PaymentEnvironment;
 use App\Services\Payments\PaymentEventRecorder;
 use App\Services\Payments\StripeGateway;
+use App\Services\Payments\TronGateway;
+use App\Services\Payments\TronIntentService;
+use App\Services\Payments\TronUnits;
+use App\Services\Payments\TronWatcher;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use RuntimeException;
@@ -45,6 +51,10 @@ class PaymentController extends Controller
         'STRIPE_ERROR' => 'The Stripe SDK threw while creating the session — see exception.',
         'AMOUNT_MISMATCH' => 'The client sent an amount that no longer matches the invoice row: the invoice was regenerated while a tab was open.',
         'INVOICE_NOT_FOUND' => 'The invoice exists or not, but it is not this uni_id\'s — lookups are scoped to the caller on purpose.',
+        'TRON_NOT_CONFIGURED' => 'This network has no receiving address, no token contract, or no base URL. The diagnostics below say which; set TRON_{NETWORK}_ADDRESS / _USDT_CONTRACT and clear the config cache.',
+        'TRON_BAD_ADDRESS' => 'The configured address is present but FAILED ITS BASE58 CHECKSUM — a typo. It was refused rather than shown, because money sent to a mistyped address is unrecoverable and nothing downstream would notice.',
+        'TRON_AMOUNT_UNAVAILABLE' => 'Another open intent already reserves this exact figure, and the amount fingerprint is off (payments.tron.fingerprint_units = 0), so there is no second figure to offer. It frees itself when that intent expires — see payments.tron.intent_ttl.',
+        'TRON_NETWORK_UNKNOWN' => 'No such entry under payments.tron.networks.',
     ];
 
     public function __construct(
@@ -52,6 +62,8 @@ class PaymentController extends Controller
         private StripeGateway $stripe,
         private CoinsbuyGateway $coinsbuy,
         private PaymentEventRecorder $events,
+        private TronGateway $tron,
+        private TronIntentService $tronIntents,
     ) {}
 
     /**
@@ -92,6 +104,8 @@ class PaymentController extends Controller
                 'default_cryptocurrency' => $coinsbuy['default_crypto'],
                 'cryptocurrencies' => (array) config('payments.coinsbuy.cryptocurrencies', []),
             ],
+            'default_provider' => (string) config('payments.default_provider', 'coinsbuy'),
+            'tron' => $this->tronMethod($testAccount),
         ];
 
         // Developers see the wiring even on a success: which keys are set, where
@@ -101,11 +115,38 @@ class PaymentController extends Controller
             $payload['debug'] = $this->debugEnvelope('PAYMENT_METHODS', [
                 'coinsbuy' => $this->coinsbuy->diagnostics(),
                 'stripe' => $this->stripeDiagnostics(),
+                'tron' => $this->tron->diagnostics($this->env->tronNetworkFor(true)),
                 'frontend_base' => $this->env->frontendBaseUrl(),
             ]);
         }
 
         return response()->json($payload);
+    }
+
+    /**
+     * The TRON entry in GET /payments/methods.
+     *
+     * DELIBERATELY CARRIES NO ADDRESS. It is a public address on a public chain,
+     * so exposing it leaks nothing — but while the rail is hidden behind a role,
+     * "hidden" should mean hidden, and the address is only ever handed out by
+     * the gated create call to someone who is about to pay.
+     *
+     * @return array<string, mixed>
+     */
+    private function tronMethod(bool $isDeveloper): array
+    {
+        $network = $this->env->tronNetworkFor($isDeveloper);
+        $tron = $this->env->tron($network);
+
+        return [
+            'enabled' => $tron['configured'],
+            // Two switches, never one: a rail is made visible to everyone well
+            // before it is made the default for everyone.
+            'visible' => $isDeveloper || $this->env->tronIsPublic(),
+            'network' => $network,
+            'asset' => $tron['asset'],
+            'chain_label' => $tron['label'],
+        ];
     }
 
     /**
@@ -164,7 +205,9 @@ class PaymentController extends Controller
             return $this->fail(
                 $e->getMessage(),
                 'Could not start the card payment. Please try again.',
-                502,
+                // 503 for the same reason as the Coinsbuy path below: an origin
+                // 502 is swapped for Cloudflare's own error page at the edge.
+                503,
                 [
                     'provider' => 'stripe',
                     'exception' => $e->getMessage(),
@@ -253,7 +296,13 @@ class PaymentController extends Controller
                     'Crypto payments are temporarily unavailable. Please try again in a few minutes.',
                     503,
                 ],
-                default => ['Could not start the crypto payment. Please try again.', 502],
+                // 503, never 502/504: Cloudflare REPLACES an origin 502 with its
+                // own "Bad gateway" page, body and all, so the developer `debug`
+                // envelope this endpoint exists to produce never reaches the
+                // browser. That is not hypothetical — a real IP-allow-list 403
+                // was reported to the trader as a Cloudflare origin error, with
+                // the 1.8 KB trace explaining it dropped at the edge.
+                default => ['Could not start the crypto payment. Please try again.', 503],
             };
 
             return $this->fail($code, $message, $status, [
@@ -299,6 +348,274 @@ class PaymentController extends Controller
             'amount' => $amount,
             'currency' => config('payments.coinsbuy.fiat_currency', 'USD'),
         ]);
+    }
+
+    /**
+     * POST /api/payments/tron/intent
+     * Body: { invoice_id: int, amount?: float }
+     *
+     * Reserves an exact USDT-TRC20 figure for this invoice and hands back the
+     * address to send it to. Unlike the two gateway endpoints above, THIS MAKES
+     * NO OUTBOUND CALL — it is a database write against public configuration, so
+     * it cannot fail on transport and there is no TRON_UNREACHABLE at pay time.
+     * Only the scheduled watcher ever touches the network.
+     *
+     * The network is derived here from the caller's role and never read from the
+     * request: a trader who could name their own network would settle a real
+     * invoice with worthless testnet tokens.
+     */
+    public function tronIntent(Request $request): JsonResponse
+    {
+        $data = $request->validate([
+            'invoice_id' => ['required', 'integer'],
+            'amount' => ['nullable', 'numeric'],
+        ]);
+
+        $isDeveloper = $this->applyRoleOverrides($request);
+
+        // 404 rather than 403 while the rail is hidden — indistinguishable from
+        // "no such endpoint", so probing tells a stranger nothing.
+        if (! $isDeveloper && ! $this->env->tronIsPublic()) {
+            return response()->json(['success' => false, 'message' => 'Not found.'], 404);
+        }
+
+        $resolved = $this->resolveInvoice($request, (int) $data['invoice_id'], $data['amount'] ?? null);
+        if ($resolved instanceof JsonResponse) {
+            return $resolved;
+        }
+
+        $network = $this->env->tronNetworkFor($isDeveloper);
+
+        try {
+            $intent = $this->tronIntents->openFor($resolved, $network);
+        } catch (RuntimeException $e) {
+            $code = $e->getMessage();
+
+            // 503 for configuration faults, never 502/504: Cloudflare replaces
+            // an origin 502 body with its own page and the envelope is lost.
+            return $this->fail(
+                $code,
+                $code === 'TRON_AMOUNT_UNAVAILABLE'
+                    ? 'This amount is temporarily reserved. Please try again in a few minutes.'
+                    : 'Direct crypto payments are not available on this server yet.',
+                $code === 'TRON_AMOUNT_UNAVAILABLE' ? 409 : 503,
+                ['provider' => 'tron', 'tron' => $this->tron->diagnostics($network)]
+            );
+        }
+
+        return response()->json($this->tronIntentPayload($intent, $network, $isDeveloper));
+    }
+
+    /**
+     * GET /api/payments/tron/intent/{invoiceId}
+     *
+     * Polled by the pay sheet while it waits for the chain.
+     *
+     * DELIBERATELY DOES NOT USE resolveInvoice(): that guard 409s on an
+     * already-paid invoice, which is precisely the state this endpoint exists to
+     * observe. It answers 200 for a paid invoice and 404 only when the invoice
+     * is not this caller's.
+     */
+    public function tronIntentStatus(Request $request, int $invoiceId): JsonResponse
+    {
+        $isDeveloper = $this->applyRoleOverrides($request);
+
+        $invoice = Invoice::forUser($request->user()->uni_id)->find($invoiceId);
+        if (! $invoice) {
+            return $this->fail('INVOICE_NOT_FOUND', 'Invoice not found.', 404);
+        }
+
+        $network = $this->env->tronNetworkFor($isDeveloper);
+        $tron = $this->env->tron($network);
+
+        $intent = PaymentIntent::forNetwork($network)
+            ->where('invoice_id', $invoice->id)
+            ->orderByDesc('id')
+            ->first();
+
+        $transfer = $intent?->tx_hash !== null
+            ? TronTransfer::where('tx_hash', $intent->tx_hash)->first()
+            : TronTransfer::where('invoice_id', $invoice->id)->orderByDesc('id')->first();
+
+        return response()->json([
+            'success' => true,
+            'invoice_id' => $invoice->id,
+            'invoice_status' => $invoice->isPaid() ? 'paid' : 'pending',
+            'intent' => $intent === null ? null : [
+                'id' => $intent->id,
+                'status' => $intent->status,
+                'network' => $intent->network,
+                'address' => $intent->address,
+                'amount' => TronUnits::format((string) $intent->expected_units, (int) $intent->decimals),
+                'expires_at' => $intent->expires_at?->toIso8601String(),
+                'seconds_remaining' => $this->secondsRemaining($intent),
+            ],
+            'transfer' => $transfer === null ? null : [
+                'tx_hash' => $transfer->tx_hash,
+                'amount' => TronUnits::format((string) $transfer->value_units, (int) $tron['decimals']),
+                'confirmed' => (bool) $transfer->confirmed,
+                'status' => $transfer->status,
+                'seen_at' => $transfer->created_at?->toIso8601String(),
+                'explorer_url' => $tron['explorer_tx'].$transfer->tx_hash,
+            ],
+            // So the sheet can say "the watcher is not running" instead of
+            // spinning forever. Scheduling the poller made cron load-bearing for
+            // money; this is how that failure becomes visible.
+            'last_scan_at' => TronGateway::lastScanAt($network)?->toIso8601String(),
+            'scan_stale' => TronGateway::scanIsStale($network),
+        ]);
+    }
+
+    /**
+     * POST /api/payments/tron/intent/{invoiceId}/simulate
+     *
+     * Settle an intent as if the money had arrived — the developer test button,
+     * so rehearsing the flow does not need a real testnet transfer every time.
+     *
+     * THIS FORGES A PAYMENT, so it is gated twice over, and both gates must be
+     * kept:
+     *   1. the `developer` middleware on the route (role === 'developer'
+     *      exactly, not satisfied by admin or master), and
+     *   2. tronIsSimulatable(), which refuses whichever network
+     *      `default_network.production` names — defined against the network
+     *      that carries real money rather than by hardcoded name, so renaming a
+     *      network in config cannot open the door.
+     *
+     * It settles through the SAME TronWatcher::attribute() as a real payment,
+     * so there is one settlement path rather than a second one that could drift.
+     * The synthetic transfer is permanently marked: a `SIM-` transaction hash
+     * (which becomes the invoice's payment_reference), `settled_by =
+     * simulated:{uni_id}`, and a note on the row. A simulated payment can never
+     * be mistaken for a real one in the ledger.
+     */
+    public function tronSimulate(Request $request, int $invoiceId, TronWatcher $watcher): JsonResponse
+    {
+        $isDeveloper = $this->applyRoleOverrides($request);
+
+        $invoice = Invoice::forUser($request->user()->uni_id)->find($invoiceId);
+        if (! $invoice) {
+            return $this->fail('INVOICE_NOT_FOUND', 'Invoice not found.', 404);
+        }
+        if ($invoice->isPaid()) {
+            return $this->fail('INVOICE_ALREADY_PAID', 'This invoice has already been paid.', 409);
+        }
+
+        $network = $this->env->tronNetworkFor($isDeveloper);
+
+        if (! $this->env->tronIsSimulatable($network)) {
+            return $this->fail(
+                'TRON_SIMULATION_REFUSED',
+                'Payments can only be simulated on a test network.',
+                422,
+                ['network' => $network]
+            );
+        }
+
+        $intent = PaymentIntent::forNetwork($network)
+            ->open()
+            ->where('invoice_id', $invoice->id)
+            ->orderByDesc('id')
+            ->first();
+
+        if (! $intent) {
+            return $this->fail(
+                'TRON_NO_OPEN_INTENT',
+                'Show the payment address first, then simulate.',
+                422
+            );
+        }
+
+        $transfer = TronTransfer::create([
+            'network' => $intent->network,
+            'event_key' => hash('sha256', 'sim|'.$intent->id.'|'.microtime(true)),
+            'tx_hash' => 'SIM-'.bin2hex(random_bytes(12)),
+            'contract_address' => $intent->contract_address,
+            'token_symbol' => $intent->asset,
+            'token_decimals' => $intent->decimals,
+            // Not an address on purpose — nothing sent this, and it must never
+            // read as though a real wallet did.
+            'from_address' => 'SIMULATED',
+            'to_address' => $intent->address,
+            'value_raw' => (string) $intent->expected_units,
+            'value_units' => (string) $intent->expected_units,
+            'block_timestamp' => now()->getTimestampMs(),
+            'confirmed' => true,
+            'status' => TronTransfer::STATUS_UNMATCHED,
+            'note' => 'Simulated by a developer account. No funds moved.',
+        ]);
+
+        $by = 'simulated:'.$request->user()->uni_id;
+        $this->tronIntents->claim($intent, $transfer->tx_hash, (string) $intent->expected_units);
+        $watcher->attribute($transfer, $invoice, $intent, $by);
+
+        return response()->json([
+            'success' => true,
+            'simulated' => true,
+            'invoice_id' => $invoice->id,
+            'network' => $network,
+            'tx_hash' => $transfer->tx_hash,
+            'amount' => TronUnits::format((string) $intent->expected_units, (int) $intent->decimals),
+            'message' => 'Invoice settled with a simulated payment. No funds moved.',
+        ]);
+    }
+
+    /** @return array<string, mixed> */
+    private function tronIntentPayload(PaymentIntent $intent, string $network, bool $isDeveloper): array
+    {
+        $tron = $this->env->tron($network);
+        $decimals = (int) $intent->decimals;
+
+        $payload = [
+            'success' => true,
+            'provider' => 'tron',
+            'network' => $network,
+            'test_account' => $isDeveloper,
+            'reused' => $intent->reused,
+            'intent_id' => $intent->id,
+            'invoice_id' => $intent->invoice_id,
+            'asset' => $intent->asset,
+            'chain_label' => $tron['label'],
+            'address' => $intent->address,
+            'contract_address' => $intent->contract_address,
+            'decimals' => $decimals,
+            // The exact figure to send, at full precision — the amount displayed
+            // IS the amount matched, so a trimmed one would invite rounding.
+            'amount' => TronUnits::format((string) $intent->expected_units, $decimals),
+            'amount_units' => (string) $intent->expected_units,
+            'usd_amount' => (float) $intent->expected_usd,
+            'currency' => 'USD',
+            'tolerance' => [
+                'shortfall_usd' => round(TronUnits::toUsd((string) $intent->shortfall_units, $decimals), 2),
+                'overpay_usd' => round(TronUnits::toUsd((string) $intent->overpay_units, $decimals), 2),
+            ],
+            'expires_at' => $intent->expires_at?->toIso8601String(),
+            'seconds_remaining' => $this->secondsRemaining($intent),
+            'status' => $intent->status,
+            'explorer_url' => $tron['explorer_address'].$intent->address,
+            // Whether the dev test button may appear. The server decides, and
+            // enforces it again on the endpoint — the button never gets to vote.
+            'simulatable' => $isDeveloper && $this->env->tronIsSimulatable($network),
+        ];
+
+        if ($isDeveloper) {
+            $payload['debug'] = $this->debugEnvelope('TRON_INTENT', [
+                'tron' => $this->tron->diagnostics($network),
+                'expected_units' => (string) $intent->expected_units,
+                'accepted_band' => [$intent->floorUnits(), $intent->ceilingUnits()],
+                'fingerprint_units' => (int) config('payments.tron.fingerprint_units', 0),
+            ]);
+        }
+
+        return $payload;
+    }
+
+    private function secondsRemaining(PaymentIntent $intent): int
+    {
+        if ($intent->expires_at === null) {
+            return 0;
+        }
+
+        return max(0, now()->diffInSeconds($intent->expires_at, false));
     }
 
     /**

@@ -2,9 +2,9 @@
 
 namespace App\Http\Controllers;
 
+use App\Services\EngineCache;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\Artisan;
-use Illuminate\Support\Facades\Http;
 
 /**
  * Admin maintenance actions — currently the cache flush behind the
@@ -20,6 +20,8 @@ use Illuminate\Support\Facades\Http;
  */
 class AdminMaintenanceController extends Controller
 {
+    public function __construct(private EngineCache $engineCache) {}
+
     public function clearCaches(): JsonResponse
     {
         $cleared = [];
@@ -41,39 +43,10 @@ class AdminMaintenanceController extends Controller
             'success' => $failed === [],
             'cleared' => $cleared,
             'failed' => $failed,
-            'engine' => $this->refreshEngineCaches(),
+            // The manual catch-all. Every write that changes what the engine
+            // trades now invalidates on its own (see EngineCache), so this
+            // button is a backstop, not the mechanism.
+            'engine' => $this->engineCache->refreshAll(),
         ]);
-    }
-
-    /**
-     * Ask the trading engine to drop its cached account + asset lists so a
-     * change made in admin is picked up now instead of at the next TTL expiry.
-     */
-    private function refreshEngineCaches(): array
-    {
-        $base = rtrim((string) config('services.engine.targets.local', 'http://127.0.0.1:5010'), '/');
-        $secret = (string) (config('services.engine.webhook_secrets.binance') ?? '');
-        if ($secret === '') {
-            return ['refreshed' => [], 'error' => 'No engine webhook secret configured.'];
-        }
-
-        $refreshed = [];
-        foreach (['refresh-accounts', 'refresh-assets'] as $path) {
-            try {
-                $response = Http::withHeaders(['X-Admin-Secret' => $secret])
-                    ->timeout(8)
-                    ->post("{$base}/admin/{$path}");
-                if ($response->successful()) {
-                    $refreshed[] = $path;
-                }
-            } catch (\Throwable) {
-                // engine down / unreachable — reported by the empty list
-            }
-        }
-
-        return [
-            'refreshed' => $refreshed,
-            'error' => $refreshed === [] ? 'Engine did not respond.' : null,
-        ];
     }
 }

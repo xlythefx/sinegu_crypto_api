@@ -5,8 +5,10 @@ namespace App\Http\Controllers;
 use App\Models\BinanceAccount;
 use App\Models\UserCredential;
 use App\Services\UserStatsService;
+use Illuminate\Database\QueryException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 
 /**
@@ -125,7 +127,8 @@ class AdminController extends Controller
             ->get([
                 't.id', 'a.id as account_id', 'a.name as account_name',
                 'a.balance as account_balance', 't.symbol', 't.exit_price',
-                't.realized_pnl', 't.side', 't.strategy', 't.closed_at', 't.position_amt',
+                't.realized_pnl', 't.exchange_fee', 't.side', 't.strategy',
+                't.closed_at', 't.position_amt',
             ]);
 
         return response()->json([
@@ -149,7 +152,10 @@ class AdminController extends Controller
                 'account_balance' => round((float) ($t->account_balance ?? 0), 2),
                 'symbol' => $t->symbol,
                 'price' => round((float) ($t->exit_price ?? 0), 8),
+                // Net of the exchange's commission, which rides along beside it
+                // — see App\Services\Pnl\TradingFee.
                 'realized_pnl' => round((float) ($t->realized_pnl ?? 0), 2),
+                'exchange_fee' => $t->exchange_fee === null ? null : round((float) $t->exchange_fee, 2),
                 'side' => $t->side,
                 'strategy' => $t->strategy,
                 'closed_at' => $t->closed_at,
@@ -185,6 +191,116 @@ class AdminController extends Controller
             'success' => $deleted > 0,
             'message' => $deleted > 0 ? 'Trade deleted.' : 'Trade not found.',
         ], $deleted > 0 ? 200 : 404);
+    }
+
+    /**
+     * PUT /api/admin/positions/{id}
+     * Correct a single OPEN position row.
+     *
+     * `api_key` / `uni_id` are deliberately not editable here: they are what
+     * joins a row to an account and, through it, to that account's invoices
+     * and published track record. Re-owning a row would silently rewrite
+     * someone's billed P&L, so a mis-owned row is deleted and re-synced, never
+     * moved.
+     *
+     * An edit here is a DISPLAY correction only: the positions poller does a
+     * full replace per api_key, so the account's next successful sync
+     * overwrites whatever is written — it never reaches Binance.
+     */
+    public function updatePosition(Request $request, int $id): JsonResponse
+    {
+        if (! DB::table('binance_positions')->where('id', $id)->exists()) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Position not found.',
+            ], 404);
+        }
+
+        $data = $request->validate([
+            'symbol' => ['sometimes', 'string', 'max:32'],
+            'position_side' => ['sometimes', 'string', 'in:BOTH,LONG,SHORT'],
+            'position_amt' => ['sometimes', 'numeric'],
+            'mark_price' => ['sometimes', 'nullable', 'numeric'],
+            'unrealized_profit' => ['sometimes', 'nullable', 'numeric'],
+        ]);
+
+        if ($data === []) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Nothing to update.',
+            ], 422);
+        }
+
+        if (isset($data['symbol'])) {
+            $data['symbol'] = strtoupper(trim($data['symbol']));
+        }
+
+        DB::table('binance_positions')->where('id', $id)->update($data);
+
+        return response()->json(['success' => true, 'message' => 'Position updated.']);
+    }
+
+    /**
+     * PUT /api/admin/past-positions/{id}
+     * Correct a single CLOSED trade row.
+     *
+     * Same ownership rule as updatePosition(). Unlike an open position this
+     * edit is permanent — nothing re-syncs it — and `realized_pnl` /
+     * `closed_at` are read by invoicing (BinancePnlSource) and by the public
+     * track record, so a correction here changes what a customer is billed and
+     * what the landing page publishes.
+     */
+    public function updatePastPosition(Request $request, int $id): JsonResponse
+    {
+        if (! DB::table('binance_pastpositions')->where('id', $id)->exists()) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Trade not found.',
+            ], 404);
+        }
+
+        $data = $request->validate([
+            'symbol' => ['sometimes', 'string', 'max:32'],
+            'side' => ['sometimes', 'string', 'in:BUY,SELL'],
+            'position_amt' => ['sometimes', 'numeric'],
+            'exit_price' => ['sometimes', 'nullable', 'numeric'],
+            'realized_pnl' => ['sometimes', 'nullable', 'numeric'],
+            'strategy' => ['sometimes', 'nullable', 'string', 'max:100'],
+            'closed_at' => ['sometimes', 'date'],
+        ]);
+
+        if ($data === []) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Nothing to update.',
+            ], 422);
+        }
+
+        if (isset($data['symbol'])) {
+            $data['symbol'] = strtoupper(trim($data['symbol']));
+        }
+        if (isset($data['closed_at'])) {
+            $data['closed_at'] = Carbon::parse($data['closed_at'])->format('Y-m-d H:i:s');
+        }
+        if (array_key_exists('strategy', $data) && $data['strategy'] !== null) {
+            $data['strategy'] = trim($data['strategy']) ?: null;
+        }
+
+        try {
+            DB::table('binance_pastpositions')->where('id', $id)->update($data);
+        } catch (QueryException $e) {
+            // uq_binance_pastpositions_api_symbol_order — retyping the symbol can
+            // collide with another close of the same Binance order.
+            if ($e->getCode() === '23000') {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'That account already has a trade with this symbol and order id.',
+                ], 409);
+            }
+            throw $e;
+        }
+
+        return response()->json(['success' => true, 'message' => 'Trade updated.']);
     }
 
     /**

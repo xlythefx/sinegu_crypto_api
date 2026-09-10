@@ -2,8 +2,11 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\BinanceAccount;
+use App\Services\EngineCache;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Process;
 
@@ -69,6 +72,108 @@ class AdminEngineController extends Controller
         } catch (\Throwable) {
             return null;
         }
+    }
+
+    /**
+     * GET /api/admin/engine/key-issues
+     *
+     * Accounts the exchange is currently refusing, newest fault first, with
+     * whose they are and how long they have left before the automatic
+     * disconnect. Support's view of a failure that is otherwise invisible:
+     * the trader sees "connected", the balance freezes, and no trades arrive.
+     *
+     * Reads columns the engine writes — it never touches Binance itself, so
+     * opening this page costs nothing at the exchange.
+     */
+    public function keyIssues(): JsonResponse
+    {
+        $blocked = BinanceAccount::query()
+            ->leftJoin('user_credentials', 'user_credentials.uni_id', '=', 'binance_accounts.uni_id')
+            ->where('binance_accounts.key_status', BinanceAccount::KEY_BLOCKED)
+            ->orderByDesc('binance_accounts.key_blocked_at')
+            ->get([
+                'binance_accounts.id',
+                'binance_accounts.name',
+                'binance_accounts.uni_id',
+                'binance_accounts.api_key',
+                'binance_accounts.demo',
+                'binance_accounts.enabled',
+                'binance_accounts.balance',
+                'binance_accounts.key_error_code',
+                'binance_accounts.key_error_reason',
+                'binance_accounts.key_error_message',
+                'binance_accounts.key_blocked_at',
+                'binance_accounts.key_checked_at',
+                'user_credentials.name as owner_name',
+                'user_credentials.email as owner_email',
+                'user_credentials.status as owner_status',
+            ]);
+
+        return response()->json([
+            'success' => true,
+            'grace_days' => BinanceAccount::KEY_GRACE_DAYS,
+            'server_ip' => config('services.engine.public_ip'),
+            'accounts' => $blocked->map(function ($a) {
+                $blockedAt = $a->key_blocked_at ? Carbon::parse($a->key_blocked_at) : null;
+                $graceEnds = $blockedAt?->copy()->addDays(BinanceAccount::KEY_GRACE_DAYS);
+
+                return [
+                    'id' => $a->id,
+                    'name' => $a->name,
+                    'uni_id' => $a->uni_id,
+                    // Enough to identify the key in the Binance UI, never the
+                    // whole credential — this is a support screen, not a vault.
+                    'api_key_hint' => substr((string) $a->api_key, 0, 6).'…'
+                        .substr((string) $a->api_key, -4),
+                    'owner_name' => $a->owner_name,
+                    'owner_email' => $a->owner_email,
+                    'owner_status' => $a->owner_status,
+                    'demo' => (bool) $a->demo,
+                    'enabled' => (bool) $a->enabled,
+                    'balance' => $a->balance !== null ? (float) $a->balance : null,
+                    'error_code' => $a->key_error_code,
+                    'error_reason' => $a->key_error_reason,
+                    'error_message' => $a->key_error_message,
+                    'blocked_at' => $blockedAt?->toIso8601String(),
+                    'checked_at' => $a->key_checked_at
+                        ? Carbon::parse($a->key_checked_at)->toIso8601String()
+                        : null,
+                    'grace_ends_at' => $graceEnds?->toIso8601String(),
+                    // Negative means the daily sweep simply has not run yet.
+                    'days_left' => $graceEnds ? (int) ceil(now()->floatDiffInDays($graceEnds, false)) : null,
+                ];
+            })->values(),
+        ]);
+    }
+
+    /**
+     * POST /api/admin/engine/key-issues/{id}/recheck
+     *
+     * Re-test one account against the exchange from here, instead of waiting
+     * for a poller tick or asking the trader to press their own button. The
+     * engine's verdict lands on the row, so a fixed allow-list clears the flag
+     * immediately.
+     */
+    public function recheckKey(int $id, EngineCache $engineCache): JsonResponse
+    {
+        $account = BinanceAccount::find($id);
+        if (! $account) {
+            return response()->json(['success' => false, 'message' => 'Account not found.'], 404);
+        }
+
+        $reached = $engineCache->syncBalances([$account->api_key]);
+        $account->refresh();
+
+        return response()->json([
+            'success' => $reached,
+            'status' => $account->key_status,
+            'cleared' => ! $account->keyIsBlocked(),
+            'message' => $reached
+                ? ($account->keyIsBlocked()
+                    ? 'Still refused by the exchange.'
+                    : 'Key works again — the account is trading.')
+                : 'Could not reach the engine.',
+        ], $reached ? 200 : 503);
     }
 
     public function status(): JsonResponse

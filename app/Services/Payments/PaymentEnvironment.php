@@ -284,4 +284,129 @@ class PaymentEnvironment
             'downgraded' => $downgraded,
         ];
     }
+
+    // ---- TRON ------------------------------------------------------------
+
+    /**
+     * TRON settings for ONE named network.
+     *
+     * DELIBERATELY UNLIKE stripe() AND coinsbuy(), which take no argument and
+     * answer for the machine. Those rails have one credential set per box, so
+     * "which keys does this machine use" is a complete question. TRON has no
+     * credentials at all — the "credential" is a public address on a public
+     * chain — and the component that detects payments is a scheduled command
+     * with no request and no user which must be able to scan EVERY configured
+     * network from one process. So the network is an explicit argument, and
+     * this method never consults $this->forcedSandbox: it must behave
+     * identically under HTTP and under `php artisan`.
+     *
+     * The role-aware question ("which network does THIS caller get?") is asked
+     * exactly once, in tronNetworkFor(), and its answer is written onto the
+     * intent row so the watcher never has to ask it at all.
+     *
+     * @return array{network: string, base_url: string, api_key: string, address: string,
+     *   contract: string, asset: string, decimals: int, label: string,
+     *   explorer_tx: string, explorer_address: string,
+     *   configured: bool, address_valid: bool, contract_valid: bool}
+     */
+    public function tron(string $network): array
+    {
+        $conf = (array) config("payments.tron.networks.{$network}", []);
+
+        $address = (string) ($conf['address'] ?? '');
+        $contract = (string) ($conf['contract'] ?? '');
+        $baseUrl = rtrim((string) ($conf['base_url'] ?? ''), '/');
+
+        // Checksums, not patterns — a mutated character in either of these
+        // sends money somewhere unrecoverable, silently. See TronAddress.
+        $addressValid = TronAddress::isValid($address);
+        $contractValid = TronAddress::isValid($contract);
+
+        return [
+            'network' => $network,
+            'base_url' => $baseUrl,
+            'api_key' => (string) ($conf['api_key'] ?? ''),
+            'address' => $address,
+            'contract' => $contract,
+            'asset' => (string) ($conf['asset'] ?? 'USDT'),
+            'decimals' => (int) ($conf['decimals'] ?? 6),
+            'label' => (string) ($conf['label'] ?? 'TRC-20 (TRON)'),
+            'explorer_tx' => (string) ($conf['explorer_tx'] ?? ''),
+            'explorer_address' => (string) ($conf['explorer_address'] ?? ''),
+            'configured' => $baseUrl !== '' && $addressValid && $contractValid,
+            'address_valid' => $addressValid,
+            'contract_valid' => $contractValid,
+        ];
+    }
+
+    /**
+     * Which network this caller's intent belongs on — the only role-aware call
+     * in the whole TRON path.
+     *
+     * Developers get the test network on EVERY machine, production included:
+     * the counterpart of forceSandbox() pinning them to sandbox provider keys,
+     * and what makes the rail exercisable end to end on the live box with no
+     * money moving. Everyone else is gated on the machine verdict rather than a
+     * single flat default, so a non-developer on a dev box is never handed the
+     * real mainnet receiving address.
+     */
+    public function tronNetworkFor(bool $isDeveloper): string
+    {
+        if ($isDeveloper) {
+            return (string) config('payments.tron.developer_network', 'nile');
+        }
+
+        return (string) config(
+            "payments.tron.default_network.{$this->name()}",
+            self::SANDBOX
+        );
+    }
+
+    /**
+     * Every network worth scanning — the watcher's input. A network with no
+     * base URL, no receiving address or a checksum-invalid one is skipped
+     * rather than polled into the void.
+     *
+     * Note that this returns Nile on the production box too. Watching a test
+     * network costs one HTTP call a minute and is exactly what lets a developer
+     * rehearse on prod.
+     *
+     * @return list<string>
+     */
+    public function tronNetworks(): array
+    {
+        $names = array_keys((array) config('payments.tron.networks', []));
+
+        return array_values(array_filter(
+            $names,
+            fn ($network) => $this->tron((string) $network)['configured']
+        ));
+    }
+
+    /** Is the TRON rail offered to non-developers yet? */
+    public function tronIsPublic(): bool
+    {
+        return (bool) config('payments.tron.public', false);
+    }
+
+    /**
+     * May a payment on this network be SIMULATED — settled by a developer
+     * without any money moving?
+     *
+     * The rule is defined against the network that carries real money rather
+     * than by name, so renaming a network in config cannot open the door: if
+     * `default_network.production` points at it, it is never simulatable, on any
+     * box, for any role. Combined with the `developer` middleware on the route,
+     * forging revenue takes two independent failures rather than one.
+     *
+     * Note this is deliberately NOT "are we on a dev machine" — a developer
+     * rehearsing on the production box is the whole point of the role, and they
+     * are on the test network there too.
+     */
+    public function tronIsSimulatable(string $network): bool
+    {
+        $live = (string) config('payments.tron.default_network.'.self::PRODUCTION, 'mainnet');
+
+        return $network !== '' && $network !== $live;
+    }
 }

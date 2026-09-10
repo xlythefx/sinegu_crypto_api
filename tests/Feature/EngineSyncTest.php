@@ -112,7 +112,55 @@ class EngineSyncTest extends EngineTestCase
             ->where('api_key', 'key-a')->where('order_id', 987654)->get();
         $this->assertCount(1, $stored);
         $this->assertSame('VWMA-Reversion', $stored[0]->strategy);
-        $this->assertSame(120.5, (float) $stored[0]->realized_pnl);
+
+        // The engine posted GROSS 120.5; the row holds it net of the round-trip
+        // commission on 0.5 @ 61000 (0.05% a side = 30.5), which is the figure
+        // Binance's own Position History shows for the same trade.
+        $this->assertSame(30.5, (float) $stored[0]->exchange_fee);
+        $this->assertSame(90.0, (float) $stored[0]->realized_pnl);
+    }
+
+    public function test_past_positions_net_the_fee_once_even_when_backfilled(): void
+    {
+        $headers = $this->engineHeaders();
+        $base = [
+            'api_key' => 'key-a',
+            'uni_id' => 'uni-key-a',
+            'symbol' => 'ETHUSDT',
+            'position_side' => 'LONG',
+            'position_amt' => 2,
+            'entry_price' => null,
+            'side' => 'SELL',
+            'order_id' => 424242,
+            'closed_at' => '2026-07-29 11:00:00',
+        ];
+
+        // The live close path writes the row before Binance has indexed its
+        // fills: no exit price, so no P&L and no fee to estimate yet.
+        $this->postJson('/api/engine/binance/past-positions/sync', [
+            'rows' => [$base + ['exit_price' => null, 'realized_pnl' => null]],
+        ], $headers)->assertOk()->assertJson(['inserted' => 1]);
+
+        $row = DB::table('binance_pastpositions')->where('order_id', 424242)->first();
+        $this->assertNull($row->realized_pnl);
+        $this->assertNull($row->exchange_fee);
+
+        // The poller backfills both — and the fill is netted exactly like an insert.
+        $this->postJson('/api/engine/binance/past-positions/sync', [
+            'rows' => [$base + ['exit_price' => 3000, 'realized_pnl' => 400]],
+        ], $headers)->assertOk()->assertJson(['updated' => 1]);
+
+        $row = DB::table('binance_pastpositions')->where('order_id', 424242)->first();
+        $this->assertSame(6.0, (float) $row->exchange_fee);   // 2 * 3000 * 0.0005 * 2
+        $this->assertSame(394.0, (float) $row->realized_pnl);
+
+        // A repeat of the same sync must not deduct the fee a second time.
+        $this->postJson('/api/engine/binance/past-positions/sync', [
+            'rows' => [$base + ['exit_price' => 3000, 'realized_pnl' => 400]],
+        ], $headers)->assertOk()->assertJson(['skipped' => 1]);
+
+        $row = DB::table('binance_pastpositions')->where('order_id', 424242)->first();
+        $this->assertSame(394.0, (float) $row->realized_pnl);
     }
 
     public function test_balances_update_guards_initial_deposit(): void

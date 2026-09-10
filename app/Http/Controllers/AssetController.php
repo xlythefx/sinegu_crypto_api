@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\Asset;
+use App\Services\EngineCache;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
@@ -10,9 +11,17 @@ use Illuminate\Validation\Rule;
 
 /**
  * Trading assets catalog — admin-managed (routes behind the 'admin' middleware).
+ *
+ * Every write here changes how the engine sizes trades (base_size,
+ * max_increments), which direction it may take (side), or whether the ticker
+ * trades at all (enabled) — so each one invalidates the engine's asset cache.
+ * A saved base_size applies to the next signal; the engine is never restarted
+ * for a config change.
  */
 class AssetController extends Controller
 {
+    public function __construct(private EngineCache $engineCache) {}
+
     /** GET /api/admin/assets */
     public function index(): JsonResponse
     {
@@ -59,6 +68,7 @@ class AssetController extends Controller
         }
 
         $asset = Asset::create($validated);
+        $this->engineCache->refreshAssets();
 
         return response()->json([
             'success' => true,
@@ -87,6 +97,7 @@ class AssetController extends Controller
         }
 
         $asset->update($validated);
+        $this->engineCache->refreshAssets();
 
         return response()->json([
             'success' => true,
@@ -109,6 +120,7 @@ class AssetController extends Controller
     {
         $ticker = $asset->ticker;
         $asset->delete();
+        $this->engineCache->refreshAssets();
 
         return response()->json([
             'success' => true,

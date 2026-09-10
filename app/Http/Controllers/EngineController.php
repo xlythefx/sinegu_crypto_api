@@ -28,6 +28,13 @@ class EngineController extends Controller
      * did not stop their bot trading). Deliberately includes secret_key — the
      * engine needs it to sign Binance requests; BinanceAccount::$hidden still
      * protects every user-facing endpoint.
+     *
+     * An account whose key the exchange refuses is deliberately still LISTED,
+     * carrying `key_blocked: true`. The engine skips it in the trade fan-out
+     * but keeps polling it, and that poll is the only thing that can discover
+     * the key works again. Filtering it out here instead would freeze it as
+     * broken forever and then disconnect it at the 3-day deadline even though
+     * the user had already fixed their whitelist.
      */
     public function accounts(string $exchange): JsonResponse
     {
@@ -51,6 +58,7 @@ class EngineController extends Controller
                 'binance_accounts.currency_type',
                 'binance_accounts.demo',
                 'binance_accounts.enabled',
+                'binance_accounts.key_status',
             ]);
 
         $netFlow = $this->netTransferFlow($accounts->pluck('api_key')->all());
@@ -79,6 +87,8 @@ class EngineController extends Controller
                     'currency_type' => $a->currency_type,
                     'demo' => (bool) $a->demo,
                     'enabled' => (bool) $a->enabled,
+                    // Skip in the fan-out, keep polling — see the docblock.
+                    'key_blocked' => $a->keyIsBlocked(),
                 ];
             })->values(),
         ]);

@@ -146,4 +146,89 @@ class PaymentEnvironmentTest extends TestCase
         $this->assertSame('https://tunnel.test/api/payments/coinsbuy/webhook', $env->coinsbuyCallbackUrl());
         $this->assertSame('https://tunnel.test/api/payments/stripe/webhook', $env->stripeWebhookUrl());
     }
+
+    // ---- TRON ------------------------------------------------------------
+
+    private function configureTron(): void
+    {
+        config([
+            'payments.tron.networks.mainnet.address' => 'T9yD14Nj9j7xAB4dbGeiX9h8unkKLxmGkn',
+            'payments.tron.networks.mainnet.base_url' => 'https://api.trongrid.test',
+            'payments.tron.networks.nile.address' => 'T9yD14Nj9j7xAB4dbGeiX9h8unkKT76qbH',
+            'payments.tron.networks.nile.contract' => 'T9yD14Nj9j7xAB4dbGeiX9h8unkKawPyGg',
+            'payments.tron.networks.nile.base_url' => 'https://nile.trongrid.test',
+        ]);
+    }
+
+    /** A developer is on the test network everywhere, production included. */
+    public function test_developers_are_pinned_to_the_test_network_on_every_machine(): void
+    {
+        config(['payments.force' => 'production']);
+
+        $this->assertSame('nile', $this->env()->tronNetworkFor(true));
+        $this->assertSame('mainnet', $this->env()->tronNetworkFor(false));
+    }
+
+    /**
+     * Gated on the machine verdict rather than one flat default, so a plain
+     * trader on a dev box is never handed the real receiving address.
+     */
+    public function test_a_non_developer_on_a_dev_box_gets_the_test_network(): void
+    {
+        config(['payments.force' => 'sandbox']);
+
+        $this->assertSame('nile', $this->env()->tronNetworkFor(false));
+        $this->assertSame('nile', $this->env()->tronNetworkFor(true));
+    }
+
+    /**
+     * The poller's guarantee. forceSandbox() is request-scoped credential
+     * pinning; the watcher has no request, so tron() must answer identically
+     * with it on or off or a developer's HTTP call would change what a
+     * scheduled command scans.
+     */
+    public function test_tron_settings_are_unaffected_by_forced_sandbox(): void
+    {
+        $this->configureTron();
+        config(['payments.force' => 'production']);
+        $env = $this->env();
+
+        $before = $env->tron('mainnet');
+        $env->forceSandbox(true);
+        $after = $env->tron('mainnet');
+
+        $this->assertSame($before, $after);
+        $this->assertSame('T9yD14Nj9j7xAB4dbGeiX9h8unkKLxmGkn', $after['address']);
+    }
+
+    public function test_only_fully_configured_networks_are_scanned(): void
+    {
+        $this->configureTron();
+        $this->assertSame(['mainnet', 'nile'], $this->env()->tronNetworks());
+
+        // Missing address.
+        config(['payments.tron.networks.nile.address' => null]);
+        $this->assertSame(['mainnet'], $this->env()->tronNetworks());
+
+        // Present, but one character out — the case a regex would wave through.
+        config(['payments.tron.networks.nile.address' => 'T9yD14Nj9j7xAB4dbGeiX9h8unkKT76qbX']);
+        $this->assertSame(['mainnet'], $this->env()->tronNetworks());
+        $this->assertFalse($this->env()->tron('nile')['address_valid']);
+
+        // Missing token contract: nothing could be verified as money.
+        config([
+            'payments.tron.networks.nile.address' => 'T9yD14Nj9j7xAB4dbGeiX9h8unkKT76qbH',
+            'payments.tron.networks.nile.contract' => null,
+        ]);
+        $this->assertSame(['mainnet'], $this->env()->tronNetworks());
+    }
+
+    public function test_an_unknown_network_reports_itself_unconfigured_rather_than_throwing(): void
+    {
+        $tron = $this->env()->tron('bogus');
+
+        $this->assertFalse($tron['configured']);
+        $this->assertFalse($tron['address_valid']);
+        $this->assertSame('', $tron['address']);
+    }
 }

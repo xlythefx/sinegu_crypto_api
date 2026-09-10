@@ -198,7 +198,8 @@ class AdminUserController extends Controller
             ->get([
                 't.id', 'a.id as account_id', 'a.name as account_name',
                 'a.balance as account_balance', 't.symbol', 't.exit_price',
-                't.realized_pnl', 't.side', 't.strategy', 't.closed_at', 't.position_amt',
+                't.realized_pnl', 't.exchange_fee', 't.side', 't.strategy',
+                't.closed_at', 't.position_amt',
             ]);
 
         return response()->json([
@@ -222,7 +223,11 @@ class AdminUserController extends Controller
                 'account_balance' => round((float) ($t->account_balance ?? 0), 2),
                 'symbol' => $t->symbol,
                 'price' => round((float) ($t->exit_price ?? 0), 8),
+                // Net of the commission, like everywhere else; the fee rides
+                // along so an admin looking at a trade sees the same breakdown
+                // the customer does rather than a number they cannot reconcile.
                 'realized_pnl' => round((float) ($t->realized_pnl ?? 0), 2),
+                'exchange_fee' => $t->exchange_fee === null ? null : round((float) $t->exchange_fee, 2),
                 'side' => $t->side,
                 'strategy' => $t->strategy,
                 'closed_at' => $t->closed_at,
@@ -254,6 +259,76 @@ class AdminUserController extends Controller
             'success' => true,
             'invoices' => $this->invoices->mapList($invoices),
         ]);
+    }
+
+    /**
+     * POST /api/admin/users
+     * Create an account from the admin side (the "Create user" modal on
+     * /admin/users) — the manual counterpart of a self-service sign-up.
+     *
+     * Differences from AuthController::register, all deliberate:
+     *  - status defaults to `active`, not `pending`: an admin typing the
+     *    account in IS the approval, so it would be absurd to queue it for
+     *    their own review. `pending` is still selectable for the rare case
+     *    where they want the normal queue.
+     *  - no token is issued and no referral code is bound — nobody is signing
+     *    in here, and a referral is a claim the referred user makes at sign-up.
+     *  - the fee percentages are settable up front, so a negotiated rate does
+     *    not need a second edit round-trip.
+     * The account is NOT sandbox: `is_sandbox` stays false, so it is a real
+     * user everywhere (engine fan-out, invoicing) — unlike SandboxController.
+     */
+    public function store(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'name' => ['required', 'string', 'max:255'],
+            'email' => ['required', 'email', 'max:255', 'unique:user_credentials,email'],
+            'password' => ['required', 'string', 'min:8'],
+            'type' => ['sometimes', Rule::in(['user', 'admin', 'master', 'developer'])],
+            'status' => ['sometimes', Rule::in(['pending', 'active', 'suspended'])],
+            'realized_percentage' => ['sometimes', 'numeric', 'min:0', 'max:100'],
+            'unrealized_percentage' => ['sometimes', 'numeric', 'min:0', 'max:100'],
+            'affiliate_percentage' => ['sometimes', 'numeric', 'min:0', 'max:100'],
+        ]);
+
+        // Same single-master rule update() enforces — "the master" is resolved
+        // with ->first() everywhere it is read, so a second one would make
+        // which account is the house account silently arbitrary.
+        if (($validated['type'] ?? 'user') === 'master') {
+            $existing = UserCredential::where('type', 'master')->first();
+            if ($existing) {
+                return $this->statusRejected(
+                    "{$existing->email} is already the master account. Change that account's role first — there can only be one."
+                );
+            }
+        }
+
+        $user = UserCredential::create([
+            'name' => $validated['name'],
+            'email' => $validated['email'],
+            'password' => $validated['password'],
+            'type' => $validated['type'] ?? 'user',
+            'status' => $validated['status'] ?? 'active',
+            // Created by hand — there is no address to verify against.
+            'email_verified' => true,
+        ]);
+
+        // Percentage columns are not fillable — forceFill, as update() does.
+        $percentages = array_intersect_key($validated, array_flip([
+            'realized_percentage', 'unrealized_percentage', 'affiliate_percentage',
+        ]));
+        if ($percentages) {
+            $user->forceFill($percentages)->save();
+            // Read the columns back so the response carries the stored decimals
+            // (15 in, "15.00" out) — the same numbers a later GET would return.
+            $user->refresh();
+        }
+
+        return response()->json([
+            'success' => true,
+            'message' => 'User created.',
+            'user' => $this->userPayload($user) + ['accounts' => []],
+        ], 201);
     }
 
     /**

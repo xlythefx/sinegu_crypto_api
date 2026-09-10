@@ -38,6 +38,29 @@ class UserStatsService
     }
 
     /**
+     * The api_keys behind displayAccounts() — the scope every per-user trade
+     * and funding query below must use.
+     *
+     * Trade and transaction rows carry `uni_id` denormalized, so scoping them
+     * by uni_id alone counts rows belonging to accounts displayAccounts() has
+     * already excluded. Disconnecting an account soft-deletes it but leaves its
+     * trades behind, so its P&L kept being reported beside an equity figure
+     * that no longer included that account — one screen describing two
+     * different sets of money.
+     *
+     * Demo accounts deliberately stay IN, for the reason documented on
+     * displayAccounts(): equity and P&L have to agree, and filtering `demo`
+     * here would resurrect the $0.00-equity-vs-real-P&L bug from the other
+     * direction.
+     *
+     * @return list<string>
+     */
+    public function displayApiKeys(string $uniId): array
+    {
+        return $this->displayAccounts($uniId)->pluck('api_key')->all();
+    }
+
+    /**
      * Every exchange account including soft-deleted (disconnected) ones —
      * feeds the admin account cards.
      */
@@ -50,6 +73,164 @@ class UserStatsService
     }
 
     /**
+     * The dashboard's equity curve: one point per TRADING DAY, shaped by
+     * realized P&L alone and anchored so the last point IS the live equity.
+     *
+     * Shape and level are computed separately, and that separation is the whole
+     * design:
+     *
+     *  - **Shape** is the daily realized P&L walk over $base. Deposits and
+     *    withdrawals are not points on this line; they only move $base. The
+     *    chart therefore answers "what did trading do to the capital", and a
+     *    withdrawal can never draw itself as a crash.
+     *  - **Level** is pinned by a single constant offset, `$equity - $lastCum`,
+     *    applied to every point. Shifting the whole series preserves each day's
+     *    move exactly while landing the final point on the balance the exchange
+     *    itself reports — the one figure here that is not a reconstruction.
+     *
+     * This replaced a replay of funding + trades accumulated from zero, which
+     * could not be made honest. That curve was only ever as complete as
+     * `binance_transactions`, and the transfers poller asks Binance for the last
+     * three days only: an account trading before it was connected has no early
+     * funding rows, so the replay opened at whatever its first trade happened to
+     * make. On the live master that was **$2.52** against ~1,050 of real
+     * capital, and the drawdown divided by it to publish −3392%. Anchoring
+     * needs no complete ledger — unseen transfers, commissions and funding fees
+     * all land in the one offset instead of bending the line.
+     *
+     * Pure (no DB, no clock) so the shape is testable.
+     *
+     * @param  Collection  $dailyPnl  date string => net realized P&L, ascending
+     * @param  float  $base    committed capital (adjustedDeposit)
+     * @param  float  $equity  live account equity, the anchor
+     */
+    public static function buildDailyEquityCurve(Collection $dailyPnl, float $base, float $equity): array
+    {
+        $curve = [];
+        $running = $base;
+        foreach ($dailyPnl as $date => $pnl) {
+            $running += (float) $pnl;
+            $at = Carbon::parse($date)->endOfDay();
+            $curve[] = [
+                'date' => $at->toDateString(),
+                'at' => $at->toIso8601String(),
+                'equity' => $running,
+            ];
+        }
+
+        if ($curve === []) {
+            // Funded, nothing closed yet: a single point at today's equity.
+            $now = Carbon::now();
+
+            return [[
+                'date' => $now->toDateString(),
+                'at' => $now->toIso8601String(),
+                'equity' => round($equity, 2),
+            ]];
+        }
+
+        $offset = $equity - $running;
+
+        return array_map(fn (array $p) => [
+            'date' => $p['date'],
+            'at' => $p['at'],
+            'equity' => round($p['equity'] + $offset, 2),
+        ], $curve);
+    }
+
+    /**
+     * Max drawdown, as a NEGATIVE percentage, measured on the cumulative
+     * realized-P&L curve seeded at the account's capital base.
+     *
+     * Deliberately NOT measured on buildEquityCurve()'s output, which is what
+     * this replaced. That curve is a replay of FUNDING plus trades starting
+     * from zero, and each half of it breaks a drawdown in its own way:
+     *
+     *  - **The denominator was whatever the running peak happened to be at the
+     *    time.** The live master's first closed trade (2026-05-11) was +2.52
+     *    and its first RECORDED deposit did not land until 2026-07-01, so the
+     *    peak was still $2.52 when a −82.30 trade closed two days later, and
+     *    the dashboard published **−3392.46%**. A drawdown divided by the first
+     *    trade's own profit describes nothing about the account.
+     *  - **Funding sat inside the curve**, so taking capital OUT scored as
+     *    losing it. A withdrawal is not a drawdown.
+     *
+     * Seeded at $baseline — net deposits, the same `pct_base` every other
+     * percentage on the card divides by and the same baseline
+     * AnalyticsController seeds — so `/dashboard` and `/dashboard/analytics`
+     * stop publishing two different drawdowns for one account.
+     *
+     * The percentage is taken against the peak AT THE TROUGH, not the highest
+     * peak ever reached: a later run-up must not shrink a drawdown that already
+     * happened.
+     *
+     * @param  list<float>  $dailyPnl  net realized P&L per trading day, ascending
+     */
+    public static function maxDrawdownPct(array $dailyPnl, float $baseline): float
+    {
+        if ($baseline <= 0) {
+            return 0.0;
+        }
+
+        $equity = $baseline;
+        $peak = $baseline;
+        $worst = 0.0;
+        $peakAtWorst = $baseline;
+        foreach ($dailyPnl as $pnl) {
+            $equity += $pnl;
+            $peak = max($peak, $equity);
+            if ($peak - $equity > $worst) {
+                $worst = $peak - $equity;
+                $peakAtWorst = $peak;
+            }
+        }
+
+        $pct = round($worst / $peakAtWorst * 100, 2);
+
+        return $pct > 0 ? -$pct : 0.0;
+    }
+
+    /**
+     * Annualized Sharpe from the equity curve's daily fractional RETURNS.
+     *
+     * Returns, not dollar P&L: a $50 swing is a different risk on a 500 account
+     * than on a 50,000 one, and the ratio is meant to be comparable between
+     * users. The previous version took mean/σ of daily P&L in dollars and then
+     * divided by an unexplained 10, which published 0.09 for an account the
+     * mother dashboard read at 1.08 — the /10 was a display fudge, not maths.
+     *
+     * Null (rather than 0) when there is nothing to measure: fewer than two
+     * daily returns, or a flat series with no deviation. 0 would read as "we
+     * measured this account and it scored zero".
+     *
+     * @param  list<array{equity: float}>  $curve
+     */
+    public static function sharpeFromCurve(array $curve): ?float
+    {
+        $returns = [];
+        for ($i = 1, $n = count($curve); $i < $n; $i++) {
+            $prev = (float) $curve[$i - 1]['equity'];
+            if ($prev > 0) {
+                $returns[] = ((float) $curve[$i]['equity'] - $prev) / $prev;
+            }
+        }
+
+        $count = count($returns);
+        if ($count < 2) {
+            return null;
+        }
+
+        $mean = array_sum($returns) / $count;
+        $variance = 0.0;
+        foreach ($returns as $r) {
+            $variance += ($r - $mean) ** 2;
+        }
+        $sd = sqrt($variance / $count);
+
+        return $sd > 0 ? round($mean / $sd * sqrt(252), 2) : null;
+    }
+
+    /**
      * The full trading-dashboard summary block (GET /dashboard/summary).
      * Mechanical extraction of DashboardController::summary — the math is
      * unchanged; the controller only wraps this in the JSON envelope.
@@ -57,18 +238,22 @@ class UserStatsService
     public function summary(string $uniId, ?Collection $accounts = null): array
     {
         $accounts ??= $this->displayAccounts($uniId);
+        $apiKeys = $accounts->pluck('api_key')->all();
 
         $balance = (float) $accounts->sum('balance');
         $unrealized = (float) $accounts->sum('unrealized_pnl');
         $equity = $balance + $unrealized;
 
+        // Scoped by the same accounts that produced $equity above, not by
+        // uni_id — see displayApiKeys(). A caller passing its own $accounts
+        // gets its trades narrowed to that same list.
         $past = DB::table('binance_pastpositions')
-            ->where('uni_id', $uniId)
+            ->whereIn('api_key', $apiKeys)
             ->orderBy('closed_at')
             ->get();
 
         $transactions = DB::table('binance_transactions')
-            ->where('uni_id', $uniId)
+            ->whereIn('api_key', $apiKeys)
             ->orderBy('created_at')
             ->get();
 
@@ -76,32 +261,24 @@ class UserStatsService
         $deposits = (float) $transactions->where('type', 'DEPOSIT')->sum('amount');
         $withdrawals = (float) $transactions->where('type', 'WITHDRAWAL')->sum('amount');
         $netDeposits = $deposits - $withdrawals;
-        $pctBase = $netDeposits > 0 ? $netDeposits : max($equity, 1);
 
-        // ---- Equity curve: replay deposits/withdrawals + closed trades ----
-        $events = collect();
-        foreach ($transactions as $t) {
-            $events->push([
-                'at' => Carbon::parse($t->created_at),
-                'delta' => $t->type === 'WITHDRAWAL' ? -(float) $t->amount : (float) $t->amount,
-            ]);
-        }
-        foreach ($past as $p) {
-            $events->push([
-                'at' => Carbon::parse($p->closed_at),
-                'delta' => (float) $p->realized_pnl,
-            ]);
-        }
-        $events = $events->sortBy('at')->values();
+        // Committed capital: what the account was funded with plus every net
+        // flow since. `initial_deposit` stands in for funding that predates the
+        // transfers poller, which only ever asks Binance for the last few days
+        // — so an account that traded before it was connected has NO early
+        // transfer rows at all. Leaving it out divided the header percentages
+        // by transfers alone. Same figure BinancePnlSource::adjustedDeposit
+        // bills on, so the dashboard and the invoice agree on the capital base.
+        $adjustedDeposit = (float) $accounts->sum('initial_deposit') + $netDeposits;
+        $pctBase = $adjustedDeposit > 0 ? $adjustedDeposit : max($equity, 1);
 
-        $curve = [];
-        $running = 0.0;
-        foreach ($events as $e) {
-            $running += $e['delta'];
-            $curve[] = ['date' => $e['at']->toDateString(), 'equity' => round($running, 2)];
-        }
-        // Present point includes unrealized P&L
-        $curve[] = ['date' => Carbon::now()->toDateString(), 'equity' => round($running + $unrealized, 2)];
+        // ---- Equity curve ----------------------------------------------
+        // Daily realized P&L over the capital base, anchored to live equity.
+        $dailyPnl = $past
+            ->groupBy(fn ($p) => Carbon::parse($p->closed_at)->toDateString())
+            ->map(fn ($rows) => round((float) $rows->sum('realized_pnl'), 2));
+
+        $curve = self::buildDailyEquityCurve($dailyPnl, $adjustedDeposit, $equity);
 
         // ---- Metrics ---------------------------------------------------
         $wins = $past->where('realized_pnl', '>', 0);
@@ -110,30 +287,14 @@ class UserStatsService
         $grossLoss = abs((float) $losses->sum('realized_pnl'));
         $tradeCount = $past->count();
 
-        $peak = 0.0;
-        $maxDrawdown = 0.0;
-        foreach ($curve as $point) {
-            $peak = max($peak, $point['equity']);
-            if ($peak > 0) {
-                $maxDrawdown = min($maxDrawdown, ($point['equity'] - $peak) / $peak * 100);
-            }
-        }
+        // Drawdown is measured on the curve the user is looking at, so its
+        // baseline is that curve's own starting level — equity BEFORE any of
+        // the realized P&L was made — not $pctBase. The two differ whenever
+        // `initial_deposit` is set, and the curve is the honest denominator:
+        // a dip is only meaningful against the capital it dipped from.
+        $maxDrawdown = self::maxDrawdownPct($dailyPnl->values()->all(), $equity - $realized);
 
-        // Daily realized P&L (also feeds the calendar)
-        $dailyPnl = $past
-            ->groupBy(fn ($p) => Carbon::parse($p->closed_at)->toDateString())
-            ->map(fn ($rows) => round((float) $rows->sum('realized_pnl'), 2));
-
-        $sharpe = null;
-        if ($dailyPnl->count() >= 2) {
-            $values = $dailyPnl->values();
-            $mean = $values->avg();
-            $variance = $values->map(fn ($v) => ($v - $mean) ** 2)->avg();
-            $std = sqrt($variance);
-            if ($std > 0) {
-                $sharpe = round($mean / $std * sqrt(252) / 10, 2); // scaled annualized approximation
-            }
-        }
+        $sharpe = self::sharpeFromCurve($curve);
 
         $metrics = [
             'net_pnl' => round($realized + $unrealized, 2),
@@ -237,11 +398,15 @@ class UserStatsService
     public function dailyPnlDays(string $uniId): array
     {
         $past = DB::table('binance_pastpositions')
-            ->where('uni_id', $uniId)
+            ->whereIn('api_key', $this->displayApiKeys($uniId))
             ->orderByDesc('closed_at')
             ->get([
-                'symbol', 'position_side', 'position_amt', 'realized_pnl',
-                'side', 'strategy', 'closed_at',
+                // `id` and `exit_price` are what let an admin correct a row
+                // straight from the calendar's day popup (PUT/DELETE
+                // /admin/past-positions/{id}); the write itself is still gated
+                // by the admin middleware, this only names the row.
+                'id', 'symbol', 'position_side', 'position_amt', 'realized_pnl',
+                'exit_price', 'side', 'strategy', 'closed_at',
             ]);
 
         $days = [];
@@ -251,10 +416,14 @@ class UserStatsService
                 'wins' => $trades->where('realized_pnl', '>', 0)->count(),
                 'losses' => $trades->where('realized_pnl', '<', 0)->count(),
                 'trades' => $trades->map(fn ($t) => [
+                    'id' => $t->id,
                     'symbol' => $t->symbol,
                     'position_side' => $t->position_side,
                     'position_amt' => (float) $t->position_amt,
                     'realized_pnl' => round((float) $t->realized_pnl, 2),
+                    'exit_price' => $t->exit_price !== null
+                        ? round((float) $t->exit_price, 8)
+                        : null,
                     'side' => $t->side,
                     'strategy' => $t->strategy,
                     'closed_at' => $t->closed_at,
@@ -306,7 +475,7 @@ class UserStatsService
     public function capitalFlow(string $uniId): array
     {
         $transactions = DB::table('binance_transactions')
-            ->where('uni_id', $uniId)
+            ->whereIn('api_key', $this->displayApiKeys($uniId))
             ->get(['type', 'amount']);
 
         $deposits = $transactions->where('type', 'DEPOSIT');

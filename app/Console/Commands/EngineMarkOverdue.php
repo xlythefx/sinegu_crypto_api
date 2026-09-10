@@ -4,6 +4,7 @@ namespace App\Console\Commands;
 
 use App\Models\BinanceAccount;
 use App\Models\Invoice;
+use App\Services\EngineCache;
 use Illuminate\Console\Command;
 
 /**
@@ -25,7 +26,7 @@ class EngineMarkOverdue extends Command
 
     protected $description = 'Mark past-due invoices overdue and disable their exchange accounts';
 
-    public function handle(): int
+    public function handle(EngineCache $engineCache): int
     {
         // 1) Past-due pending invoices → overdue + account disabled.
         $due = Invoice::where('status', 'pending')
@@ -54,6 +55,12 @@ class EngineMarkOverdue extends Command
                     ->where('status', 'suspended');
             })
             ->update(['enabled' => 0]);
+
+        // Only when something actually changed — the daily run is usually a
+        // no-op, and a no-op should not make the engine re-read anything.
+        if ($disabled > 0 || $suspendedDisabled > 0) {
+            $engineCache->refreshAccounts();
+        }
 
         $this->info(sprintf(
             'Invoices marked overdue: %d. Accounts disabled: %d (overdue) + %d (suspended owners).',

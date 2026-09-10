@@ -35,6 +35,19 @@ return [
         ],
     ],
 
+    // Binance's own published fee schedule — not a credential, but a figure the
+    // exchange sets and can change, so it lives in config rather than in code.
+    //
+    // `taker_fee_rate` is the USDⓈ-M futures TAKER commission per side (0.05%
+    // at VIP 0). Taker is the only rate that applies: the engine places market
+    // orders exclusively. App\Services\Pnl\TradingFee charges it on both legs of
+    // a close, which is what makes a stored trade match what the customer sees
+    // in the Binance app. Raise it here if the account's VIP tier or a BNB
+    // discount ever changes what we actually pay.
+    'binance' => [
+        'taker_fee_rate' => (float) env('BINANCE_TAKER_FEE_RATE', 0.0005),
+    ],
+
     // The Python trading engine (trading-flask, package binance_abcd).
     //
     // `secret`          — engine -> API auth (X-Engine-Secret, VerifyEngineSecret).
@@ -60,6 +73,10 @@ return [
             'local' => env('ENGINE_URL_LOCAL', 'http://127.0.0.1:5010'),
             'prod' => env('ENGINE_URL_PROD', 'http://127.0.0.1:5010'),
         ],
+        // The outbound address the exchange sees when this box calls it — what
+        // a user must allow-list on their API key. Shown verbatim in the
+        // "key blocked" modal, so it must be the IP, never a URL.
+        'public_ip' => env('ENGINE_PUBLIC_IP', '2.24.139.176'),
     ],
 
 ];

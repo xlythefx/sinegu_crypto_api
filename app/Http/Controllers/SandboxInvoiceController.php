@@ -297,13 +297,22 @@ class SandboxInvoiceController extends Controller
     }
 
     /**
-     * DELETE /api/admin/sandbox/users/{uniId}/invoices
+     * DELETE /api/admin/sandbox/users/{uniId}/invoices  (one user)
+     * DELETE /api/admin/sandbox/invoices                (every user)
+     *
      * Query: account_id (optional — one account instead of all of them),
      *        include_paid (default false — settled invoices are spared).
+     *
+     * The global form exists because clearing test invoices one user at a time
+     * is how a stale row gets left behind; `$uniId` being null is what makes it
+     * global, so the two modes cannot be confused for one another by a typo in
+     * a query string. `include_paid` still defaults to FALSE in both: a settled
+     * invoice is a payment record, and the wider the scope the more that
+     * matters.
      */
-    public function clearInvoices(Request $request, string $uniId): JsonResponse
+    public function clearInvoices(Request $request, ?string $uniId = null): JsonResponse
     {
-        if (! UserCredential::find($uniId)) {
+        if ($uniId !== null && ! UserCredential::find($uniId)) {
             return response()->json([
                 'success' => false,
                 'error_code' => 'USER_NOT_FOUND',
@@ -314,19 +323,27 @@ class SandboxInvoiceController extends Controller
         $includePaid = filter_var($request->query('include_paid', 'false'), FILTER_VALIDATE_BOOLEAN);
         $accountId = $request->query('account_id');
 
-        $base = Invoice::where('user_id', $uniId)
+        $base = Invoice::query()
+            ->when($uniId !== null, fn ($q) => $q->where('user_id', $uniId))
             ->when($accountId, fn ($q) => $q->where('account_id', (int) $accountId));
 
         $skippedPaid = $includePaid ? 0 : (clone $base)->where('status', 'paid')->count();
 
-        $deleted = (clone $base)
-            ->when(! $includePaid, fn ($q) => $q->where('status', '!=', 'paid'))
-            ->delete();
+        $target = (clone $base)
+            ->when(! $includePaid, fn ($q) => $q->where('status', '!=', 'paid'));
+
+        // Counted before the delete — afterwards there is nothing left to count,
+        // and "across N users" is the figure that tells an admin whether the
+        // global wipe hit the scope they meant.
+        $users = (clone $target)->distinct()->count('user_id');
+        $deleted = $target->delete();
 
         return response()->json([
             'success' => true,
+            'scope' => $uniId === null ? 'all' : 'user',
             'deleted' => $deleted,
             'skipped_paid' => $skippedPaid,
+            'users' => $users,
         ]);
     }
 

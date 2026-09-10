@@ -23,8 +23,10 @@ class DashboardController extends Controller
         $accounts = $this->stats->displayAccounts($uniId);
         $balance = (float) $accounts->sum('balance') + (float) $accounts->sum('unrealized_pnl');
 
+        // Same account scope as $balance above — see
+        // UserStatsService::displayApiKeys().
         $past = DB::table('binance_pastpositions')
-            ->where('uni_id', $uniId)
+            ->whereIn('api_key', $accounts->pluck('api_key')->all())
             ->orderBy('closed_at')
             ->get();
 
@@ -115,7 +117,7 @@ class DashboardController extends Controller
     public function openPositions(Request $request): JsonResponse
     {
         $rows = DB::table('binance_positions')
-            ->where('uni_id', $request->user()->uni_id)
+            ->whereIn('api_key', $this->stats->displayApiKeys($request->user()->uni_id))
             ->orderBy('symbol')
             ->get([
                 'id', 'api_key', 'symbol', 'position_side', 'position_amt',
@@ -129,16 +131,20 @@ class DashboardController extends Controller
     /**
      * GET /api/binance/past-positions
      * Closed positions for the authenticated user, newest first.
+     *
+     * `realized_pnl` is NET of `exchange_fee` — the figure the customer's own
+     * Binance app shows for the trade. Both are sent so the UI can explain the
+     * difference from the gross number rather than just quoting a smaller one.
      */
     public function pastPositions(Request $request): JsonResponse
     {
         $rows = DB::table('binance_pastpositions')
-            ->where('uni_id', $request->user()->uni_id)
+            ->whereIn('api_key', $this->stats->displayApiKeys($request->user()->uni_id))
             ->orderByDesc('closed_at')
             ->get([
                 'id', 'api_key', 'symbol', 'position_side', 'position_amt',
-                'entry_price', 'exit_price', 'realized_pnl', 'side',
-                'order_id', 'closed_at', 'strategy',
+                'entry_price', 'exit_price', 'realized_pnl', 'exchange_fee',
+                'side', 'order_id', 'closed_at', 'strategy',
             ]);
 
         return response()->json(['success' => true, 'positions' => $rows]);

@@ -27,6 +27,15 @@ return [
     */
     'force' => env('PAYMENTS_ENV'),
 
+    /*
+    | Which crypto rail a trader is offered by default. A raw signal only — who
+    | actually sees what is resolved in PaymentController. Deliberately separate
+    | from payments.tron.public: you will want TRON VISIBLE to everyone for some
+    | time before you want it DEFAULT for everyone, and collapsing the two into
+    | one switch removes the step where both rails run side by side.
+    */
+    'default_provider' => env('PAYMENTS_DEFAULT_PROVIDER', 'coinsbuy'),
+
     'environments' => [
 
         'production' => [
@@ -147,6 +156,161 @@ return [
             FILTER_VALIDATE_BOOLEAN
         ),
         'ca_bundle' => env('COINSBUY_CACERT'),
+
+        /*
+        | Egress address family. Coinsbuy authorises by source IP, and the VPS
+        | has BOTH an A and an AAAA address while the Coinsbuy hosts publish
+        | AAAA records — so by default the call goes out over IPv6 and the
+        | address being judged is not the IPv4 one in the dashboard's allow-list.
+        | Forcing IPv4 makes the source address predictable and equal to the
+        | value a human can actually paste there. Turn off only if this box ever
+        | becomes IPv6-only.
+        */
+        'force_ipv4' => filter_var(
+            env('COINSBUY_FORCE_IPV4', true),
+            FILTER_VALIDATE_BOOLEAN
+        ),
+    ],
+
+    /*
+    |----------------------------------------------------------------------
+    | TRON — direct USDT-TRC20, no provider in the middle
+    |----------------------------------------------------------------------
+    |
+    | Unlike Stripe and Coinsbuy this rail has NO CREDENTIALS: the "credential"
+    | is a public address on a public chain, and detecting a payment is a read
+    | of public data. That changes two things about how it is configured.
+    |
+    | 1. There is no live/test KEY SET to pin, so PaymentEnvironment's
+    |    forceSandbox() has nothing to act on. What separates real money from
+    |    test money is the NETWORK, and the watcher that detects payments is a
+    |    scheduled command with no request and no user — a request-scoped flag
+    |    could never reach it. So the network is chosen per caller at intent
+    |    creation, written onto the intent row, and the watcher simply scans
+    |    every network configured below.
+    | 2. Nothing here is secret except the optional TronGrid API key. The
+    |    addresses are public by construction.
+    |
+    */
+    'tron' => [
+
+        /*
+        | Visible to non-developers. Until this is true only `developer`
+        | accounts are offered the rail at all — which is what lets the whole
+        | flow be exercised on the production box with no customer seeing it.
+        */
+        'public' => filter_var(env('TRON_PUBLIC', false), FILTER_VALIDATE_BOOLEAN),
+
+        /*
+        | Which network a caller's intent belongs to. Developers get the test
+        | network on EVERY machine, production included — the TRON equivalent of
+        | PaymentController pinning them to sandbox provider keys.
+        |
+        | Everyone else is gated on the machine verdict rather than a single
+        | flat default, so a non-developer on a dev box can never be shown the
+        | real mainnet receiving address.
+        */
+        'developer_network' => env('TRON_DEVELOPER_NETWORK', 'nile'),
+        'default_network' => [
+            'production' => env('TRON_NETWORK_PRODUCTION', 'mainnet'),
+            'sandbox' => env('TRON_NETWORK_SANDBOX', 'nile'),
+        ],
+
+        'networks' => [
+            'mainnet' => [
+                'base_url' => env('TRON_MAINNET_BASE_URL', 'https://api.trongrid.io'),
+                'api_key' => env('TRON_MAINNET_API_KEY'),
+                // The receiving wallet. Empty until a real one exists; every
+                // entry point reports "not configured" rather than guessing.
+                'address' => env('TRON_MAINNET_ADDRESS'),
+                // Tether's own USDT-TRC20 contract. VERIFY against the live
+                // chain before shipping: this constant being wrong means money
+                // goes somewhere else, and nothing downstream would notice.
+                'contract' => env('TRON_MAINNET_USDT_CONTRACT', 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t'),
+                'asset' => 'USDT',
+                'decimals' => 6,
+                'label' => 'TRC-20 (TRON)',
+                'explorer_tx' => 'https://tronscan.org/#/transaction/',
+                'explorer_address' => 'https://tronscan.org/#/address/',
+            ],
+            'nile' => [
+                'base_url' => env('TRON_NILE_BASE_URL', 'https://nile.trongrid.io'),
+                'api_key' => env('TRON_NILE_API_KEY'),
+                'address' => env('TRON_NILE_ADDRESS'),
+                // No default on purpose — look the test token up on
+                // nile.tronscan.org rather than inheriting a guess.
+                'contract' => env('TRON_NILE_USDT_CONTRACT'),
+                'asset' => 'USDT',
+                'decimals' => 6,
+                'label' => 'TRC-20 (TRON Nile testnet)',
+                'explorer_tx' => 'https://nile.tronscan.org/#/transaction/',
+                'explorer_address' => 'https://nile.tronscan.org/#/address/',
+            ],
+        ],
+
+        /*
+        | How long a quoted amount stays reserved. A payment arriving after this
+        | is not lost — the intent keeps its expected_units, so the admin screen
+        | can still name the invoice it was meant for.
+        */
+        'intent_ttl' => (int) env('TRON_INTENT_TTL', 3600),
+
+        /*
+        | Accepted shortfall — deliberately generous, and floored at an absolute
+        | amount rather than being purely proportional.
+        |
+        | EVERY MAJOR EXCHANGE DEDUCTS ITS WITHDRAWAL FEE FROM THE AMOUNT THE
+        | CUSTOMER TYPES. A trader who enters exactly the figure we display
+        | arrives short by that fee (1 USDT, then 0.2 USDT, on Binance's TRC-20
+        | at different times) — so a percentage-only tolerance rejects every
+        | small invoice paid from an exchange. This is the same shape as the
+        | mother's bug: 1% requested, $0.01 accepted, legitimate payments
+        | refused with the money already taken.
+        */
+        'shortfall_pct' => 1.0,
+        'shortfall_min_usd' => 1.00,
+        'overpay_pct' => 5.0,
+
+        /*
+        | Sub-cent amount fingerprint, in base units. 0 = OFF, and off is the
+        | current posture.
+        |
+        | The idea is to add a random sub-cent offset so each quoted amount is
+        | unique. It cannot coexist with the tolerance above: a band wide enough
+        | to absorb an exchange's withdrawal fee is roughly 100,000x wider than
+        | the spacing between fingerprints, so any window that lets real
+        | payments settle also makes fingerprints ambiguous. Uniqueness comes
+        | from UNIQUE(network, address, open_units) instead, which is a stronger
+        | guarantee than a random offset that can still collide.
+        |
+        | Turn this on ONLY after measuring, per exchange, that the decimals
+        | actually survive a real withdrawal and how much fee is deducted.
+        */
+        'fingerprint_units' => (int) env('TRON_FINGERPRINT_UNITS', 0),
+        'fingerprint_attempts' => 8,
+
+        /*
+        | Scanning. The receiving address is public, so anyone can spray dust at
+        | it for free — every bound here exists to keep that from costing us
+        | anything. `min_value_units` drops sub-$0.10 noise before it can reach
+        | the audit table; `max_pages` stops one flood making a single run
+        | outlast its own minute (with ascending order, an exhausted page budget
+        | simply means the next run continues where this one stopped).
+        */
+        'min_value_units' => (int) env('TRON_MIN_VALUE_UNITS', 100000),
+        'scan_overlap_minutes' => 30,
+        'scan_max_lookback_hours' => 72,
+        'scan_stale_minutes' => 10,
+        'page_limit' => 200,
+        'max_pages' => 10,
+
+        'timeout' => (int) env('TRON_TIMEOUT', 20),
+        'connect_timeout' => (int) env('TRON_CONNECT_TIMEOUT', 8),
+
+        // Same WAMP cURL-error-60 story as Coinsbuy above.
+        'verify_ssl' => filter_var(env('TRON_VERIFY_SSL', true), FILTER_VALIDATE_BOOLEAN),
+        'ca_bundle' => env('TRON_CACERT'),
+        'force_ipv4' => filter_var(env('TRON_FORCE_IPV4', true), FILTER_VALIDATE_BOOLEAN),
     ],
 
 ];

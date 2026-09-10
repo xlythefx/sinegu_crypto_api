@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\AdminApiKeyController;
 use App\Http\Controllers\AdminController;
 use App\Http\Controllers\AdminDatabaseController;
 use App\Http\Controllers\AdminEngineController;
@@ -8,6 +9,7 @@ use App\Http\Controllers\AdminMaintenanceController;
 use App\Http\Controllers\AdminManualTradeController;
 use App\Http\Controllers\AdminReferralController;
 use App\Http\Controllers\AdminTradeLogController;
+use App\Http\Controllers\AdminTronTransferController;
 use App\Http\Controllers\AdminUserController;
 use App\Http\Controllers\AnalyticsController;
 use App\Http\Controllers\AssetController;
@@ -69,6 +71,26 @@ Route::middleware('auth:sanctum')->group(function () {
             ->middleware('throttle:12,1');
         Route::post('/coinsbuy/deposit', [PaymentController::class, 'coinsbuyDeposit'])
             ->middleware('throttle:12,1');
+
+        // Direct USDT-TRC20. The network a caller gets is decided server-side
+        // from their role — a client-supplied one would let a trader settle a
+        // real invoice with testnet tokens.
+        Route::post('/tron/intent', [PaymentController::class, 'tronIntent'])
+            ->middleware('throttle:12,1');
+        // Higher limit than its siblings on purpose: the pay sheet polls this
+        // every 10 s while it waits for the chain, and two open tabs would trip
+        // 12/min on their own.
+        Route::get('/tron/intent/{invoiceId}', [PaymentController::class, 'tronIntentStatus'])
+            ->whereNumber('invoiceId')
+            ->middleware('throttle:60,1');
+        // Settles an invoice WITHOUT money — the developer test button. Two
+        // independent gates: this middleware (role === 'developer' exactly,
+        // NOT satisfied by admin or master) and, in the controller,
+        // tronIsSimulatable(), which refuses the network that carries real
+        // money. Never relax either one.
+        Route::post('/tron/intent/{invoiceId}/simulate', [PaymentController::class, 'tronSimulate'])
+            ->whereNumber('invoiceId')
+            ->middleware(['developer', 'throttle:12,1']);
     });
 
     Route::prefix('user')->group(function () {
@@ -102,9 +124,12 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/daily-pnl', [AdminController::class, 'dailyPnl']);
         Route::get('/performance', [AdminController::class, 'performance']);
         Route::get('/positions', [AdminController::class, 'positions']);
+        Route::put('/positions/{id}', [AdminController::class, 'updatePosition']);
+        Route::put('/past-positions/{id}', [AdminController::class, 'updatePastPosition']);
         Route::delete('/positions/{id}', [AdminController::class, 'deletePosition']);
         Route::delete('/past-positions/{id}', [AdminController::class, 'deletePastPosition']);
         Route::get('/users', [AdminController::class, 'users']);
+        Route::post('/users', [AdminUserController::class, 'store']);
         Route::post('/users/{uniId}/accept', [AdminController::class, 'acceptUser']);
         Route::post('/users/{uniId}/reject', [AdminController::class, 'rejectUser']);
         Route::get('/users/{uniId}', [AdminUserController::class, 'show']);
@@ -133,6 +158,18 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::put('/invoices/{id}', [AdminInvoiceController::class, 'update']);
         Route::delete('/invoices/{id}', [AdminInvoiceController::class, 'destroy']);
 
+        // Incoming USDT-TRC20, and the human decision the matcher cannot make.
+        // In the `admin` group rather than the stricter `developer` one:
+        // attributing a payment is strictly LESS powerful than the manual
+        // mark-paid every admin already has through PUT /admin/invoices/{id}.
+        // While the rail is hidden, the sidebar's developerOnly flag is what
+        // keeps it out of sight — one line to flip when it goes public.
+        Route::get('/tron-transfers', [AdminTronTransferController::class, 'index']);
+        Route::post('/tron-transfers/{id}/attribute', [AdminTronTransferController::class, 'attribute'])
+            ->whereNumber('id');
+        Route::post('/tron-transfers/{id}/ignore', [AdminTronTransferController::class, 'ignore'])
+            ->whereNumber('id');
+
         Route::prefix('affiliate')->group(function () {
             Route::get('/overview', [AdminReferralController::class, 'overview']);
             Route::get('/ledger', [AdminReferralController::class, 'ledger']);
@@ -156,6 +193,20 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/engine/logs', [AdminEngineController::class, 'logs']);
         Route::post('/engine/restart', [AdminEngineController::class, 'restart']);
 
+        // Accounts the exchange is refusing (Binance -2015 and friends), with
+        // an admin-side re-test so support does not have to wait for a poll.
+        Route::get('/engine/key-issues', [AdminEngineController::class, 'keyIssues']);
+        Route::post('/engine/key-issues/{id}/recheck', [AdminEngineController::class, 'recheckKey']);
+
+        // API-key inventory: every exchange account with its owner. Delete is
+        // the same soft disconnect the trader performs — bulk-delete carries
+        // explicit ids so it can only remove what the admin actually saw.
+        Route::get('/api-keys', [AdminApiKeyController::class, 'index']);
+        Route::post('/api-keys/bulk-delete', [AdminApiKeyController::class, 'bulkDestroy']);
+        Route::put('/api-keys/{id}', [AdminApiKeyController::class, 'update']);
+        Route::delete('/api-keys/{id}/purge', [AdminApiKeyController::class, 'purge']);
+        Route::delete('/api-keys/{id}', [AdminApiKeyController::class, 'destroy']);
+
         // Server-side cache flush (Laravel + engine). Browser caching is
         // handled by nginx headers, not here.
         Route::post('/cache/clear', [AdminMaintenanceController::class, 'clearCaches']);
@@ -172,6 +223,9 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/sandbox/invoice-scenarios', [SandboxInvoiceController::class, 'catalogue']);
         Route::post('/sandbox/invoice-scenarios/run', [SandboxInvoiceController::class, 'run']);
         Route::delete('/sandbox/users/{uniId}/invoices', [SandboxInvoiceController::class, 'clearInvoices']);
+        // Same handler with no user segment = every user's invoices. A separate
+        // path, not a flag, so the global wipe can never be a typo away.
+        Route::delete('/sandbox/invoices', [SandboxInvoiceController::class, 'clearInvoices']);
         Route::delete('/sandbox/users/{uniId}/scenario-account', [SandboxInvoiceController::class, 'clearScenarioData']);
 
         // phpMyAdmin-style DB console. The {table} constraint is load-bearing:
@@ -198,6 +252,8 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::post('/binance', [ExchangeAccountController::class, 'storeBinance']);
         Route::put('/accounts/{id}', [ExchangeAccountController::class, 'update']);
         Route::delete('/accounts/{id}', [ExchangeAccountController::class, 'destroy']);
+        // Own 60s per-account cooldown inside the controller — see refreshBalance().
+        Route::post('/accounts/{id}/refresh-balance', [ExchangeAccountController::class, 'refreshBalance']);
     });
 });
 
@@ -237,5 +293,6 @@ Route::prefix('engine/{exchange}')
         Route::get('/positions/check', [EngineSyncController::class, 'checkPositions']);
         Route::post('/past-positions/sync', [EngineSyncController::class, 'syncPastPositions']);
         Route::post('/balances', [EngineSyncController::class, 'updateBalances']);
+        Route::post('/key-status', [EngineSyncController::class, 'keyStatus']);
         Route::post('/transactions', [EngineSyncController::class, 'insertTransactions']);
     });

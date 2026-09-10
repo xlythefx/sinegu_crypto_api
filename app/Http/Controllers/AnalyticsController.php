@@ -49,17 +49,21 @@ class AnalyticsController extends Controller
         $supported = $exchange === 'all' || $exchange === 'binance';
 
         $accounts = $supported ? $this->stats->displayAccounts($uniId) : collect();
+        $apiKeys = $accounts->pluck('api_key')->all();
 
+        // Scoped by the accounts above rather than by uni_id, so a
+        // disconnected account's trades stop counting once its balance no
+        // longer does — see UserStatsService::displayApiKeys().
         $everyTrade = $supported
             ? DB::table('binance_pastpositions')
-                ->where('uni_id', $uniId)
+                ->whereIn('api_key', $apiKeys)
                 ->orderBy('closed_at')
                 ->get()
             : collect();
 
         $transactions = $supported
             ? DB::table('binance_transactions')
-                ->where('uni_id', $uniId)
+                ->whereIn('api_key', $apiKeys)
                 ->orderBy('created_at')
                 ->get()
             : collect();

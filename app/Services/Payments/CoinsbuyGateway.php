@@ -158,12 +158,25 @@ class CoinsbuyGateway
                 'Accept' => 'application/vnd.api+json',
             ]);
 
+        // Pin egress to IPv4. The VPS holds both an A and an AAAA address and
+        // Linux prefers IPv6 (RFC 6724), while the Coinsbuy hosts publish AAAA
+        // records — so calls leave over IPv6 and the source address Coinsbuy
+        // sees is 2a02:...::1, not the 2.24.139.176 anyone would paste into an
+        // IP allow-list. Coinsbuy authorises per address, so the source has to
+        // be the one deterministic address the dashboard can name; an allow-list
+        // that silently governs a different protocol family is unfixable from
+        // the dashboard side, because nothing there tells you which one was used.
+        if (($conf['force_ipv4'] ?? true) !== false) {
+            $request = $request->withOptions([
+                'curl' => [CURLOPT_IPRESOLVE => CURL_IPRESOLVE_V4],
+            ]);
+        }
+
         $ca = (string) ($conf['ca_bundle'] ?? '');
         if ($ca !== '') {
-            return $request->withOptions(['verify' => $ca]);
-        }
-        if (($conf['verify_ssl'] ?? true) === false) {
-            return $request->withOptions(['verify' => false]);
+            $request = $request->withOptions(['verify' => $ca]);
+        } elseif (($conf['verify_ssl'] ?? true) === false) {
+            $request = $request->withOptions(['verify' => false]);
         }
 
         return $request;

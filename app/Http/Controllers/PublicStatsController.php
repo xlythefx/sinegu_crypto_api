@@ -43,12 +43,31 @@ class PublicStatsController extends Controller
      * Percentage track record of the master account.
      *
      * Each trading day's return is that day's realized P&L over the capital the
-     * account started the day with (net deposits + realized P&L to date), so a
-     * mid-history deposit doesn't dilute earlier days. The headline figures are
-     * simple sums/means of those daily percentages — "+0.34% per trading day"
-     * across 126 days reads as "+42.9% total", which is what the page claims.
-     * Compounding is deliberately NOT applied: it would make the total diverge
-     * from the daily average shown beside it.
+     * account started the day with, so a mid-history deposit doesn't dilute
+     * earlier days. That capital is the same figure the rest of the system
+     * sizes and bills on — `initial_deposit + (deposits − withdrawals)`, per
+     * {@see \App\Services\Pnl\BinancePnlSource} — plus realized P&L to date.
+     *
+     * Seeding it from `initial_deposit` is load-bearing, not a nicety.
+     * `binance_transactions` only holds transfers the poller has SEEN; an
+     * account funded before it was connected has none, so a walk that started
+     * at zero divided day one's P&L by the pennies of profit that happened to
+     * come before it. On the live master that published −980% against a real
+     * +490 on ~1,053 of capital.
+     *
+     * The total is those daily returns CHAINED, not summed — a time-weighted
+     * return, so it is the growth the account actually delivered. The earlier
+     * sum overstated it (+62.9% against a real +46.6% on the live master),
+     * because adding a percentage earned on a small base to one earned on a
+     * larger base counts the same profit twice. Deposits still cannot inflate
+     * it: each day's return is already measured on that day's own capital, and
+     * chaining ratios never sees the flows between them.
+     *
+     * The consequence is deliberate: `avg_daily_pct × trading_days` no longer
+     * reconciles with the total. It is an arithmetic mean of daily returns,
+     * beside a compounded total — the page labels them as such. Whichever the
+     * two disagree about, the total is the one a customer can verify against a
+     * balance, and this section's whole claim is that it is verifiable.
      */
     private function compute(): array
     {
@@ -58,8 +77,28 @@ class PublicStatsController extends Controller
             return $this->unavailable();
         }
 
-        $trades = DB::table('binance_pastpositions')
+        // Scoped by API KEY, not by uni_id: the master's uni_id can also own a
+        // TESTNET account (demo=1) and invoice-sandbox scratch accounts, whose
+        // trades are play money and must never be published as a verified
+        // record. Soft-deleted real accounts are deliberately kept (DB::table
+        // applies no soft-delete scope) — a key that has since been
+        // disconnected still traded real money, and dropping it would rewrite
+        // history every time an account is rotated.
+        $accounts = DB::table('binance_accounts')
             ->where('uni_id', $master->uni_id)
+            ->where('demo', 0)
+            ->where('is_sandbox', 0)
+            ->get(['api_key', 'initial_deposit']);
+
+        if ($accounts->isEmpty()) {
+            return $this->unavailable();
+        }
+
+        $apiKeys = $accounts->pluck('api_key')->all();
+        $openingCapital = (float) $accounts->sum(fn ($a) => (float) $a->initial_deposit);
+
+        $trades = DB::table('binance_pastpositions')
+            ->whereIn('api_key', $apiKeys)
             ->orderBy('closed_at')
             ->get(['realized_pnl', 'closed_at']);
 
@@ -78,7 +117,7 @@ class PublicStatsController extends Controller
 
         $flowByDay = [];
         $transactions = DB::table('binance_transactions')
-            ->where('uni_id', $master->uni_id)
+            ->whereIn('api_key', $apiKeys)
             ->get(['type', 'amount', 'created_at']);
         foreach ($transactions as $tx) {
             $day = substr((string) $tx->created_at, 0, 10);
@@ -90,8 +129,8 @@ class PublicStatsController extends Controller
         $days = array_unique(array_merge(array_keys($pnlByDay), array_keys($flowByDay)));
         sort($days);
 
-        $capital = 0.0;       // net deposits + realized P&L so far
-        $cumulative = 0.0;    // running sum of daily percentages
+        $capital = $openingCapital;  // + net flows and realized P&L as we walk
+        $growth = 1.0;        // compounded factor across the trading days so far
         $series = [];
         $dayPercents = [];
 
@@ -103,12 +142,16 @@ class PublicStatsController extends Controller
             $pnl = $pnlByDay[$day] ?? null;
             if ($pnl !== null && $capital > 0) {
                 $percent = $pnl / $capital * 100;
-                $cumulative += $percent;
+                // Floored at 0: a day that loses more than the whole account
+                // cannot compound into a negative factor, which would flip the
+                // sign of every day after it. The `$capital > 0` guard then
+                // ends the walk anyway.
+                $growth *= max(0.0, 1 + $percent / 100);
                 $dayPercents[] = $percent;
                 $series[] = [
                     'date' => $day,
                     'pct' => round($percent, 3),
-                    'cumulative' => round($cumulative, 3),
+                    'cumulative' => round(($growth - 1) * 100, 3),
                     'trades' => $tradesByDay[$day] ?? 0,
                 ];
             }
@@ -132,9 +175,12 @@ class PublicStatsController extends Controller
             'success' => true,
             'available' => true,
             'stats' => [
-                'total_pnl_pct' => $round($cumulative),
+                'total_pnl_pct' => $round(($growth - 1) * 100),
                 'win_rate' => $tradingDays ? round(count($wins) / $tradingDays * 100, 1) : null,
-                'trades' => $trades->count(),
+                // Only trades on PUBLISHED days. The page reads this as
+                // "verified from N closed trades over M trading days", so a
+                // trade on a day the walk could not price does not belong in it.
+                'trades' => array_sum(array_column($series, 'trades')),
                 'avg_daily_pct' => $round($mean($dayPercents)),
                 'avg_win_pct' => $round($mean($wins)),
                 'avg_loss_pct' => $round($mean($losses)),
