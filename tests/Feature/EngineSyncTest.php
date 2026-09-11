@@ -96,7 +96,7 @@ class EngineSyncTest extends EngineTestCase
             'realized_pnl' => 120.5,
             'side' => 'SELL',
             'order_id' => 987654,
-            'closed_at' => '2026-07-29 10:00:00',
+            'closed_at' => '2026-09-12 10:00:00', // after TradingFee::NET_SINCE
             'strategy' => null,
         ];
 
@@ -132,7 +132,7 @@ class EngineSyncTest extends EngineTestCase
             'entry_price' => null,
             'side' => 'SELL',
             'order_id' => 424242,
-            'closed_at' => '2026-07-29 11:00:00',
+            'closed_at' => '2026-09-12 11:00:00', // after TradingFee::NET_SINCE
         ];
 
         // The live close path writes the row before Binance has indexed its
@@ -161,6 +161,58 @@ class EngineSyncTest extends EngineTestCase
 
         $row = DB::table('binance_pastpositions')->where('order_id', 424242)->first();
         $this->assertSame(394.0, (float) $row->realized_pnl);
+    }
+
+    /**
+     * History before the cutoff is GROSS, and a pre-cutoff close discovered
+     * late must land on that basis too — otherwise the poller's lookback could
+     * plant the one net row among gross ones. Both the insert and the backfill
+     * paths are checked, on either side of the boundary.
+     */
+    public function test_past_positions_closed_before_cutoff_stay_gross(): void
+    {
+        $headers = $this->engineHeaders();
+        $base = [
+            'api_key' => 'key-a',
+            'uni_id' => 'uni-key-a',
+            'symbol' => 'LTCUSDT',
+            'position_side' => 'LONG',
+            'position_amt' => 10,
+            'entry_price' => null,
+            'exit_price' => 50,
+            'side' => 'SELL',
+        ];
+
+        // A second before the cutoff: gross, no fee.
+        $this->postJson('/api/engine/binance/past-positions/sync', [
+            'rows' => [$base + ['order_id' => 1001, 'closed_at' => '2026-09-10 23:59:59', 'realized_pnl' => 25]],
+        ], $headers)->assertOk()->assertJson(['inserted' => 1]);
+
+        $old = DB::table('binance_pastpositions')->where('order_id', 1001)->first();
+        $this->assertSame(25.0, (float) $old->realized_pnl);
+        $this->assertNull($old->exchange_fee);
+
+        // The cutoff instant itself: net (10 × 50 × 0.0005 × 2 = 0.5).
+        $this->postJson('/api/engine/binance/past-positions/sync', [
+            'rows' => [$base + ['order_id' => 1002, 'closed_at' => '2026-09-11 00:00:00', 'realized_pnl' => 25]],
+        ], $headers)->assertOk()->assertJson(['inserted' => 1]);
+
+        $new = DB::table('binance_pastpositions')->where('order_id', 1002)->first();
+        $this->assertSame(24.5, (float) $new->realized_pnl);
+        $this->assertSame(0.5, (float) $new->exchange_fee);
+
+        // Backfill of a pre-cutoff row written before its fills were indexed:
+        // the P&L arrives later and is still stored gross.
+        $this->postJson('/api/engine/binance/past-positions/sync', [
+            'rows' => [$base + ['order_id' => 1003, 'closed_at' => '2026-09-01 12:00:00', 'exit_price' => null, 'realized_pnl' => null]],
+        ], $headers)->assertOk()->assertJson(['inserted' => 1]);
+        $this->postJson('/api/engine/binance/past-positions/sync', [
+            'rows' => [$base + ['order_id' => 1003, 'closed_at' => '2026-09-01 12:00:00', 'realized_pnl' => 25]],
+        ], $headers)->assertOk()->assertJson(['updated' => 1]);
+
+        $filled = DB::table('binance_pastpositions')->where('order_id', 1003)->first();
+        $this->assertSame(25.0, (float) $filled->realized_pnl);
+        $this->assertNull($filled->exchange_fee);
     }
 
     public function test_balances_update_guards_initial_deposit(): void

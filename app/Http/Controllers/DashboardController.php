@@ -132,9 +132,11 @@ class DashboardController extends Controller
      * GET /api/binance/past-positions
      * Closed positions for the authenticated user, newest first.
      *
-     * `realized_pnl` is NET of `exchange_fee` — the figure the customer's own
-     * Binance app shows for the trade. Both are sent so the UI can explain the
-     * difference from the gross number rather than just quoting a smaller one.
+     * `realized_pnl` is NET of `exchange_fee` for closes from
+     * TradingFee::NET_SINCE on — the figure the customer's own Binance app
+     * shows — and GROSS, with a null fee, for anything earlier. Both columns
+     * are sent so the UI can explain the difference rather than just quoting
+     * a smaller number.
      */
     public function pastPositions(Request $request): JsonResponse
     {

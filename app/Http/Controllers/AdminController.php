@@ -152,8 +152,8 @@ class AdminController extends Controller
                 'account_balance' => round((float) ($t->account_balance ?? 0), 2),
                 'symbol' => $t->symbol,
                 'price' => round((float) ($t->exit_price ?? 0), 8),
-                // Net of the exchange's commission, which rides along beside it
-                // — see App\Services\Pnl\TradingFee.
+                // Net of the exchange's commission (which rides along beside
+                // it) from TradingFee::NET_SINCE on; gross, null fee, before.
                 'realized_pnl' => round((float) ($t->realized_pnl ?? 0), 2),
                 'exchange_fee' => $t->exchange_fee === null ? null : round((float) $t->exchange_fee, 2),
                 'side' => $t->side,

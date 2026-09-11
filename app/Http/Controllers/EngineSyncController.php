@@ -204,7 +204,11 @@ class EngineSyncController extends Controller
      *
      * Netting cannot double-apply. An insert happens once, and the null-fill
      * branch writes `realized_pnl` only while it is still null — so a row that
-     * already carries a net figure is never reduced a second time.
+     * already carries a net figure is never reduced a second time. That same
+     * guard is what keeps the restored-gross history (closes before
+     * TradingFee::NET_SINCE) intact: those rows carry a P&L, so the poller's
+     * lookback re-sync never rewrites them. A close dated before the cutoff
+     * that arrives fresh is stored gross too — applyTo() reads `closed_at`.
      */
     public function syncPastPositions(string $exchange, Request $request): JsonResponse
     {
@@ -243,6 +247,7 @@ class EngineSyncController extends Controller
                 isset($row['realized_pnl']) ? (float) $row['realized_pnl'] : null,
                 (float) $row['position_amt'],
                 isset($row['exit_price']) ? (float) $row['exit_price'] : null,
+                $row['closed_at'],
             );
 
             if (! $existing) {

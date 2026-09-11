@@ -41,9 +41,35 @@ namespace App\Services\Pnl;
  * one number on disk, every reader — dashboard, analytics, calendar, referrals,
  * invoicing, the public track record — agreeing without knowing this class
  * exists.
+ *
+ * THE BASIS CHANGED ONCE, AT A DATED CUTOFF — see NET_SINCE. Trades closed
+ * before it are stored GROSS with `exchange_fee` NULL; trades closed from it on
+ * are stored NET with the fee beside them. The 2026-09-09 migration had netted
+ * all of history, and was reversed two days later (2026-09-11) because the
+ * historical figures had already been reported on and the restatement read as
+ * invalid data. So the column is deliberately MIXED across the cutoff, and a
+ * total that spans it is neither one basis nor the other. `NULL exchange_fee`
+ * is the row-level marker of a gross figure, and it means the same thing in
+ * both eras: "nothing has been taken out of this number".
  */
 class TradingFee
 {
+    /**
+     * UTC instant from which closed trades are stored net of commission.
+     * A whole UTC day boundary, matching how every reader buckets days.
+     * Anything closed before it is gross — on ingest AND in the migration that
+     * restored history, which read this same constant.
+     */
+    public const NET_SINCE = '2026-09-11 00:00:00';
+
+    /**
+     * Whether a trade closed at this instant is stored net of commission.
+     * `$closedAt` is a UTC datetime string as the engine posts it.
+     */
+    public static function netsAt(string $closedAt): bool
+    {
+        return strtotime($closedAt.' UTC') >= strtotime(self::NET_SINCE.' UTC');
+    }
     /** Taker commission per side, as a fraction. Binance USDⓈ-M standard: 0.05%. */
     public static function rate(): float
     {
@@ -74,13 +100,20 @@ class TradingFee
     }
 
     /**
-     * Gross realized P&L as the exchange reported it → the net figure we store.
+     * Gross realized P&L as the exchange reported it → the figure we store.
      *
-     * Returns [net, fee]. A null fee (see estimate()) passes the P&L through
+     * Returns [pnl, fee]. A null fee (see estimate()) passes the P&L through
      * untouched, so a row is never silently reduced by a fee nobody computed.
+     * A close dated before NET_SINCE is passed through the same way, with a
+     * null fee, so a late-discovered historical trade lands on the basis the
+     * rest of its era is on rather than as the one net row among gross ones.
      */
-    public static function applyTo(?float $grossPnl, ?float $quantity, ?float $exitPrice): array
+    public static function applyTo(?float $grossPnl, ?float $quantity, ?float $exitPrice, ?string $closedAt = null): array
     {
+        if ($closedAt !== null && ! self::netsAt($closedAt)) {
+            return [$grossPnl, null];
+        }
+
         $fee = self::estimate($quantity, $exitPrice);
 
         if ($grossPnl === null || $fee === null) {
