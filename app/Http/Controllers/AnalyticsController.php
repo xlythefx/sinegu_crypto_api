@@ -54,11 +54,17 @@ class AnalyticsController extends Controller
         // Scoped by the accounts above rather than by uni_id, so a
         // disconnected account's trades stop counting once its balance no
         // longer does — see UserStatsService::displayApiKeys().
+        // BASIS: everything below is computed BEFORE exchange fees
+        // (`pnl_gross`) — the page reports the strategy, and fees are its
+        // running cost, shown as their own figure (`fees`) and as the `*_net`
+        // twin beside each money figure for the hover breakdown.
         $everyTrade = $supported
-            ? DB::table('binance_pastpositions')
-                ->whereIn('api_key', $apiKeys)
-                ->orderBy('closed_at')
-                ->get()
+            ? UserStatsService::withFeeBasis(
+                DB::table('binance_pastpositions')
+                    ->whereIn('api_key', $apiKeys)
+                    ->orderBy('closed_at')
+                    ->get()
+            )
             : collect();
 
         $transactions = $supported
@@ -107,7 +113,9 @@ class AnalyticsController extends Controller
 
         $currentCapital = (float) $accounts->sum('balance');
         $totalUnrealized = (float) $accounts->sum('unrealized_pnl');
-        $totalRealized = (float) $past->sum('realized_pnl');
+        $totalRealized = (float) $past->sum('pnl_gross');
+        $totalRealizedNet = (float) $past->sum('pnl_net');
+        $fees = UserStatsService::feeSummary($past);
 
         // Open positions carry a symbol but no strategy tag, so unrealized P&L
         // cannot be attributed to a chip selection. Whenever a chip filter is
@@ -115,52 +123,58 @@ class AnalyticsController extends Controller
         // of mixing filtered realized with whole-account unrealized.
         $chipFiltered = $symbols !== [] || $strategies !== [];
         $totalReturnAbs = $chipFiltered ? $totalRealized : $totalRealized + $totalUnrealized;
+        $totalReturnAbsNet = $chipFiltered ? $totalRealizedNet : $totalRealizedNet + $totalUnrealized;
         $totalReturnPct = $baseline > 0 ? round($totalReturnAbs / $baseline * 100, 2) : null;
 
         // ---- Return on deposit ----------------------------------------
         // Realized P&L measured against money actually paid in: deposits only,
         // withdrawals ignored. Honors the chip filters but stays all-time —
         // a deposit is a lifetime concept, so the date range is not applied.
-        $depositRealized = (float) $allTimeChipped->sum('realized_pnl');
+        $depositRealized = (float) $allTimeChipped->sum('pnl_gross');
         $returnOnDeposit = [
             'pct' => $deposits > 0 ? round($depositRealized / $deposits * 100, 2) : null,
             'realized' => round($depositRealized, 2),
+            'realized_net' => round((float) $allTimeChipped->sum('pnl_net'), 2),
             'deposits' => round($deposits, 2),
             'trades' => $allTimeChipped->count(),
         ];
 
         // ---- Daily realized P&L (ascending by close date) -------------
-        $dailyPnl = $past
+        $byDay = $past
             ->groupBy(fn ($p) => Carbon::parse($p->closed_at)->toDateString())
-            ->map(fn ($rows) => round((float) $rows->sum('realized_pnl'), 2))
             ->sortKeys();
+        $dailyPnl = $byDay->map(fn ($rows) => round((float) $rows->sum('pnl_gross'), 2));
+        $dailyPnlNet = $byDay->map(fn ($rows) => round((float) $rows->sum('pnl_net'), 2));
 
         $tradingDays = $dailyPnl->count();
         $avgDailyPnl = $tradingDays > 0 ? round($totalRealized / $tradingDays, 2) : null;
+        $avgDailyPnlNet = $tradingDays > 0 ? round($totalRealizedNet / $tradingDays, 2) : null;
 
         $bestDay = null;
         $worstDay = null;
         foreach ($dailyPnl as $date => $pnl) {
             if ($bestDay === null || $pnl > $bestDay['pnl']) {
-                $bestDay = ['date' => $date, 'pnl' => $pnl];
+                $bestDay = ['date' => $date, 'pnl' => $pnl, 'pnl_net' => $dailyPnlNet[$date]];
             }
             if ($worstDay === null || $pnl < $worstDay['pnl']) {
-                $worstDay = ['date' => $date, 'pnl' => $pnl];
+                $worstDay = ['date' => $date, 'pnl' => $pnl, 'pnl_net' => $dailyPnlNet[$date]];
             }
         }
 
         // ---- Day-of-week breakdown (always all 7 keys, Mon..Sun) ------
         $dayOfWeek = [];
         foreach (['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'] as $day) {
-            $dayOfWeek[$day] = ['pnl' => 0.0, 'trades' => 0];
+            $dayOfWeek[$day] = ['pnl' => 0.0, 'pnl_net' => 0.0, 'trades' => 0];
         }
         foreach ($past as $p) {
             $day = Carbon::parse($p->closed_at)->format('D');
-            $dayOfWeek[$day]['pnl'] += (float) $p->realized_pnl;
+            $dayOfWeek[$day]['pnl'] += (float) $p->pnl_gross;
+            $dayOfWeek[$day]['pnl_net'] += (float) $p->pnl_net;
             $dayOfWeek[$day]['trades']++;
         }
         foreach ($dayOfWeek as $day => $row) {
             $dayOfWeek[$day]['pnl'] = round($row['pnl'], 2);
+            $dayOfWeek[$day]['pnl_net'] = round($row['pnl_net'], 2);
         }
 
         // ---- Monthly breakdown (ascending) ----------------------------
@@ -169,10 +183,12 @@ class AnalyticsController extends Controller
             ->groupBy(fn ($p) => Carbon::parse($p->closed_at)->format('Y-m'))
             ->sortKeys();
         foreach ($byMonth as $month => $rows) {
-            $wins = $rows->where('realized_pnl', '>', 0)->count();
+            $wins = $rows->where('pnl_gross', '>', 0)->count();
             $monthly[] = [
                 'month' => $month,
-                'pnl' => round((float) $rows->sum('realized_pnl'), 2),
+                'pnl' => round((float) $rows->sum('pnl_gross'), 2),
+                'pnl_net' => round((float) $rows->sum('pnl_net'), 2),
+                'fees' => round((float) $rows->sum('pnl_fee'), 2),
                 'trades' => $rows->count(),
                 'win_rate' => $rows->count() ? round($wins / $rows->count() * 100, 2) : 0.0,
             ];
@@ -184,7 +200,9 @@ class AnalyticsController extends Controller
             $bySymbol[] = [
                 'symbol' => $symbol,
                 'trades' => $rows->count(),
-                'realized_pnl' => round((float) $rows->sum('realized_pnl'), 2),
+                'realized_pnl' => round((float) $rows->sum('pnl_gross'), 2),
+                'realized_pnl_net' => round((float) $rows->sum('pnl_net'), 2),
+                'fees' => round((float) $rows->sum('pnl_fee'), 2),
             ];
         }
         usort($bySymbol, fn ($a, $b) => abs($b['realized_pnl']) <=> abs($a['realized_pnl']));
@@ -218,11 +236,11 @@ class AnalyticsController extends Controller
             'recent' => $recentFlows,
         ];
 
-        // ---- Trade quality --------------------------------------------
-        $wins = $past->where('realized_pnl', '>', 0);
-        $losses = $past->where('realized_pnl', '<', 0);
-        $grossWin = (float) $wins->sum('realized_pnl');
-        $grossLoss = abs((float) $losses->sum('realized_pnl'));
+        // ---- Trade quality (before fees) -----------------------------
+        $wins = $past->where('pnl_gross', '>', 0);
+        $losses = $past->where('pnl_gross', '<', 0);
+        $grossWin = (float) $wins->sum('pnl_gross');
+        $grossLoss = abs((float) $losses->sum('pnl_gross'));
         $tradeCount = $past->count();
 
         $quality = [
@@ -232,8 +250,8 @@ class AnalyticsController extends Controller
             'profit_factor' => $grossLoss > 0 ? round($grossWin / $grossLoss, 2) : null,
             'avg_win' => $wins->count() ? round($grossWin / $wins->count(), 2) : 0.0,
             'avg_loss' => $losses->count() ? round(-$grossLoss / $losses->count(), 2) : 0.0,
-            'largest_win' => $tradeCount ? round(max(0.0, (float) $past->max('realized_pnl')), 2) : 0.0,
-            'largest_loss' => $tradeCount ? round(min(0.0, (float) $past->min('realized_pnl')), 2) : 0.0,
+            'largest_win' => $tradeCount ? round(max(0.0, (float) $past->max('pnl_gross')), 2) : 0.0,
+            'largest_loss' => $tradeCount ? round(min(0.0, (float) $past->min('pnl_gross')), 2) : 0.0,
             'expectancy' => $tradeCount ? round($totalRealized / $tradeCount, 2) : 0.0,
         ];
 
@@ -337,7 +355,10 @@ class AnalyticsController extends Controller
                 'current_capital' => round($currentCapital, 2),
                 'total_unrealized' => round($totalUnrealized, 2),
                 'total_realized' => round($totalRealized, 2),
+                'total_realized_net' => round($totalRealizedNet, 2),
+                'fees' => $fees,
                 'total_return_abs' => round($totalReturnAbs, 2),
+                'total_return_abs_net' => round($totalReturnAbsNet, 2),
                 'total_return_pct' => $totalReturnPct,
                 'return_on_deposit' => $returnOnDeposit,
                 'filters' => [
@@ -349,9 +370,11 @@ class AnalyticsController extends Controller
                 ],
                 'trading_days' => $tradingDays,
                 'avg_daily_pnl' => $avgDailyPnl,
+                'avg_daily_pnl_net' => $avgDailyPnlNet,
                 'best_day' => $bestDay,
                 'worst_day' => $worstDay,
                 'daily_pnl' => $dailyPnl,
+                'daily_pnl_net' => $dailyPnlNet,
                 'day_of_week' => $dayOfWeek,
                 'monthly' => $monthly,
                 'by_symbol' => $bySymbol,

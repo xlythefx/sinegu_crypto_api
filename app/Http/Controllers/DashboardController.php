@@ -25,16 +25,22 @@ class DashboardController extends Controller
 
         // Same account scope as $balance above — see
         // UserStatsService::displayApiKeys().
-        $past = DB::table('binance_pastpositions')
-            ->whereIn('api_key', $accounts->pluck('api_key')->all())
-            ->orderBy('closed_at')
-            ->get();
+        // BASIS: before exchange fees, like the dashboard it sits under; each
+        // asset carries `total_pnl_net` and `fees` for the hover breakdown, and
+        // its curve points `cumulative_net` beside `cumulative`.
+        $past = UserStatsService::withFeeBasis(
+            DB::table('binance_pastpositions')
+                ->whereIn('api_key', $accounts->pluck('api_key')->all())
+                ->orderBy('closed_at')
+                ->get()
+        );
 
         $assets = [];
         foreach ($past->groupBy('symbol') as $symbol => $trades) {
             $wins = [];
             $losses = [];
             $cumulative = 0.0;
+            $cumulativeNet = 0.0;
             $peak = 0.0;
             $maxDrawdown = 0.0;
             $winStreak = 0;
@@ -42,11 +48,13 @@ class DashboardController extends Controller
             $series = [];
 
             foreach ($trades as $t) {
-                $pnl = (float) $t->realized_pnl;
+                $pnl = (float) $t->pnl_gross;
                 $cumulative += $pnl;
+                $cumulativeNet += (float) $t->pnl_net;
                 $series[] = [
                     'date' => (string) $t->closed_at,
                     'cumulative' => round($cumulative, 2),
+                    'cumulative_net' => round($cumulativeNet, 2),
                 ];
 
                 $peak = max($peak, $cumulative);
@@ -75,6 +83,8 @@ class DashboardController extends Controller
                 'losses' => count($losses),
                 'winrate' => $count ? round(count($wins) / $count * 100, 1) : 0,
                 'total_pnl' => round($grossWin - $grossLoss, 2),
+                'total_pnl_net' => round($cumulativeNet, 2),
+                'fees' => round((float) $trades->sum('pnl_fee'), 2),
                 // null = no losing trades yet ("Perfect")
                 'profit_factor' => $grossLoss > 0 ? round($grossWin / $grossLoss, 2) : null,
                 'max_drawdown' => round($maxDrawdown, 2),

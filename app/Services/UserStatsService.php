@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\BinanceAccount;
+use App\Services\Pnl\TradingFee;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
@@ -231,9 +232,67 @@ class UserStatsService
     }
 
     /**
+     * Stamp every closed-trade row with BOTH P&L bases, so a screen can show
+     * the strategy's result before exchange fees and still say what landed.
+     *
+     * `realized_pnl` on the row is what the account received — net of the
+     * exchange's commission + funding from TradingFee::NET_SINCE on, gross
+     * before it (a decision, see TradingFee). This adds:
+     *  - `pnl_net`    the stored figure, as a float (null while unbackfilled)
+     *  - `pnl_fee`    the fee taken out of it; 0.0 when none is recorded
+     *  - `fee_known`  whether a fee is recorded at all — false on every
+     *                 pre-cutoff row, so a total of `pnl_fee` across the
+     *                 cutoff is "fees we know of", not "fees paid"
+     *  - `pnl_gross`  pnl_net + pnl_fee: the price move alone, the number the
+     *                 trading dashboard and analytics lead with
+     *
+     * Nothing here reads the DB; the caller's query decides the rows.
+     */
+    public static function withFeeBasis(Collection $rows): Collection
+    {
+        return $rows->map(function ($p) {
+            $net = $p->realized_pnl === null ? null : (float) $p->realized_pnl;
+            $fee = $p->exchange_fee === null ? null : (float) $p->exchange_fee;
+            $p->pnl_net = $net;
+            $p->pnl_fee = $fee ?? 0.0;
+            $p->fee_known = $fee !== null;
+            $p->pnl_gross = $net === null ? null : round($net + ($fee ?? 0.0), 8);
+
+            return $p;
+        });
+    }
+
+    /**
+     * The fee block every before-fees screen carries beside its totals: how
+     * much the exchange took out of the rows shown, and how many of those rows
+     * have no fee on record (history before the cutoff), so the UI can say
+     * "fees recorded from …" instead of printing a total that quietly omits
+     * a third of the trades.
+     */
+    public static function feeSummary(Collection $rows): array
+    {
+        $known = $rows->where('fee_known', true)->count();
+
+        return [
+            'total' => round((float) $rows->sum('pnl_fee'), 2),
+            'trades_with_fee' => $known,
+            'trades_without_fee' => $rows->count() - $known,
+            'since' => Carbon::parse(TradingFee::NET_SINCE)->toDateString(),
+        ];
+    }
+
+    /**
      * The full trading-dashboard summary block (GET /dashboard/summary).
-     * Mechanical extraction of DashboardController::summary — the math is
-     * unchanged; the controller only wraps this in the JSON envelope.
+     *
+     * BASIS: every P&L-derived figure here — the metrics rail, the equity
+     * curve, the by-asset / by-strategy series, the period breakdown — is
+     * computed BEFORE exchange fees (`pnl_gross`), because the dashboard's
+     * question is "how did the strategy do", and fees are a cost of running
+     * it, not a property of it. Each money figure ships its after-fees twin
+     * (`*_net`, `equity` beside `equity_gross`, `cum_net` beside `cum`) so the
+     * UI can show the three-line breakdown on hover; `realized_pnl` /
+     * `total_pnl` keep their after-fees meaning for the readers that list
+     * trades beside them (Positions page, admin user detail).
      */
     public function summary(string $uniId, ?Collection $accounts = null): array
     {
@@ -247,17 +306,21 @@ class UserStatsService
         // Scoped by the same accounts that produced $equity above, not by
         // uni_id — see displayApiKeys(). A caller passing its own $accounts
         // gets its trades narrowed to that same list.
-        $past = DB::table('binance_pastpositions')
-            ->whereIn('api_key', $apiKeys)
-            ->orderBy('closed_at')
-            ->get();
+        $past = self::withFeeBasis(
+            DB::table('binance_pastpositions')
+                ->whereIn('api_key', $apiKeys)
+                ->orderBy('closed_at')
+                ->get()
+        );
 
         $transactions = DB::table('binance_transactions')
             ->whereIn('api_key', $apiKeys)
             ->orderBy('created_at')
             ->get();
 
-        $realized = (float) $past->sum('realized_pnl');
+        $realized = (float) $past->sum('pnl_net');
+        $realizedGross = (float) $past->sum('pnl_gross');
+        $fees = self::feeSummary($past);
         $deposits = (float) $transactions->where('type', 'DEPOSIT')->sum('amount');
         $withdrawals = (float) $transactions->where('type', 'WITHDRAWAL')->sum('amount');
         $netDeposits = $deposits - $withdrawals;
@@ -274,33 +337,49 @@ class UserStatsService
 
         // ---- Equity curve ----------------------------------------------
         // Daily realized P&L over the capital base, anchored to live equity.
-        $dailyPnl = $past
-            ->groupBy(fn ($p) => Carbon::parse($p->closed_at)->toDateString())
-            ->map(fn ($rows) => round((float) $rows->sum('realized_pnl'), 2));
+        // The anchored (after-fees) curve ends on the balance the exchange
+        // reports; the before-fees curve is the same walk with each day's fees
+        // added back, so it shares the start level and ends at balance +
+        // fees — what the account would hold had the exchange charged nothing.
+        $byDay = $past->groupBy(fn ($p) => Carbon::parse($p->closed_at)->toDateString());
+        $dailyPnl = $byDay->map(fn ($rows) => round((float) $rows->sum('pnl_net'), 2));
+        $dailyGross = $byDay->map(fn ($rows) => round((float) $rows->sum('pnl_gross'), 2));
+        $dailyFees = $byDay->map(fn ($rows) => round((float) $rows->sum('pnl_fee'), 2));
 
         $curve = self::buildDailyEquityCurve($dailyPnl, $adjustedDeposit, $equity);
+        $cumFees = 0.0;
+        foreach ($curve as $i => $point) {
+            $cumFees += (float) ($dailyFees[$point['date']] ?? 0.0);
+            $curve[$i]['equity_gross'] = round($point['equity'] + $cumFees, 2);
+        }
 
-        // ---- Metrics ---------------------------------------------------
-        $wins = $past->where('realized_pnl', '>', 0);
-        $losses = $past->where('realized_pnl', '<', 0);
-        $grossWin = (float) $wins->sum('realized_pnl');
-        $grossLoss = abs((float) $losses->sum('realized_pnl'));
+        // ---- Metrics (before fees) --------------------------------------
+        $wins = $past->where('pnl_gross', '>', 0);
+        $losses = $past->where('pnl_gross', '<', 0);
+        $grossWin = (float) $wins->sum('pnl_gross');
+        $grossLoss = abs((float) $losses->sum('pnl_gross'));
         $tradeCount = $past->count();
 
         // Drawdown is measured on the curve the user is looking at, so its
         // baseline is that curve's own starting level — equity BEFORE any of
         // the realized P&L was made — not $pctBase. The two differ whenever
         // `initial_deposit` is set, and the curve is the honest denominator:
-        // a dip is only meaningful against the capital it dipped from.
-        $maxDrawdown = self::maxDrawdownPct($dailyPnl->values()->all(), $equity - $realized);
+        // a dip is only meaningful against the capital it dipped from. Both
+        // curves start at the same level; the walk is the before-fees one.
+        $maxDrawdown = self::maxDrawdownPct($dailyGross->values()->all(), $equity - $realized);
 
-        $sharpe = self::sharpeFromCurve($curve);
+        $sharpe = self::sharpeFromCurve(array_map(
+            fn (array $p) => ['equity' => $p['equity_gross']],
+            $curve,
+        ));
 
         $metrics = [
             'net_pnl' => round($realized + $unrealized, 2),
+            'gross_pnl' => round($realizedGross + $unrealized, 2),
+            'fees' => $fees['total'],
             'win_rate' => $tradeCount ? round($wins->count() / $tradeCount * 100, 1) : null,
             'profit_factor' => $grossLoss > 0 ? round($grossWin / $grossLoss, 2) : null,
-            'expectancy' => $tradeCount ? round($realized / $tradeCount, 2) : null,
+            'expectancy' => $tradeCount ? round($realizedGross / $tradeCount, 2) : null,
             'avg_rr' => ($losses->count() && $wins->count() && $grossLoss > 0)
                 ? round(($grossWin / $wins->count()) / ($grossLoss / $losses->count()), 1)
                 : null,
@@ -315,18 +394,26 @@ class UserStatsService
             foreach ($grouped as $key => $rows) {
                 $rows = collect($rows)->sortBy('closed_at')->values();
                 $cum = 0.0;
+                $cumNet = 0.0;
                 $points = [];
                 foreach ($rows as $r) {
-                    $cum += (float) $r->realized_pnl;
-                    $points[] = ['date' => Carbon::parse($r->closed_at)->toDateString(), 'cum' => round($cum, 2)];
+                    $cum += (float) $r->pnl_gross;
+                    $cumNet += (float) $r->pnl_net;
+                    $points[] = [
+                        'date' => Carbon::parse($r->closed_at)->toDateString(),
+                        'cum' => round($cum, 2),
+                        'cum_net' => round($cumNet, 2),
+                    ];
                 }
-                $w = $rows->where('realized_pnl', '>', 0);
-                $l = $rows->where('realized_pnl', '<', 0);
-                $gw = (float) $w->sum('realized_pnl');
-                $gl = abs((float) $l->sum('realized_pnl'));
+                $w = $rows->where('pnl_gross', '>', 0);
+                $l = $rows->where('pnl_gross', '<', 0);
+                $gw = (float) $w->sum('pnl_gross');
+                $gl = abs((float) $l->sum('pnl_gross'));
                 $out[] = [
                     'id' => $key,
                     'total' => round($cum, 2),
+                    'total_net' => round($cumNet, 2),
+                    'fees' => round((float) $rows->sum('pnl_fee'), 2),
                     'trades' => $rows->count(),
                     'win_rate' => $rows->count() ? round($w->count() / $rows->count() * 100, 1) : null,
                     'profit_factor' => $gl > 0 ? round($gw / $gl, 2) : null,
@@ -361,32 +448,46 @@ class UserStatsService
 
         // ---- Realized P&L breakdown (today / 7d / month-to-date) ------
         $today = Carbon::today();
-        $sumSince = fn (Carbon $since) => round(
-            (float) $past->filter(fn ($p) => Carbon::parse($p->closed_at)->gte($since))->sum('realized_pnl'),
+        $sumSince = fn (Carbon $since, string $field) => round(
+            (float) $past->filter(fn ($p) => Carbon::parse($p->closed_at)->gte($since))->sum($field),
             2
         );
-        $pnlBreakdown = [
-            'daily' => $sumSince($today),
-            'weekly' => $sumSince($today->copy()->subDays(7)),
-            'monthly' => $sumSince($today->copy()->startOfMonth()),
+        $periods = [
+            'daily' => $today,
+            'weekly' => $today->copy()->subDays(7),
+            'monthly' => $today->copy()->startOfMonth(),
         ];
+        $pnlBreakdown = [];
+        $pnlBreakdownNet = [];
+        $pnlBreakdownFees = [];
+        foreach ($periods as $key => $since) {
+            $pnlBreakdown[$key] = $sumSince($since, 'pnl_gross');
+            $pnlBreakdownNet[$key] = $sumSince($since, 'pnl_net');
+            $pnlBreakdownFees[$key] = $sumSince($since, 'pnl_fee');
+        }
 
         return [
             'equity' => round($equity, 2),
             'balance' => round($balance, 2),
             'realized_pnl' => round($realized, 2),
+            'realized_pnl_gross' => round($realizedGross, 2),
             'unrealized_pnl' => round($unrealized, 2),
             'total_pnl' => round($realized + $unrealized, 2),
+            'total_pnl_gross' => round($realizedGross + $unrealized, 2),
+            'fees' => $fees,
             'net_deposits' => round($netDeposits, 2),
             'pct_base' => round($pctBase, 2),
             'equity_curve' => $curve,
             'metrics' => $metrics,
             'daily_pnl' => $dailyPnl,
+            'daily_pnl_gross' => $dailyGross,
             'by_asset' => $byAsset,
             'by_strategy' => $byStrategy,
             'hwm' => round($hwm, 2),
             'commissions' => $commissions,
             'pnl_breakdown' => $pnlBreakdown,
+            'pnl_breakdown_net' => $pnlBreakdownNet,
+            'pnl_breakdown_fees' => $pnlBreakdownFees,
         ];
     }
 
@@ -397,7 +498,7 @@ class UserStatsService
      */
     public function dailyPnlDays(string $uniId): array
     {
-        $past = DB::table('binance_pastpositions')
+        $past = self::withFeeBasis(DB::table('binance_pastpositions')
             ->whereIn('api_key', $this->displayApiKeys($uniId))
             ->orderByDesc('closed_at')
             ->get([
@@ -407,14 +508,19 @@ class UserStatsService
                 // by the admin middleware, this only names the row.
                 'id', 'symbol', 'position_side', 'position_amt', 'realized_pnl',
                 'exchange_fee', 'fee_source', 'exit_price', 'side', 'strategy', 'closed_at',
-            ]);
+            ]));
 
+        // The calendar is the one before-fees-era screen that keeps AFTER fees
+        // as its headline: a cell is "what landed that day". `total_gross` and
+        // `fees` ride along for the hover.
         $days = [];
         foreach ($past->groupBy(fn ($t) => substr((string) $t->closed_at, 0, 10)) as $date => $trades) {
             $days[$date] = [
-                'total' => round((float) $trades->sum('realized_pnl'), 2),
-                'wins' => $trades->where('realized_pnl', '>', 0)->count(),
-                'losses' => $trades->where('realized_pnl', '<', 0)->count(),
+                'total' => round((float) $trades->sum('pnl_net'), 2),
+                'total_gross' => round((float) $trades->sum('pnl_gross'), 2),
+                'fees' => round((float) $trades->sum('pnl_fee'), 2),
+                'wins' => $trades->where('pnl_net', '>', 0)->count(),
+                'losses' => $trades->where('pnl_net', '<', 0)->count(),
                 'trades' => $trades->map(fn ($t) => [
                     'id' => $t->id,
                     'symbol' => $t->symbol,

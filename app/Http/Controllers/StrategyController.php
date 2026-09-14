@@ -18,6 +18,10 @@ class StrategyController extends Controller
      * GET /api/admin/strategies
      * Platform-wide closed trades that carry a strategy tag, plus the
      * global enabled/paused map from the strategies table.
+     *
+     * `exchange_fee` rides along so the client-side strategy math
+     * (lib/strategyStats.ts) can draw the curve BEFORE fees — the strategy's
+     * own result — and still show what landed on hover.
      */
     public function index(): JsonResponse
     {
@@ -25,7 +29,7 @@ class StrategyController extends Controller
             ->whereNotNull('strategy')
             ->where('strategy', '!=', '')
             ->orderBy('closed_at')
-            ->get(['strategy', 'symbol', 'realized_pnl', 'closed_at']);
+            ->get(['strategy', 'symbol', 'realized_pnl', 'exchange_fee', 'closed_at']);
 
         $enabled = Strategy::all()->pluck('enabled', 'strategy_key');
 
