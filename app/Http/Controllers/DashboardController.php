@@ -145,7 +145,7 @@ class DashboardController extends Controller
             ->orderByDesc('closed_at')
             ->get([
                 'id', 'api_key', 'symbol', 'position_side', 'position_amt',
-                'entry_price', 'exit_price', 'realized_pnl', 'exchange_fee',
+                'entry_price', 'exit_price', 'realized_pnl', 'exchange_fee', 'fee_source',
                 'side', 'order_id', 'closed_at', 'strategy',
             ]);
 

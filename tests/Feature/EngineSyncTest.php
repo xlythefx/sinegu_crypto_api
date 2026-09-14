@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Services\Pnl\TradingFee;
 use Illuminate\Support\Facades\DB;
 
 /** The engine's bookkeeping writes: positions, past positions, balances, transactions. */
@@ -118,6 +119,8 @@ class EngineSyncTest extends EngineTestCase
         // Binance's own Position History shows for the same trade.
         $this->assertSame(30.5, (float) $stored[0]->exchange_fee);
         $this->assertSame(90.0, (float) $stored[0]->realized_pnl);
+        // ...and says so: the receipts have not been matched yet.
+        $this->assertSame(TradingFee::SOURCE_ESTIMATED, $stored[0]->fee_source);
     }
 
     public function test_past_positions_net_the_fee_once_even_when_backfilled(): void
@@ -144,6 +147,7 @@ class EngineSyncTest extends EngineTestCase
         $row = DB::table('binance_pastpositions')->where('order_id', 424242)->first();
         $this->assertNull($row->realized_pnl);
         $this->assertNull($row->exchange_fee);
+        $this->assertNull($row->fee_source);
 
         // The poller backfills both — and the fill is netted exactly like an insert.
         $this->postJson('/api/engine/binance/past-positions/sync', [
@@ -153,6 +157,7 @@ class EngineSyncTest extends EngineTestCase
         $row = DB::table('binance_pastpositions')->where('order_id', 424242)->first();
         $this->assertSame(6.0, (float) $row->exchange_fee);   // 2 * 3000 * 0.0005 * 2
         $this->assertSame(394.0, (float) $row->realized_pnl);
+        $this->assertSame(TradingFee::SOURCE_ESTIMATED, $row->fee_source);
 
         // A repeat of the same sync must not deduct the fee a second time.
         $this->postJson('/api/engine/binance/past-positions/sync', [
@@ -191,6 +196,7 @@ class EngineSyncTest extends EngineTestCase
         $old = DB::table('binance_pastpositions')->where('order_id', 1001)->first();
         $this->assertSame(25.0, (float) $old->realized_pnl);
         $this->assertNull($old->exchange_fee);
+        $this->assertNull($old->fee_source);
 
         // The cutoff instant itself: net (10 × 50 × 0.0005 × 2 = 0.5).
         $this->postJson('/api/engine/binance/past-positions/sync', [
@@ -200,6 +206,7 @@ class EngineSyncTest extends EngineTestCase
         $new = DB::table('binance_pastpositions')->where('order_id', 1002)->first();
         $this->assertSame(24.5, (float) $new->realized_pnl);
         $this->assertSame(0.5, (float) $new->exchange_fee);
+        $this->assertSame(TradingFee::SOURCE_ESTIMATED, $new->fee_source);
 
         // Backfill of a pre-cutoff row written before its fills were indexed:
         // the P&L arrives later and is still stored gross.
@@ -213,6 +220,7 @@ class EngineSyncTest extends EngineTestCase
         $filled = DB::table('binance_pastpositions')->where('order_id', 1003)->first();
         $this->assertSame(25.0, (float) $filled->realized_pnl);
         $this->assertNull($filled->exchange_fee);
+        $this->assertNull($filled->fee_source);
     }
 
     public function test_balances_update_guards_initial_deposit(): void

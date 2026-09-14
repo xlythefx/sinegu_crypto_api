@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\BinanceAccount;
 use App\Models\UserCredential;
+use App\Services\Pnl\TradingFee;
 use App\Services\UserStatsService;
 use Illuminate\Database\QueryException;
 use Illuminate\Http\JsonResponse;
@@ -127,7 +128,7 @@ class AdminController extends Controller
             ->get([
                 't.id', 'a.id as account_id', 'a.name as account_name',
                 'a.balance as account_balance', 't.symbol', 't.exit_price',
-                't.realized_pnl', 't.exchange_fee', 't.side', 't.strategy',
+                't.realized_pnl', 't.exchange_fee', 't.fee_source', 't.side', 't.strategy',
                 't.closed_at', 't.position_amt',
             ]);
 
@@ -156,6 +157,7 @@ class AdminController extends Controller
                 // it) from TradingFee::NET_SINCE on; gross, null fee, before.
                 'realized_pnl' => round((float) ($t->realized_pnl ?? 0), 2),
                 'exchange_fee' => $t->exchange_fee === null ? null : round((float) $t->exchange_fee, 2),
+                'fee_source' => $t->fee_source,
                 'side' => $t->side,
                 'strategy' => $t->strategy,
                 'closed_at' => $t->closed_at,
@@ -249,10 +251,19 @@ class AdminController extends Controller
      * `closed_at` are read by invoicing (BinancePnlSource) and by the public
      * track record, so a correction here changes what a customer is billed and
      * what the landing page publishes.
+     *
+     * A typed `realized_pnl` stamps `fee_source = manual`, which is what stops
+     * the fee reconciler (FeeRebase) from later "correcting" the correction:
+     * it rebases from `realized_pnl + exchange_fee`, and after a hand edit
+     * that sum is no longer the exchange's gross figure. `exchange_fee` is left
+     * as it was — the admin typed a net number, and the label says why the fee
+     * beside it may not add up. Clearing the P&L (null) clears the label too:
+     * the row is back to "unknown", which the poller's backfill may fill.
      */
     public function updatePastPosition(Request $request, int $id): JsonResponse
     {
-        if (! DB::table('binance_pastpositions')->where('id', $id)->exists()) {
+        $existing = DB::table('binance_pastpositions')->where('id', $id)->first(['id', 'realized_pnl']);
+        if (! $existing) {
             return response()->json([
                 'success' => false,
                 'message' => 'Trade not found.',
@@ -284,6 +295,16 @@ class AdminController extends Controller
         }
         if (array_key_exists('strategy', $data) && $data['strategy'] !== null) {
             $data['strategy'] = trim($data['strategy']) ?: null;
+        }
+
+        if (array_key_exists('realized_pnl', $data)) {
+            $before = $existing->realized_pnl === null ? null : (float) $existing->realized_pnl;
+            $after = $data['realized_pnl'] === null ? null : (float) $data['realized_pnl'];
+            if ($after === null) {
+                $data['fee_source'] = null;
+            } elseif ($before === null || abs($after - $before) >= 1e-9) {
+                $data['fee_source'] = TradingFee::SOURCE_MANUAL;
+            }
         }
 
         try {

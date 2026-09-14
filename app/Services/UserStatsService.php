@@ -406,7 +406,7 @@ class UserStatsService
                 // /admin/past-positions/{id}); the write itself is still gated
                 // by the admin middleware, this only names the row.
                 'id', 'symbol', 'position_side', 'position_amt', 'realized_pnl',
-                'exit_price', 'side', 'strategy', 'closed_at',
+                'exchange_fee', 'fee_source', 'exit_price', 'side', 'strategy', 'closed_at',
             ]);
 
         $days = [];
@@ -421,6 +421,11 @@ class UserStatsService
                     'position_side' => $t->position_side,
                     'position_amt' => (float) $t->position_amt,
                     'realized_pnl' => round((float) $t->realized_pnl, 2),
+                    // The fee already taken out of realized_pnl, and whether
+                    // it is the estimate or the exchange's receipts (null on
+                    // a gross row) — so the popup can mark a pending "est.".
+                    'exchange_fee' => $t->exchange_fee === null ? null : round((float) $t->exchange_fee, 2),
+                    'fee_source' => $t->fee_source,
                     'exit_price' => $t->exit_price !== null
                         ? round((float) $t->exit_price, 8)
                         : null,

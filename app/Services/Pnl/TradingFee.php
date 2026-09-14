@@ -51,6 +51,14 @@ namespace App\Services\Pnl;
  * total that spans it is neither one basis nor the other. `NULL exchange_fee`
  * is the row-level marker of a gross figure, and it means the same thing in
  * both eras: "nothing has been taken out of this number".
+ *
+ * SINCE 2026-09-14 THE ESTIMATE IS THE STARTING POINT, NOT THE FINAL WORD.
+ * The engine now ships every commission and funding receipt into
+ * `exchange_fee_receipts`, and FeeRebase replaces the estimate with the summed
+ * receipts once a close can be matched to its entry fills (see FeeAttribution).
+ * `binance_pastpositions.fee_source` says which one a row holds — see the
+ * SOURCE_* constants. This class still owns the estimate and the cutoff; it
+ * does not know how to read receipts.
  */
 class TradingFee
 {
@@ -61,6 +69,28 @@ class TradingFee
      * restored history, which read this same constant.
      */
     public const NET_SINCE = '2026-09-11 00:00:00';
+
+    /**
+     * `fee_source` values. NULL (no constant) means nothing was taken out of
+     * `realized_pnl`, the same fact `exchange_fee IS NULL` states.
+     */
+    public const SOURCE_ESTIMATED = 'estimated'; // estimate(); receipts not yet matched, or unmatchable
+    public const SOURCE_ACTUAL = 'actual';       // commission + funding summed from matched receipts
+    public const SOURCE_MANUAL = 'manual';       // an admin typed the P&L; the reconciler must not touch it
+
+    /**
+     * What the exchange reported, recovered from what we store. Null when
+     * either half is unknown — a gross row has no fee to add back, and a
+     * net figure with no fee beside it cannot be turned back into anything.
+     */
+    public static function gross(?float $netPnl, ?float $fee): ?float
+    {
+        if ($netPnl === null || $fee === null) {
+            return null;
+        }
+
+        return round($netPnl + $fee, 8);
+    }
 
     /**
      * Whether a trade closed at this instant is stored net of commission.

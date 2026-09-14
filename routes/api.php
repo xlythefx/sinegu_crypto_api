@@ -295,4 +295,5 @@ Route::prefix('engine/{exchange}')
         Route::post('/balances', [EngineSyncController::class, 'updateBalances']);
         Route::post('/key-status', [EngineSyncController::class, 'keyStatus']);
         Route::post('/transactions', [EngineSyncController::class, 'insertTransactions']);
+        Route::post('/fees', [EngineSyncController::class, 'insertFees']);
     });

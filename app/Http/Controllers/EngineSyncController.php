@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Http\Controllers\Concerns\GuardsEngineExchange;
 use App\Models\BinanceAccount;
+use App\Services\Pnl\FeeRebase;
 use App\Services\Pnl\TradingFee;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -261,6 +262,7 @@ class EngineSyncController extends Controller
                     'exit_price' => $row['exit_price'] ?? null,
                     'realized_pnl' => $netPnl,
                     'exchange_fee' => $fee,
+                    'fee_source' => $fee === null ? null : TradingFee::SOURCE_ESTIMATED,
                     'side' => $row['side'],
                     'order_id' => $row['order_id'],
                     'closed_at' => $row['closed_at'],
@@ -286,6 +288,7 @@ class EngineSyncController extends Controller
             if ($existing->realized_pnl === null && $netPnl !== null) {
                 $fill['realized_pnl'] = $netPnl;
                 $fill['exchange_fee'] = $fee;
+                $fill['fee_source'] = $fee === null ? null : TradingFee::SOURCE_ESTIMATED;
             }
 
             if ($fill) {
@@ -450,5 +453,114 @@ class EngineSyncController extends Controller
         $inserted = DB::table('binance_transactions')->insertOrIgnore($rows);
 
         return response()->json(['success' => true, 'inserted' => $inserted]);
+    }
+
+    /**
+     * POST /api/engine/{exchange}/fees — the exchange's own fee receipts:
+     * one row per fill (its commission) and per funding payment, idempotent on
+     * (exchange, api_key, symbol, kind, ref). Append-only; nothing here ever
+     * updates a receipt.
+     *
+     * Ingest then ATTRIBUTES: every (api_key, symbol) pair in the payload is
+     * handed to FeeRebase, which replays the pair's receipts and moves any
+     * matched close from its estimated fee to the actual one. Synchronous
+     * because it is bounded — a tick's payload names a handful of pairs and
+     * each is one indexed read plus one small update — and because doing it
+     * here is what lets a close flip to "actual" within the same poller tick
+     * that delivered its receipts.
+     *
+     * A rebase failure must NOT fail the request. The engine advances its fee
+     * watermark only on a success response, so a 500 here would re-send the
+     * same receipts into the same exception every tick, forever. The receipts
+     * are already stored; the failure is reported and the daily
+     * `fees:reconcile` retries the pair.
+     */
+    public function insertFees(string $exchange, Request $request, FeeRebase $rebase): JsonResponse
+    {
+        if ($guard = $this->guardExchange($exchange)) {
+            return $guard;
+        }
+
+        $data = $request->validate([
+            'rows' => ['required', 'array', 'max:2000'],
+            'rows.*.api_key' => ['required', 'string', 'max:128'],
+            'rows.*.uni_id' => ['required', 'string', 'max:36'],
+            'rows.*.symbol' => ['required', 'string', 'max:32'],
+            'rows.*.kind' => ['required', 'in:fill,funding'],
+            'rows.*.ref' => ['required', 'integer'],
+            'rows.*.order_id' => ['nullable', 'integer'],
+            'rows.*.side' => ['nullable', 'string', 'max:8'],
+            'rows.*.position_side' => ['nullable', 'string', 'max:16'],
+            'rows.*.qty' => ['nullable', 'numeric'],
+            'rows.*.price' => ['nullable', 'numeric'],
+            'rows.*.realized_pnl' => ['nullable', 'numeric'],
+            'rows.*.amount' => ['required', 'numeric'],
+            'rows.*.asset' => ['required', 'string', 'max:16'],
+            'rows.*.charged_at' => ['required', 'integer'],
+        ]);
+
+        $startedAt = microtime(true);
+        $now = now();
+
+        $rows = array_map(fn (array $row) => [
+            'exchange' => $exchange,
+            'api_key' => $row['api_key'],
+            'uni_id' => $row['uni_id'],
+            'symbol' => strtoupper($row['symbol']),
+            'kind' => $row['kind'],
+            'ref' => $row['ref'],
+            'order_id' => $row['order_id'] ?? null,
+            'side' => isset($row['side']) ? strtoupper($row['side']) : null,
+            'position_side' => isset($row['position_side']) ? strtoupper($row['position_side']) : null,
+            'qty' => $row['qty'] ?? null,
+            'price' => $row['price'] ?? null,
+            'realized_pnl' => $row['realized_pnl'] ?? null,
+            'amount' => $row['amount'],
+            'asset' => strtoupper($row['asset']),
+            'charged_at' => $row['charged_at'],
+            'created_at' => $now,
+        ], $data['rows']);
+
+        $inserted = DB::table('exchange_fee_receipts')->insertOrIgnore($rows);
+
+        $pairs = [];
+        foreach ($rows as $row) {
+            $pairs[$row['api_key'].'|'.$row['symbol']] = [$row['api_key'], $row['symbol']];
+        }
+
+        $rebased = 0;
+        $unchanged = 0;
+        $unconfirmed = 0;
+        $errors = 0;
+
+        foreach ($pairs as [$apiKey, $symbol]) {
+            try {
+                $report = $rebase->pair($apiKey, $symbol);
+                $rebased += $report['rebased'];
+                $unchanged += $report['unchanged'];
+                $unconfirmed += count($report['unconfirmed']);
+            } catch (\Throwable $e) {
+                report($e);
+                $errors++;
+            }
+        }
+
+        $elapsed = microtime(true) - $startedAt;
+        if ($elapsed > 3.0) {
+            logger()->warning(sprintf(
+                'engine fees ingest took %.1fs for %d receipt(s) across %d pair(s)',
+                $elapsed, count($rows), count($pairs),
+            ));
+        }
+
+        return response()->json([
+            'success' => true,
+            'inserted' => $inserted,
+            'pairs' => count($pairs),
+            'rebased' => $rebased,
+            'unchanged' => $unchanged,
+            'unconfirmed' => $unconfirmed,
+            'errors' => $errors,
+        ]);
     }
 }

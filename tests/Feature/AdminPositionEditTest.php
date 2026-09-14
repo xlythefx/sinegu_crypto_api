@@ -3,6 +3,7 @@
 namespace Tests\Feature;
 
 use App\Models\UserCredential;
+use App\Services\Pnl\TradingFee;
 use Illuminate\Support\Facades\DB;
 
 /**
@@ -161,6 +162,44 @@ class AdminPositionEditTest extends EngineTestCase
         $this->putJson('/api/admin/past-positions/999999', [
             'realized_pnl' => 1,
         ], $this->headersFor($admin))->assertStatus(404);
+    }
+
+    /**
+     * A typed P&L stamps the row `manual`, which is what keeps the fee
+     * reconciler from later "correcting" the correction. Other fields leave
+     * the label alone; clearing the P&L clears it.
+     */
+    public function test_editing_realized_pnl_marks_the_row_manual(): void
+    {
+        $admin = $this->admin();
+        $owner = $this->makeUser();
+        $apiKey = DB::table('binance_accounts')->where('id', $this->makeAccount($owner))->value('api_key');
+        $id = $this->makeTrade($owner, $apiKey, [
+            'closed_at' => '2026-09-12 10:00:00',
+            'realized_pnl' => 24.5,
+            'exchange_fee' => 0.5,
+            'fee_source' => TradingFee::SOURCE_ESTIMATED,
+        ]);
+
+        // Same value re-submitted: not an edit, still estimated.
+        $this->putJson("/api/admin/past-positions/{$id}", ['realized_pnl' => 24.5], $this->headersFor($admin))->assertOk();
+        $this->assertSame(TradingFee::SOURCE_ESTIMATED, DB::table('binance_pastpositions')->find($id)->fee_source);
+
+        // Strategy / price edits never touch the label.
+        $this->putJson("/api/admin/past-positions/{$id}", ['strategy' => 'x', 'exit_price' => 51], $this->headersFor($admin))->assertOk();
+        $this->assertSame(TradingFee::SOURCE_ESTIMATED, DB::table('binance_pastpositions')->find($id)->fee_source);
+
+        // A different P&L is a hand correction.
+        $this->putJson("/api/admin/past-positions/{$id}", ['realized_pnl' => 30], $this->headersFor($admin))->assertOk();
+        $row = DB::table('binance_pastpositions')->find($id);
+        $this->assertSame(TradingFee::SOURCE_MANUAL, $row->fee_source);
+        $this->assertSame(0.5, (float) $row->exchange_fee); // left as it was
+
+        // Clearing it puts the row back to "unknown".
+        $this->putJson("/api/admin/past-positions/{$id}", ['realized_pnl' => null], $this->headersFor($admin))->assertOk();
+        $row = DB::table('binance_pastpositions')->find($id);
+        $this->assertNull($row->realized_pnl);
+        $this->assertNull($row->fee_source);
     }
 
     public function test_a_plain_user_cannot_edit_positions(): void

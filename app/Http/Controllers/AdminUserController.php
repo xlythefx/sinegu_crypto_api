@@ -198,7 +198,7 @@ class AdminUserController extends Controller
             ->get([
                 't.id', 'a.id as account_id', 'a.name as account_name',
                 'a.balance as account_balance', 't.symbol', 't.exit_price',
-                't.realized_pnl', 't.exchange_fee', 't.side', 't.strategy',
+                't.realized_pnl', 't.exchange_fee', 't.fee_source', 't.side', 't.strategy',
                 't.closed_at', 't.position_amt',
             ]);
 
@@ -228,6 +228,7 @@ class AdminUserController extends Controller
                 // the customer does rather than a number they cannot reconcile.
                 'realized_pnl' => round((float) ($t->realized_pnl ?? 0), 2),
                 'exchange_fee' => $t->exchange_fee === null ? null : round((float) $t->exchange_fee, 2),
+                'fee_source' => $t->fee_source,
                 'side' => $t->side,
                 'strategy' => $t->strategy,
                 'closed_at' => $t->closed_at,
