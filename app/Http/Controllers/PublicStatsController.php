@@ -101,19 +101,28 @@ class PublicStatsController extends Controller
         $trades = DB::table('binance_pastpositions')
             ->whereIn('api_key', $apiKeys)
             ->orderBy('closed_at')
-            ->get(['realized_pnl', 'closed_at']);
+            ->get(['realized_pnl', 'closed_at', 'symbol']);
 
         if ($trades->isEmpty()) {
             return $this->unavailable();
         }
 
         // --- Per-day aggregates ---------------------------------------------
+        // Also split per SYMBOL within the day, for the per-asset ranking each
+        // series point carries. A ticker is not private: the public channel
+        // already names it on every entry and exit it announces.
         $pnlByDay = [];
         $tradesByDay = [];
+        $pnlBySymbol = [];     // [day][symbol] => realized P&L
+        $tradesBySymbol = [];  // [day][symbol] => closed trades
         foreach ($trades as $trade) {
             $day = substr((string) $trade->closed_at, 0, 10);
-            $pnlByDay[$day] = ($pnlByDay[$day] ?? 0) + (float) $trade->realized_pnl;
+            $symbol = (string) $trade->symbol;
+            $pnl = (float) $trade->realized_pnl;
+            $pnlByDay[$day] = ($pnlByDay[$day] ?? 0) + $pnl;
             $tradesByDay[$day] = ($tradesByDay[$day] ?? 0) + 1;
+            $pnlBySymbol[$day][$symbol] = ($pnlBySymbol[$day][$symbol] ?? 0) + $pnl;
+            $tradesBySymbol[$day][$symbol] = ($tradesBySymbol[$day][$symbol] ?? 0) + 1;
         }
 
         $flowByDay = [];
@@ -175,6 +184,9 @@ class PublicStatsController extends Controller
                         ? round($cumulativePnl / $capitalContributed * 100, 3)
                         : null,
                     'trades' => $tradesByDay[$day] ?? 0,
+                    'assets' => $this->rankAssets(
+                        $pnlBySymbol[$day] ?? [], $tradesBySymbol[$day] ?? [], $capital
+                    ),
                 ];
             }
 
@@ -230,6 +242,38 @@ class PublicStatsController extends Controller
             ],
             'series' => $series,
         ];
+    }
+
+    /**
+     * One day's assets, best first: each symbol's realized P&L over the SAME
+     * capital the day's own `pct` is measured on, so the shares add up to the
+     * day's return (rounding aside). Percentages and trade counts only — the
+     * same privacy rule as everything else in the payload. Ordered on the raw
+     * P&L rather than the rounded percent so two symbols never tie on a
+     * rounding artefact; ties on the money itself fall back to the symbol.
+     *
+     * @param  array<string, float>  $pnlBySymbol
+     * @param  array<string, int>  $tradesBySymbol
+     * @return list<array{symbol: string, pct: float, trades: int}>
+     */
+    private function rankAssets(array $pnlBySymbol, array $tradesBySymbol, float $capital): array
+    {
+        $ranked = [];
+        foreach ($pnlBySymbol as $symbol => $pnl) {
+            $ranked[] = [
+                'symbol' => $symbol,
+                'pct' => round($pnl / $capital * 100, 3),
+                'trades' => $tradesBySymbol[$symbol] ?? 0,
+                '_pnl' => $pnl,
+            ];
+        }
+        usort($ranked, fn ($a, $b) => ($b['_pnl'] <=> $a['_pnl']) ?: strcmp($a['symbol'], $b['symbol']));
+
+        return array_map(fn ($row) => [
+            'symbol' => $row['symbol'],
+            'pct' => $row['pct'],
+            'trades' => $row['trades'],
+        ], $ranked);
     }
 
     /** Nothing to publish yet — a shape the landing page can render safely. */

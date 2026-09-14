@@ -40,12 +40,12 @@ class PublicTrackRecordTest extends EngineTestCase
         return $uniId;
     }
 
-    private function makeTrade(string $uniId, string $closedAt, float $pnl, string $apiKey = self::KEY): void
+    private function makeTrade(string $uniId, string $closedAt, float $pnl, string $apiKey = self::KEY, string $symbol = 'BTCUSDT'): void
     {
         DB::table('binance_pastpositions')->insert([
             'uni_id' => $uniId,
             'api_key' => $apiKey,
-            'symbol' => 'BTCUSDT',
+            'symbol' => $symbol,
             'position_side' => 'LONG',
             'position_amt' => 0.01,
             'entry_price' => 100000,
@@ -115,8 +115,10 @@ class PublicTrackRecordTest extends EngineTestCase
             // roc is realized P&L over the 1000 ever contributed: +100, then
             // +45. It coincides with cumulative ONLY because all the capital
             // arrived before the first trade — see the mid-history test below.
-            [['date' => '2026-01-02', 'pct' => 10.0, 'cumulative' => 10.0, 'roc' => 10.0, 'trades' => 1],
-                ['date' => '2026-01-03', 'pct' => -5.0, 'cumulative' => 4.5, 'roc' => 4.5, 'trades' => 2]],
+            [['date' => '2026-01-02', 'pct' => 10.0, 'cumulative' => 10.0, 'roc' => 10.0, 'trades' => 1,
+                'assets' => [['symbol' => 'BTCUSDT', 'pct' => 10.0, 'trades' => 1]]],
+                ['date' => '2026-01-03', 'pct' => -5.0, 'cumulative' => 4.5, 'roc' => 4.5, 'trades' => 2,
+                    'assets' => [['symbol' => 'BTCUSDT', 'pct' => -5.0, 'trades' => 2]]]],
             $body['series'],
         );
         $this->assertEquals(4.5, $body['stats']['total_pnl_pct']);
@@ -127,6 +129,38 @@ class PublicTrackRecordTest extends EngineTestCase
         $this->assertEquals(2.5, $body['stats']['avg_daily_pct']);  // (10 - 5) / 2
         $this->assertEquals(10.0, $body['stats']['avg_win_pct']);
         $this->assertEquals(-5.0, $body['stats']['avg_loss_pct']);
+    }
+
+    /**
+     * Each day carries its own leaderboard: every symbol's share of that day's
+     * return, best first, measured on the day's capital so the shares add up
+     * to the day's `pct`. The order is per DAY — yesterday's winner is not
+     * today's — which is what the Telegram daily recap ranks with medals.
+     */
+    public function test_each_day_ranks_its_assets_by_their_share_of_the_return(): void
+    {
+        $uniId = $this->makeMaster();
+        $this->makeDeposit($uniId, '2026-01-01 09:00:00', 1000);
+        $this->makeTrade($uniId, '2026-01-02 10:00:00', 50, self::KEY, 'LTCUSDT');   // +5% on 1000
+        $this->makeTrade($uniId, '2026-01-02 11:00:00', -30, self::KEY, 'BTCUSDT');  // -3%
+        $this->makeTrade($uniId, '2026-01-02 12:00:00', 30, self::KEY, 'LTCUSDT');   // +3% (LTC 8% in 2)
+        $this->makeTrade($uniId, '2026-01-03 10:00:00', 105, self::KEY, 'BTCUSDT');  // +10% on 1050
+        $this->makeTrade($uniId, '2026-01-03 11:00:00', -10.5, self::KEY, 'LTCUSDT'); // -1%
+
+        $series = $this->getJson('/api/public/track-record')->assertOk()->json('series');
+
+        $this->assertEquals(5.0, $series[0]['pct']);
+        $this->assertEquals(
+            [['symbol' => 'LTCUSDT', 'pct' => 8.0, 'trades' => 2],
+                ['symbol' => 'BTCUSDT', 'pct' => -3.0, 'trades' => 1]],
+            $series[0]['assets'],
+        );
+        $this->assertEquals(9.0, $series[1]['pct']);
+        $this->assertEquals(
+            [['symbol' => 'BTCUSDT', 'pct' => 10.0, 'trades' => 1],
+                ['symbol' => 'LTCUSDT', 'pct' => -1.0, 'trades' => 1]],
+            $series[1]['assets'],
+        );
     }
 
     public function test_a_mid_history_deposit_does_not_rewrite_earlier_days(): void
