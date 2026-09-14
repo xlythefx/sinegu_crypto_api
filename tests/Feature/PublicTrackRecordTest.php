@@ -112,11 +112,15 @@ class PublicTrackRecordTest extends EngineTestCase
         $this->assertTrue($body['available']);
         $this->assertEquals(
             // cumulative is CHAINED: 1.10 × 0.95 = 1.045, not 10 − 5.
-            [['date' => '2026-01-02', 'pct' => 10.0, 'cumulative' => 10.0, 'trades' => 1],
-                ['date' => '2026-01-03', 'pct' => -5.0, 'cumulative' => 4.5, 'trades' => 2]],
+            // roc is realized P&L over the 1000 ever contributed: +100, then
+            // +45. It coincides with cumulative ONLY because all the capital
+            // arrived before the first trade — see the mid-history test below.
+            [['date' => '2026-01-02', 'pct' => 10.0, 'cumulative' => 10.0, 'roc' => 10.0, 'trades' => 1],
+                ['date' => '2026-01-03', 'pct' => -5.0, 'cumulative' => 4.5, 'roc' => 4.5, 'trades' => 2]],
             $body['series'],
         );
         $this->assertEquals(4.5, $body['stats']['total_pnl_pct']);
+        $this->assertEquals(4.5, $body['stats']['return_on_capital_pct']);
         $this->assertSame(3, $body['stats']['trades']);
         $this->assertSame(2, $body['stats']['trading_days']);
         $this->assertEquals(50.0, $body['stats']['win_rate']);      // 1 of 2 days
@@ -138,6 +142,28 @@ class PublicTrackRecordTest extends EngineTestCase
         $this->assertEquals(10.0, $body['series'][0]['pct']);   // unchanged by the top-up
         $this->assertEquals(10.0, $body['series'][1]['pct']);
         $this->assertEquals(21.0, $body['stats']['total_pnl_pct']);  // 1.1 × 1.1
+
+        // The two measures answer different questions, and this is the shape
+        // that separates them: 1,100 of profit on 9,900 ever committed is 11.1%,
+        // against a compounded 21% earned mostly while the account was small.
+        // Publishing either alone is fine; publishing one unlabelled beside the
+        // other is what makes them look like a contradiction.
+        $this->assertEquals(11.11, $body['stats']['return_on_capital_pct']);
+    }
+
+    public function test_return_on_capital_counts_withdrawn_money_as_no_longer_committed(): void
+    {
+        $uniId = $this->makeMaster();
+        $this->makeDeposit($uniId, '2026-01-01 09:00:00', 1000);
+        $this->makeTrade($uniId, '2026-01-02 12:00:00', 100);
+        $this->makeDeposit($uniId, '2026-01-03 09:00:00', 500, 'WITHDRAWAL');
+
+        $body = $this->getJson('/api/public/track-record')->assertOk()->json();
+
+        // Base is 1000 − 500 = 500 committed, so 100 of profit reads as +20%.
+        // Net, not gross: money taken back out is not still at work, and the
+        // same figure the rest of the system sizes and bills on.
+        $this->assertEquals(20.0, $body['stats']['return_on_capital_pct']);
     }
 
     public function test_withdrawals_shrink_the_base_for_later_days(): void

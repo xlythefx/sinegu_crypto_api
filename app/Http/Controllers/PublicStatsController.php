@@ -96,6 +96,7 @@ class PublicStatsController extends Controller
 
         $apiKeys = $accounts->pluck('api_key')->all();
         $openingCapital = (float) $accounts->sum(fn ($a) => (float) $a->initial_deposit);
+        $cumulativePnl = 0.0;   // running realized P&L, for return-on-capital
 
         $trades = DB::table('binance_pastpositions')
             ->whereIn('api_key', $apiKeys)
@@ -129,6 +130,19 @@ class PublicStatsController extends Controller
         $days = array_unique(array_merge(array_keys($pnlByDay), array_keys($flowByDay)));
         sort($days);
 
+        // Every dollar ever committed, net of what was taken back out — the same
+        // `initial_deposit + (deposits − withdrawals)` the rest of the system
+        // sizes and bills on. It is the denominator of `roc` below, and it is
+        // FIXED across the whole series rather than running: a running one would
+        // make the line leap upward the day a deposit lands, with no trading
+        // behind the jump (on the live master, −25.6% to −3.2% in one July day).
+        //
+        // The cost of fixing it is that a new deposit rescales every past `roc`.
+        // That is why `roc` is a HEADLINE figure only and `cumulative` still
+        // draws the chart: the chart's compounded points are never revised,
+        // which is the property that makes a published percentage checkable.
+        $capitalContributed = $openingCapital + array_sum($flowByDay);
+
         $capital = $openingCapital;  // + net flows and realized P&L as we walk
         $growth = 1.0;        // compounded factor across the trading days so far
         $series = [];
@@ -148,10 +162,18 @@ class PublicStatsController extends Controller
                 // ends the walk anyway.
                 $growth *= max(0.0, 1 + $percent / 100);
                 $dayPercents[] = $percent;
+                $cumulativePnl += $pnl;
                 $series[] = [
                     'date' => $day,
                     'pct' => round($percent, 3),
                     'cumulative' => round(($growth - 1) * 100, 3),
+                    // Return on capital as of this day. Carried per-day, not
+                    // just as a headline, so a recap can quote the figure as it
+                    // stood at the END of the period it reports — a monthly
+                    // posted on the 30th must not include the 31st.
+                    'roc' => $capitalContributed > 0
+                        ? round($cumulativePnl / $capitalContributed * 100, 3)
+                        : null,
                     'trades' => $tradesByDay[$day] ?? 0,
                 ];
             }
@@ -175,6 +197,22 @@ class PublicStatsController extends Controller
             'success' => true,
             'available' => true,
             'stats' => [
+                // TWO different questions, deliberately both published:
+                //  return_on_capital_pct — what every dollar committed has
+                //    returned so far. The headline, and the figure the Telegram
+                //    recap quotes as "All-time".
+                //  total_pnl_pct — the compounded (time-weighted) return, which
+                //    is what the chart's `cumulative` points build to. Kept as
+                //    the chart's own total so the curve and its endpoint can
+                //    never disagree.
+                // They differ whenever capital arrived unevenly — on the live
+                // master, most of it landed AFTER the losing early months, so
+                // the compounded figure is much the harsher of the two. Label
+                // both wherever they appear; presented bare they read as a
+                // contradiction rather than as two measures.
+                'return_on_capital_pct' => $capitalContributed > 0
+                    ? $round($cumulativePnl / $capitalContributed * 100)
+                    : null,
                 'total_pnl_pct' => $round(($growth - 1) * 100),
                 'win_rate' => $tradingDays ? round(count($wins) / $tradingDays * 100, 1) : null,
                 // Only trades on PUBLISHED days. The page reads this as
