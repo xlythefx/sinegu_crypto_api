@@ -163,6 +163,28 @@ class PublicTrackRecordTest extends EngineTestCase
         );
     }
 
+    /**
+     * Days are Manila calendar days, not UTC ones (`services.track_record.timezone`).
+     * The Telegram daily recap reads "today" off this series, and a UTC day
+     * ends at 08:00 in Manila — so before this, a close at 20:00 UTC (04:00
+     * next morning locally) counted toward a day the reader had already seen
+     * reported. The zone is published so the recap slices on the same calendar.
+     */
+    public function test_days_are_bucketed_in_the_reporting_timezone_not_utc(): void
+    {
+        config(['services.track_record.timezone' => 'Asia/Manila']);
+        $uniId = $this->makeMaster(['initial_deposit' => 1000]);
+        $this->makeTrade($uniId, '2026-01-02 12:00:00', 100);  // 20:00 Manila, Jan 2
+        $this->makeTrade($uniId, '2026-01-02 20:00:00', 110);  // 04:00 Manila, Jan 3
+
+        $body = $this->getJson('/api/public/track-record')->assertOk()->json();
+
+        $this->assertSame('Asia/Manila', $body['timezone']);
+        $this->assertSame(['2026-01-02', '2026-01-03'], array_column($body['series'], 'date'));
+        $this->assertEquals(10.0, $body['series'][0]['pct']);  // 100 on 1000
+        $this->assertEquals(10.0, $body['series'][1]['pct']);  // 110 on 1100 — its own day, its own capital
+    }
+
     public function test_a_mid_history_deposit_does_not_rewrite_earlier_days(): void
     {
         $uniId = $this->makeMaster();

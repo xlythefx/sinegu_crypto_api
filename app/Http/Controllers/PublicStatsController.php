@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\UserCredential;
+use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
@@ -111,12 +112,17 @@ class PublicStatsController extends Controller
         // Also split per SYMBOL within the day, for the per-asset ranking each
         // series point carries. A ticker is not private: the public channel
         // already names it on every entry and exit it announces.
+        //
+        // "A day" is a calendar day in the reporting timezone, not UTC — see
+        // `services.track_record.timezone`. Timestamps are stored in UTC, so a
+        // trade closed at 20:00 UTC belongs to the NEXT Manila day.
+        $timezone = $this->timezone();
         $pnlByDay = [];
         $tradesByDay = [];
         $pnlBySymbol = [];     // [day][symbol] => realized P&L
         $tradesBySymbol = [];  // [day][symbol] => closed trades
         foreach ($trades as $trade) {
-            $day = substr((string) $trade->closed_at, 0, 10);
+            $day = $this->localDay($trade->closed_at, $timezone);
             $symbol = (string) $trade->symbol;
             $pnl = (float) $trade->realized_pnl;
             $pnlByDay[$day] = ($pnlByDay[$day] ?? 0) + $pnl;
@@ -130,7 +136,7 @@ class PublicStatsController extends Controller
             ->whereIn('api_key', $apiKeys)
             ->get(['type', 'amount', 'created_at']);
         foreach ($transactions as $tx) {
-            $day = substr((string) $tx->created_at, 0, 10);
+            $day = $this->localDay($tx->created_at, $timezone);
             $delta = (float) $tx->amount * ($tx->type === 'WITHDRAWAL' ? -1 : 1);
             $flowByDay[$day] = ($flowByDay[$day] ?? 0) + $delta;
         }
@@ -208,6 +214,7 @@ class PublicStatsController extends Controller
         return [
             'success' => true,
             'available' => true,
+            'timezone' => $timezone,
             'stats' => [
                 // TWO different questions, deliberately both published:
                 //  return_on_capital_pct — what every dollar committed has
@@ -282,8 +289,25 @@ class PublicStatsController extends Controller
         return [
             'success' => true,
             'available' => false,
+            'timezone' => $this->timezone(),
             'stats' => null,
             'series' => [],
         ];
+    }
+
+    /**
+     * The calendar the series is bucketed in. Published on the payload so a
+     * consumer that slices it into windows (the Telegram recaps) uses the same
+     * day boundaries rather than assuming UTC.
+     */
+    private function timezone(): string
+    {
+        return (string) config('services.track_record.timezone', 'UTC');
+    }
+
+    /** The `Y-m-d` a UTC timestamp falls on in the reporting timezone. */
+    private function localDay(mixed $utcTimestamp, string $timezone): string
+    {
+        return Carbon::parse((string) $utcTimestamp, 'UTC')->setTimezone($timezone)->toDateString();
     }
 }

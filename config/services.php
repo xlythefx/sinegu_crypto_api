@@ -88,4 +88,14 @@ return [
         'public_ip' => env('ENGINE_PUBLIC_IP', '2.24.139.176'),
     ],
 
+    'track_record' => [
+        // The calendar the PUBLISHED track record buckets its days in. Rows are
+        // stored in UTC; this decides where "a day" starts and ends for the
+        // landing-page chart AND the Telegram recaps (the engine reads it off
+        // the payload), so the two can never disagree about which day a trade
+        // belongs to. The team and the audience run on Manila time, and a
+        // "today" recap that ended at 08:00 local was the complaint.
+        'timezone' => env('TRACK_RECORD_TIMEZONE', 'Asia/Manila'),
+    ],
+
 ];
