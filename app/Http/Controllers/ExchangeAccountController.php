@@ -2,16 +2,23 @@
 
 namespace App\Http\Controllers;
 
-use App\Models\BinanceAccount;
+use App\Models\ExchangeAccount;
 use App\Services\EngineCache;
+use App\Services\Exchanges\ExchangeSchema;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Validation\Rule;
 
 /**
- * Exchange accounts connected by the user (Binance today; Bybit/MEXC later).
- * All routes are auth:sanctum and scoped to the authenticated user's uni_id.
+ * Exchange accounts connected by the user — Binance and MEXC today, one
+ * account per user PER exchange. All routes are auth:sanctum and scoped to the
+ * authenticated user's uni_id.
+ *
+ * Every exchange keeps its own accounts table (ExchangeSchema), so an account
+ * is addressed by (exchange, id) — ids collide across tables — and every row
+ * this controller returns carries its `exchange` so the client can route the
+ * rename / refresh / disconnect back to the right table.
  *
  * Connecting and disconnecting change WHO the engine trades, so both tell the
  * engine to drop its cached account list — see {@see EngineCache}. Without
@@ -24,42 +31,56 @@ class ExchangeAccountController extends Controller
     /** Seconds between manual balance refreshes, per account. */
     private const BALANCE_REFRESH_COOLDOWN = 60;
 
+    /**
+     * Exchanges with a futures TESTNET the engine can route a demo account to.
+     * MEXC has none: its only host is the real one, so a `demo` MEXC row could
+     * never be anything but a live account wearing the wrong badge — the engine
+     * refuses to trade one, and this refuses to create one.
+     */
+    private const HAS_TESTNET = ['binance' => true, 'mexc' => false];
+
     public function __construct(private EngineCache $engineCache) {}
 
     /**
      * GET /api/exchange/accounts
-     * Active (non-deleted) exchange accounts, newest first.
+     * Active (non-deleted) accounts on every exchange, newest first, each row
+     * stamped with its `exchange`.
      */
     public function index(Request $request): JsonResponse
     {
-        $accounts = BinanceAccount::where('uni_id', $request->user()->uni_id)
-            ->orderByDesc('created_at')
-            ->get()
-            ->map(function (BinanceAccount $account) {
-                // The deadline is derived, never stored: one source of truth
-                // (key_blocked_at) and no second column to drift from it.
-                $account->setAttribute(
-                    'key_grace_ends_at',
-                    $account->keyGraceEndsAt()?->toIso8601String()
-                );
+        $uniId = $request->user()->uni_id;
+        $accounts = collect();
 
-                return $account;
-            });
+        foreach (ExchangeSchema::supported() as $exchange) {
+            $rows = ExchangeSchema::for($exchange)->accountQuery()
+                ->where('uni_id', $uniId)
+                ->get()
+                ->map(fn (ExchangeAccount $account) => $this->present($account, $exchange));
+            $accounts = $accounts->concat($rows);
+        }
 
         return response()->json([
             'success' => true,
-            'accounts' => $accounts,
+            'accounts' => $accounts->sortByDesc(fn ($a) => (string) $a->created_at)->values(),
             // The address the user has to allow-list to fix a blocked key.
             'server_ip' => config('services.engine.public_ip'),
         ]);
     }
 
     /**
-     * POST /api/exchange/binance
-     * Connect a Binance account (from the connect wizard).
+     * POST /api/exchange/{exchange}
+     * Connect an account on one exchange (from the connect wizard). The old
+     * POST /api/exchange/binance is the same route with the exchange filled in.
      */
-    public function storeBinance(Request $request): JsonResponse
+    public function store(Request $request, string $exchange): JsonResponse
     {
+        if ($unsupported = $this->guardExchange($exchange)) {
+            return $unsupported;
+        }
+        $schema = ExchangeSchema::for($exchange);
+        $label = $schema->brokerLabel;
+        $table = $schema->accountsTable;
+
         // Only approved accounts may connect an exchange — the engine trades
         // every non-suspended account, so pending users must not slip a key in.
         if ($request->user()->status !== 'active') {
@@ -70,13 +91,15 @@ class ExchangeAccountController extends Controller
             ], 403);
         }
 
-        // One Binance account per user — soft-deleted (disconnected) rows don't count.
-        $alreadyConnected = BinanceAccount::where('uni_id', $request->user()->uni_id)->exists();
+        // One account per user PER EXCHANGE — soft-deleted (disconnected) rows
+        // don't count, and a Binance account does not use up the MEXC slot.
+        $alreadyConnected = $schema->accountQuery()->where('uni_id', $request->user()->uni_id)->exists();
 
         if ($alreadyConnected) {
             return response()->json([
                 'success' => false,
-                'message' => 'You already have a Binance account connected. Disconnect it first to connect a different one.',
+                'error_code' => 'ALREADY_CONNECTED',
+                'message' => "You already have a {$label} account connected. Disconnect it first to connect a different one.",
             ], 422);
         }
 
@@ -86,7 +109,7 @@ class ExchangeAccountController extends Controller
         // old row is the only row those credentials can ever live in — without
         // this, disconnecting a key locked its owner out of it forever, which
         // is exactly the path a blocked-key recovery walks down.
-        $existing = BinanceAccount::withTrashed()
+        $existing = $schema->accountQuery()->withTrashed()
             ->where('api_key', (string) $request->input('api_key'))
             ->first();
 
@@ -98,7 +121,7 @@ class ExchangeAccountController extends Controller
             return response()->json([
                 'success' => false,
                 'error_code' => 'API_KEY_TAKEN',
-                'message' => 'This API key is registered to a different account. Create a new key on Binance, or contact support.',
+                'message' => "This API key is registered to a different account. Create a new key on {$label}, or contact support.",
             ], 422);
         }
 
@@ -110,30 +133,41 @@ class ExchangeAccountController extends Controller
             // about to revive, which is being renamed anyway.
             'name' => [
                 'required', 'string', 'max:128',
-                Rule::unique('binance_accounts', 'name')->ignore($revivable?->id),
+                Rule::unique($table, 'name')->ignore($revivable?->id),
             ],
             // Live rows only: a disconnected key is free to come back.
             'api_key' => [
                 'required', 'string', 'max:128',
-                Rule::unique('binance_accounts', 'api_key')->whereNull('deleted_at'),
+                Rule::unique($table, 'api_key')->whereNull('deleted_at'),
             ],
             'secret_key' => ['required', 'string', 'max:128'],
             // Picks the network the engine talks to for this account: demo
-            // routes every call to the Binance futures testnet, live to
-            // mainnet (see accounts_api.py::base_for). The keys are NOT
-            // interchangeable — a testnet key is issued by a different site —
-            // so this is chosen by the user in the connect wizard, not guessed.
+            // routes every call to the exchange's futures testnet, live to
+            // mainnet. The keys are NOT interchangeable — a testnet key is
+            // issued by a different site — so this is chosen by the user in
+            // the connect wizard, not guessed. Exchanges without a testnet
+            // refuse `true` below.
             'demo' => ['sometimes', 'boolean'],
         ], [
             'name.unique' => 'An account with this name already exists.',
             'api_key.unique' => 'This API key is already connected.',
         ]);
 
+        $demo = (bool) ($validated['demo'] ?? false);
+        if ($demo && ! (self::HAS_TESTNET[$exchange] ?? false)) {
+            return response()->json([
+                'success' => false,
+                'error_code' => 'DEMO_NOT_AVAILABLE',
+                'message' => "{$label} has no futures testnet — connect live keys, or start with a Binance demo account.",
+                'errors' => ['demo' => ["{$label} has no futures testnet."]],
+            ], 422);
+        }
+
         $fields = [
             ...$validated,
             // Absent means live: the column defaults to 0, and the safe
             // failure for a missing flag is "trade where the keys came from".
-            'demo' => (bool) ($validated['demo'] ?? false),
+            'demo' => $demo,
             'uni_id' => $request->user()->uni_id,
         ];
 
@@ -144,7 +178,7 @@ class ExchangeAccountController extends Controller
             // poller tick settles it for real.
             $revivable->fill($fields + [
                 'enabled' => true,
-                'key_status' => BinanceAccount::KEY_OK,
+                'key_status' => ExchangeAccount::KEY_OK,
                 'key_error_code' => null,
                 'key_error_reason' => null,
                 'key_error_message' => null,
@@ -154,12 +188,12 @@ class ExchangeAccountController extends Controller
 
             $account = $revivable;
         } else {
-            $account = BinanceAccount::create($fields);
+            $account = ($schema->accountModel)::create($fields);
         }
 
         // Deliberately NOT reset on a revive: balance, initial_deposit and the
         // invoice high-water mark. It is the same account coming back, its
-        // deposits are still in binance_transactions, and letting a
+        // deposits are still in its transactions table, and letting a
         // disconnect/reconnect wipe the HWM would make billing optional.
 
         // Tradeable from the next signal, not from the next TTL expiry.
@@ -169,22 +203,32 @@ class ExchangeAccountController extends Controller
             'success' => true,
             'reconnected' => $revivable !== null,
             'message' => $revivable
-                ? 'Binance account reconnected'
-                : 'Binance account connected',
+                ? "{$label} account reconnected"
+                : "{$label} account connected",
             // refresh() picks up DB defaults (currency_type, enabled, created_at)
-            'account' => $account->refresh(),
+            'account' => $this->present($account->refresh(), $exchange),
         ], 201);
     }
 
+    /** Legacy route: PUT /api/exchange/accounts/{id} (Binance). */
+    public function updateBinance(Request $request, int $id): JsonResponse
+    {
+        return $this->update($request, 'binance', $id);
+    }
+
     /**
-     * PUT /api/exchange/accounts/{id}
+     * PUT /api/exchange/{exchange}/accounts/{id}
      * Rename one of the user's accounts. The name is a display label only —
-     * the engine keys accounts by id/uni_id and uses the name for logs and
+     * the engine keys accounts by api_key/uni_id and uses the name for logs and
      * Telegram lines — so a rename never affects trading.
      */
-    public function update(Request $request, int $id): JsonResponse
+    public function update(Request $request, string $exchange, int $id): JsonResponse
     {
-        $account = BinanceAccount::where('uni_id', $request->user()->uni_id)->find($id);
+        if ($unsupported = $this->guardExchange($exchange)) {
+            return $unsupported;
+        }
+        $schema = ExchangeSchema::for($exchange);
+        $account = $schema->accountQuery()->where('uni_id', $request->user()->uni_id)->find($id);
 
         if (! $account) {
             return response()->json([
@@ -198,7 +242,7 @@ class ExchangeAccountController extends Controller
                 'required',
                 'string',
                 'max:128',
-                Rule::unique('binance_accounts', 'name')->ignore($account->id),
+                Rule::unique($schema->accountsTable, 'name')->ignore($account->id),
             ],
         ], [
             'name.unique' => 'An account with this name already exists.',
@@ -209,31 +253,41 @@ class ExchangeAccountController extends Controller
         return response()->json([
             'success' => true,
             'message' => 'Account renamed',
-            'account' => $account->refresh(),
+            'account' => $this->present($account->refresh(), $exchange),
         ]);
     }
 
+    /** Legacy route: POST /api/exchange/accounts/{id}/refresh-balance (Binance). */
+    public function refreshBalanceBinance(Request $request, int $id): JsonResponse
+    {
+        return $this->refreshBalance($request, 'binance', $id);
+    }
+
     /**
-     * POST /api/exchange/accounts/{id}/refresh-balance
+     * POST /api/exchange/{exchange}/accounts/{id}/refresh-balance
      *
      * Pull this ONE account's balance from the exchange now, instead of waiting
      * for the poller's next tick — so someone who has just connected sees a real
      * number rather than "Awaiting sync" for five minutes.
      *
      * The cooldown is enforced HERE, not in the button: a client-side timer is
-     * a courtesy, and the thing being protected is our Binance rate limit, which
-     * a page reload or a curl would otherwise walk straight past. `Cache::add`
-     * is the atomic claim, so two rapid clicks cannot both win.
+     * a courtesy, and the thing being protected is our rate limit at the
+     * exchange, which a page reload or a curl would otherwise walk straight
+     * past. `Cache::add` is the atomic claim, so two rapid clicks cannot both win.
      */
-    public function refreshBalance(Request $request, int $id): JsonResponse
+    public function refreshBalance(Request $request, string $exchange, int $id): JsonResponse
     {
-        $account = BinanceAccount::where('uni_id', $request->user()->uni_id)->find($id);
+        if ($unsupported = $this->guardExchange($exchange)) {
+            return $unsupported;
+        }
+        $account = ExchangeSchema::for($exchange)->accountQuery()
+            ->where('uni_id', $request->user()->uni_id)->find($id);
 
         if (! $account) {
             return response()->json(['success' => false, 'message' => 'Account not found.'], 404);
         }
 
-        $key = "exchange:balance-refresh:{$account->id}";
+        $key = "exchange:balance-refresh:{$exchange}:{$account->id}";
         $readyAt = now()->addSeconds(self::BALANCE_REFRESH_COOLDOWN)->getTimestamp();
 
         if (! Cache::add($key, $readyAt, self::BALANCE_REFRESH_COOLDOWN)) {
@@ -247,32 +301,42 @@ class ExchangeAccountController extends Controller
             ], 429);
         }
 
-        // The engine reads Binance and posts the row back to /api/engine/*, so
-        // the fresh figure is in the DB by the time this returns. That round
+        // The engine reads the exchange and posts the row back to /api/engine/*,
+        // so the fresh figure is in the DB by the time this returns. That round
         // trip also settles the key verdict, which is why this doubles as the
-        // "I've fixed my IP allow-list, recheck" button.
+        // "I've fixed my IP allow-list, recheck" button. The engine finds the
+        // account by api_key across every venue it runs.
         $synced = $this->engineCache->syncBalances([$account->api_key]);
 
         $account->refresh();
-        $account->setAttribute('key_grace_ends_at', $account->keyGraceEndsAt()?->toIso8601String());
 
         return response()->json([
             'success' => $synced,
             'message' => $synced
                 ? 'Balance updated.'
                 : 'Could not reach the exchange right now. Your balance will update automatically.',
-            'account' => $account,
+            'account' => $this->present($account, $exchange),
             'retry_after' => self::BALANCE_REFRESH_COOLDOWN,
         ], $synced ? 200 : 503);
     }
 
+    /** Legacy route: DELETE /api/exchange/accounts/{id} (Binance). */
+    public function destroyBinance(Request $request, int $id): JsonResponse
+    {
+        return $this->destroy($request, 'binance', $id);
+    }
+
     /**
-     * DELETE /api/exchange/accounts/{id}
+     * DELETE /api/exchange/{exchange}/accounts/{id}
      * Soft-delete (disconnect) one of the user's accounts.
      */
-    public function destroy(Request $request, int $id): JsonResponse
+    public function destroy(Request $request, string $exchange, int $id): JsonResponse
     {
-        $account = BinanceAccount::where('uni_id', $request->user()->uni_id)->find($id);
+        if ($unsupported = $this->guardExchange($exchange)) {
+            return $unsupported;
+        }
+        $account = ExchangeSchema::for($exchange)->accountQuery()
+            ->where('uni_id', $request->user()->uni_id)->find($id);
 
         if (! $account) {
             return response()->json([
@@ -291,5 +355,33 @@ class ExchangeAccountController extends Controller
             'success' => true,
             'message' => 'Account disconnected',
         ]);
+    }
+
+    /** Null when the exchange is wired; a 400 otherwise (bybit, today). */
+    private function guardExchange(string $exchange): ?JsonResponse
+    {
+        if (ExchangeSchema::isSupported($exchange)) {
+            return null;
+        }
+
+        return response()->json([
+            'success' => false,
+            'error_code' => 'EXCHANGE_NOT_SUPPORTED',
+            'message' => ucfirst($exchange).' is coming soon.',
+        ], 400);
+    }
+
+    /**
+     * The row as the client sees it: which exchange it lives on (the client
+     * routes every later call by it) and the derived disconnect deadline. The
+     * deadline is derived, never stored: one source of truth (key_blocked_at)
+     * and no second column to drift from it.
+     */
+    private function present(ExchangeAccount $account, string $exchange): ExchangeAccount
+    {
+        $account->setAttribute('exchange', $exchange);
+        $account->setAttribute('key_grace_ends_at', $account->keyGraceEndsAt()?->toIso8601String());
+
+        return $account;
     }
 }

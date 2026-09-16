@@ -248,12 +248,27 @@ Route::middleware('auth:sanctum')->group(function () {
     });
 
     Route::prefix('exchange')->group(function () {
+        // Every exchange's accounts, each row stamped with its `exchange`.
         Route::get('/accounts', [ExchangeAccountController::class, 'index']);
-        Route::post('/binance', [ExchangeAccountController::class, 'storeBinance']);
-        Route::put('/accounts/{id}', [ExchangeAccountController::class, 'update']);
-        Route::delete('/accounts/{id}', [ExchangeAccountController::class, 'destroy']);
-        // Own 60s per-account cooldown inside the controller — see refreshBalance().
-        Route::post('/accounts/{id}/refresh-balance', [ExchangeAccountController::class, 'refreshBalance']);
+
+        // Accounts live in one table per exchange, so ids only mean something
+        // WITH the exchange — every write is addressed by both. Known-but-
+        // unwired exchanges (bybit) answer 400 from the controller, unknown
+        // names 404 here.
+        Route::post('/{exchange}', [ExchangeAccountController::class, 'store'])
+            ->whereIn('exchange', ['binance', 'bybit', 'mexc']);
+        Route::prefix('{exchange}/accounts')->whereIn('exchange', ['binance', 'bybit', 'mexc'])->group(function () {
+            Route::put('/{id}', [ExchangeAccountController::class, 'update'])->whereNumber('id');
+            Route::delete('/{id}', [ExchangeAccountController::class, 'destroy'])->whereNumber('id');
+            // Own 60s per-account cooldown inside the controller — see refreshBalance().
+            Route::post('/{id}/refresh-balance', [ExchangeAccountController::class, 'refreshBalance'])->whereNumber('id');
+        });
+
+        // Binance-only forms from before MEXC existed, kept so a client built
+        // against them keeps working through a deploy. Same handlers.
+        Route::put('/accounts/{id}', [ExchangeAccountController::class, 'updateBinance'])->whereNumber('id');
+        Route::delete('/accounts/{id}', [ExchangeAccountController::class, 'destroyBinance'])->whereNumber('id');
+        Route::post('/accounts/{id}/refresh-balance', [ExchangeAccountController::class, 'refreshBalanceBinance'])->whereNumber('id');
     });
 });
 

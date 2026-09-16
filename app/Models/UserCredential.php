@@ -52,12 +52,29 @@ class UserCredential extends Authenticatable
     }
 
     /**
-     * Connected (non-deleted) exchange accounts. SoftDeletes on BinanceAccount
+     * Connected (non-deleted) Binance accounts. SoftDeletes on the model
      * means disconnected accounts drop out automatically.
      */
     public function binanceAccounts()
     {
         return $this->hasMany(BinanceAccount::class, 'uni_id', 'uni_id');
+    }
+
+    /** Connected (non-deleted) MEXC accounts. */
+    public function mexcAccounts()
+    {
+        return $this->hasMany(MexcAccount::class, 'uni_id', 'uni_id');
+    }
+
+    /**
+     * Whether the user holds a live account on ANY exchange — what the
+     * onboarding nudges and the dashboard's "connect an exchange" empty
+     * states key off. One query per exchange table; there is no cross-table
+     * index to ask.
+     */
+    public function hasExchangeAccount(): bool
+    {
+        return $this->binanceAccounts()->exists() || $this->mexcAccounts()->exists();
     }
 
     /**
@@ -74,7 +91,7 @@ class UserCredential extends Authenticatable
             'created_at' => $this->created_at?->toISOString(),
             'user_profile' => $this->imageUrl($this->user_profile),
             'user_banner' => $this->imageUrl($this->user_banner),
-            'has_exchange_account' => $this->binanceAccounts()->exists(),
+            'has_exchange_account' => $this->hasExchangeAccount(),
         ];
     }
 
