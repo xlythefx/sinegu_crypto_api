@@ -2,7 +2,7 @@
 
 namespace App\Http\Controllers;
 
-use App\Models\BinanceAccount;
+use App\Services\Exchanges\ExchangeSchema;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Http;
@@ -19,8 +19,15 @@ use Illuminate\Support\Facades\Http;
  */
 class AdminManualTradeController extends Controller
 {
-    /** Only Binance has a live engine today (bybit/mexc land with their tables). */
-    private const WEBHOOK_PATHS = ['binance' => '/binance_abcd_webhook'];
+    /**
+     * One engine, one webhook path PER VENUE — the path decides which
+     * exchange's accounts the signal trades (trading-flask hooks.WEBHOOK_PATHS).
+     * Bybit lands here with its tables.
+     */
+    private const WEBHOOK_PATHS = [
+        'binance' => '/binance_abcd_webhook',
+        'mexc' => '/mexc_abcd_webhook',
+    ];
 
     private const MAX_INCREMENTS = 20;
 
@@ -72,16 +79,19 @@ class AdminManualTradeController extends Controller
             ], 400);
         }
 
-        $accounts = BinanceAccount::query()
-            ->join('user_credentials', 'user_credentials.uni_id', '=', 'binance_accounts.uni_id')
-            ->where('binance_accounts.enabled', 1)
-            ->where('binance_accounts.is_sandbox', 0)
+        // The venue's own accounts table — what its webhook path fans out to.
+        $schema = ExchangeSchema::for($exchange);
+        $t = $schema->accountsTable;
+        $accounts = $schema->accountQuery()
+            ->join('user_credentials', 'user_credentials.uni_id', '=', "{$t}.uni_id")
+            ->where("{$t}.enabled", 1)
+            ->where("{$t}.is_sandbox", 0)
             ->where('user_credentials.status', '!=', 'suspended')
             ->orderBy('user_credentials.name')
             ->get([
-                'binance_accounts.uni_id',
-                'binance_accounts.demo',
-                'binance_accounts.balance',
+                "{$t}.uni_id",
+                "{$t}.demo",
+                "{$t}.balance",
                 'user_credentials.name as user_name',
                 'user_credentials.email as user_email',
             ]);

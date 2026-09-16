@@ -77,6 +77,9 @@ return [
             // Legacy ENGINE_WEBHOOK_SECRET stays as a fallback so already-deployed
             // .env files keep working until they're renamed.
             'binance' => env('BINANCE_ENGINE_WEBHOOK_SECRET', env('ENGINE_WEBHOOK_SECRET')),
+            // Same engine process serves every venue's webhook path, so the
+            // token is the same unless MEXC is ever split into its own engine.
+            'mexc' => env('MEXC_ENGINE_WEBHOOK_SECRET', env('BINANCE_ENGINE_WEBHOOK_SECRET', env('ENGINE_WEBHOOK_SECRET'))),
         ],
         'targets' => [
             'local' => env('ENGINE_URL_LOCAL', 'http://127.0.0.1:5010'),
