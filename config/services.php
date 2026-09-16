@@ -48,6 +48,15 @@ return [
         'taker_fee_rate' => (float) env('BINANCE_TAKER_FEE_RATE', 0.0005),
     ],
 
+    // Same figure for MEXC USDT-M futures: standard TAKER commission 0.02% per
+    // side. Many MEXC pairs run 0-fee promotions, so this estimate can overstate
+    // the fee on those — the receipts ledger replaces it with the actual charge
+    // (FeeRebase) as soon as the close's fills are attributed, exactly as for
+    // Binance. ExchangeSchema maps the exchange name to this key.
+    'mexc' => [
+        'taker_fee_rate' => (float) env('MEXC_TAKER_FEE_RATE', 0.0002),
+    ],
+
     // The Python trading engine (trading-flask, package binance_abcd).
     //
     // `secret`          — engine -> API auth (X-Engine-Secret, VerifyEngineSecret).

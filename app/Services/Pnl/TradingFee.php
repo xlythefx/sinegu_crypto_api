@@ -100,10 +100,14 @@ class TradingFee
     {
         return strtotime($closedAt.' UTC') >= strtotime(self::NET_SINCE.' UTC');
     }
-    /** Taker commission per side, as a fraction. Binance USDⓈ-M standard: 0.05%. */
-    public static function rate(): float
+    /**
+     * Taker commission per side, as a fraction, for one exchange. Binance USDⓈ-M
+     * standard: 0.05%; MEXC USDT-M standard: 0.02%. The figure lives in
+     * config/services.php per exchange; ExchangeSchema knows which key.
+     */
+    public static function rate(string $exchange = 'binance'): float
     {
-        return (float) config('services.binance.taker_fee_rate', 0.0005);
+        return \App\Services\Exchanges\ExchangeSchema::for($exchange)->takerFeeRate();
     }
 
     /**
@@ -115,7 +119,7 @@ class TradingFee
      * fee must not be stored as a zero one. A null leaves that row's
      * `realized_pnl` gross, which the same backfill then corrects.
      */
-    public static function estimate(?float $quantity, ?float $exitPrice): ?float
+    public static function estimate(?float $quantity, ?float $exitPrice, string $exchange = 'binance'): ?float
     {
         if ($quantity === null || $exitPrice === null) {
             return null;
@@ -126,7 +130,7 @@ class TradingFee
             return null;
         }
 
-        return round($notional * self::rate() * 2, 8);
+        return round($notional * self::rate($exchange) * 2, 8);
     }
 
     /**
@@ -138,13 +142,18 @@ class TradingFee
      * null fee, so a late-discovered historical trade lands on the basis the
      * rest of its era is on rather than as the one net row among gross ones.
      */
-    public static function applyTo(?float $grossPnl, ?float $quantity, ?float $exitPrice, ?string $closedAt = null): array
-    {
+    public static function applyTo(
+        ?float $grossPnl,
+        ?float $quantity,
+        ?float $exitPrice,
+        ?string $closedAt = null,
+        string $exchange = 'binance',
+    ): array {
         if ($closedAt !== null && ! self::netsAt($closedAt)) {
             return [$grossPnl, null];
         }
 
-        $fee = self::estimate($quantity, $exitPrice);
+        $fee = self::estimate($quantity, $exitPrice, $exchange);
 
         if ($grossPnl === null || $fee === null) {
             return [$grossPnl, $fee];

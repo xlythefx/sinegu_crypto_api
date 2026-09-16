@@ -2,13 +2,14 @@
 
 namespace App\Services\Pnl;
 
+use App\Services\Exchanges\ExchangeSchema;
 use Illuminate\Support\Facades\DB;
 
 /**
  * Move a closed trade from its ESTIMATED fee to the ACTUAL one, from receipts.
  *
- * The one writer that changes `binance_pastpositions.realized_pnl` after the
- * ingest, so its rules are the whole story of when a stored P&L may move:
+ * The one writer that changes `{exchange}_pastpositions.realized_pnl` after
+ * the ingest, so its rules are the whole story of when a stored P&L may move:
  *
  *  - Only closes at/after TradingFee::NET_SINCE. History before it is gross
  *    by decision (see TradingFee) and stays gross even when receipts exist.
@@ -47,9 +48,15 @@ class FeeRebase
      *     changes:list<array{id:int, order_id:int, closed_at:string, fee_before:float, fee_after:float, pnl_before:float, pnl_after:float, source_before:string}>
      * }
      */
-    public function pair(string $apiKey, string $symbol, bool $dryRun = false): array
+    public function pair(string $apiKey, string $symbol, bool $dryRun = false, string $exchange = 'binance'): array
     {
+        $schema = ExchangeSchema::for($exchange);
+
+        // Receipts are filtered by exchange as well as by key: the ledger is one
+        // table for every exchange, and a Binance receipt must never be replayed
+        // against a MEXC close that happens to share api_key + symbol.
         $receipts = DB::table('exchange_fee_receipts')
+            ->where('exchange', $exchange)
             ->where('api_key', $apiKey)
             ->where('symbol', $symbol)
             ->orderBy('charged_at')
@@ -58,7 +65,7 @@ class FeeRebase
 
         $results = FeeAttribution::attribute($receipts);
 
-        $rows = self::qualifying()
+        $rows = self::qualifying($exchange)
             ->where('api_key', $apiKey)
             ->where('symbol', $symbol)
             ->orderBy('closed_at')
@@ -113,7 +120,7 @@ class FeeRebase
                 continue;
             }
 
-            $affected = DB::table('binance_pastpositions')
+            $affected = DB::table($schema->pastPositions)
                 ->where('id', $row->id)
                 ->where('fee_source', $row->fee_source)
                 ->where('realized_pnl', $row->realized_pnl)
@@ -137,9 +144,9 @@ class FeeRebase
      * The rows this class is allowed to touch. Shared with the reconcile
      * command so "which pairs have work" and "which rows move" cannot drift.
      */
-    public static function qualifying(): \Illuminate\Database\Query\Builder
+    public static function qualifying(string $exchange = 'binance'): \Illuminate\Database\Query\Builder
     {
-        return DB::table('binance_pastpositions')
+        return DB::table(ExchangeSchema::for($exchange)->pastPositions)
             ->where('closed_at', '>=', TradingFee::NET_SINCE)
             ->whereNotNull('realized_pnl')
             ->whereNotNull('exchange_fee')

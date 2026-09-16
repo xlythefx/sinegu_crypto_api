@@ -42,6 +42,13 @@ class EngineAuthTest extends EngineTestCase
             ->assertJson(['success' => false, 'error_code' => 'EXCHANGE_NOT_SUPPORTED']);
     }
 
+    public function test_mexc_is_wired(): void
+    {
+        $this->getJson('/api/engine/mexc/accounts', $this->engineHeaders())
+            ->assertOk()
+            ->assertJson(['success' => true, 'accounts' => []]);
+    }
+
     public function test_unknown_exchange_is_404(): void
     {
         $this->getJson('/api/engine/kraken/accounts', $this->engineHeaders())

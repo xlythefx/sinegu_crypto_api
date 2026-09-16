@@ -4,7 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Http\Controllers\Concerns\GuardsEngineExchange;
 use App\Models\Asset;
-use App\Models\BinanceAccount;
+use App\Models\ExchangeAccount;
 use App\Models\OpenStrategy;
 use App\Models\TradeLog;
 use Illuminate\Http\JsonResponse;
@@ -26,8 +26,9 @@ class EngineController extends Controller
      * Filters: enabled, not soft-deleted, not sandbox, owner not suspended
      * (the owner join closes the mother project's gap where suspending a user
      * did not stop their bot trading). Deliberately includes secret_key — the
-     * engine needs it to sign Binance requests; BinanceAccount::$hidden still
-     * protects every user-facing endpoint.
+     * engine needs it to sign exchange requests; ExchangeAccount::$hidden still
+     * protects every user-facing endpoint. Which accounts table answers is
+     * decided by the route's {exchange} through ExchangeSchema.
      *
      * An account whose key the exchange refuses is deliberately still LISTED,
      * carrying `key_blocked: true`. The engine skips it in the trade fan-out
@@ -42,30 +43,33 @@ class EngineController extends Controller
             return $guard;
         }
 
-        $accounts = BinanceAccount::query()
-            ->join('user_credentials', 'user_credentials.uni_id', '=', 'binance_accounts.uni_id')
-            ->where('binance_accounts.enabled', 1)
-            ->where('binance_accounts.is_sandbox', 0)
+        $schema = $this->schema($exchange);
+        $t = $schema->accountsTable;
+
+        $accounts = $schema->accountQuery()
+            ->join('user_credentials', 'user_credentials.uni_id', '=', "{$t}.uni_id")
+            ->where("{$t}.enabled", 1)
+            ->where("{$t}.is_sandbox", 0)
             ->where('user_credentials.status', '!=', 'suspended')
-            ->orderBy('binance_accounts.created_at')
+            ->orderBy("{$t}.created_at")
             ->get([
-                'binance_accounts.api_key',
-                'binance_accounts.secret_key',
-                'binance_accounts.name',
-                'binance_accounts.uni_id',
-                'binance_accounts.balance',
-                'binance_accounts.initial_deposit',
-                'binance_accounts.currency_type',
-                'binance_accounts.demo',
-                'binance_accounts.enabled',
-                'binance_accounts.key_status',
+                "{$t}.api_key",
+                "{$t}.secret_key",
+                "{$t}.name",
+                "{$t}.uni_id",
+                "{$t}.balance",
+                "{$t}.initial_deposit",
+                "{$t}.currency_type",
+                "{$t}.demo",
+                "{$t}.enabled",
+                "{$t}.key_status",
             ]);
 
-        $netFlow = $this->netTransferFlow($accounts->pluck('api_key')->all());
+        $netFlow = $this->netTransferFlow($accounts->pluck('api_key')->all(), $schema->transactions);
 
         return response()->json([
             'success' => true,
-            'accounts' => $accounts->map(function (BinanceAccount $a) use ($netFlow) {
+            'accounts' => $accounts->map(function (ExchangeAccount $a) use ($netFlow) {
                 $initial = $a->initial_deposit !== null ? (float) $a->initial_deposit : null;
 
                 return [
@@ -95,19 +99,19 @@ class EngineController extends Controller
     }
 
     /**
-     * api_key => (deposits - withdrawals) across binance_transactions.
-     * One grouped query for the whole account set, not one per account.
+     * api_key => (deposits - withdrawals) across the exchange's transactions
+     * table. One grouped query for the whole account set, not one per account.
      *
      * @param  list<string>  $apiKeys
      * @return array<string, float>
      */
-    private function netTransferFlow(array $apiKeys): array
+    private function netTransferFlow(array $apiKeys, string $transactionsTable): array
     {
         if (! $apiKeys) {
             return [];
         }
 
-        return DB::table('binance_transactions')
+        return DB::table($transactionsTable)
             ->whereIn('api_key', $apiKeys)
             ->groupBy('api_key')
             ->selectRaw('api_key')

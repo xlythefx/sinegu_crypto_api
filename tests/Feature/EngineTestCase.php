@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Services\Exchanges\ExchangeSchema;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
@@ -9,7 +10,7 @@ use Tests\TestCase;
 
 /**
  * Shared plumbing for /api/engine/* tests: a configured engine secret,
- * header helper, and seeders for user_credentials / binance_accounts
+ * header helper, and seeders for user_credentials / {exchange}_accounts
  * (no factories exist for these tables — rows are inserted directly).
  */
 abstract class EngineTestCase extends TestCase
@@ -49,13 +50,13 @@ abstract class EngineTestCase extends TestCase
         return $uniId;
     }
 
-    /** Insert a binance_accounts row; returns its id. */
-    protected function makeAccount(string $uniId, array $overrides = []): int
+    /** Insert an {exchange}_accounts row (binance by default); returns its id. */
+    protected function makeAccount(string $uniId, array $overrides = [], string $exchange = 'binance'): int
     {
         static $n = 0;
         $n++;
 
-        return DB::table('binance_accounts')->insertGetId(array_merge([
+        return DB::table(ExchangeSchema::for($exchange)->accountsTable)->insertGetId(array_merge([
             'uni_id' => $uniId,
             'api_key' => "test-api-key-{$n}-".Str::random(8),
             'secret_key' => "test-secret-key-{$n}",

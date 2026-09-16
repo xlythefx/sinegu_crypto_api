@@ -3,7 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Http\Controllers\Concerns\GuardsEngineExchange;
-use App\Models\BinanceAccount;
+use App\Models\ExchangeAccount;
 use App\Services\Pnl\FeeRebase;
 use App\Services\Pnl\TradingFee;
 use Illuminate\Http\JsonResponse;
@@ -14,6 +14,12 @@ use Illuminate\Support\Facades\DB;
  * Bookkeeping writes from the Python trading engine's pollers + webhook
  * write-through: positions, past positions, balances, transactions.
  * Behind the `engine` middleware (X-Engine-Secret); exchange-scoped routes.
+ *
+ * Every write lands in the route exchange's OWN tables (ExchangeSchema): a
+ * MEXC poller posting to /engine/mexc/positions/sync fills mexc_positions and
+ * can never touch a Binance row. The payload shapes are identical across
+ * exchanges by design — the engine's adapters convert units (MEXC contracts →
+ * coins, BTC_USDT → BTCUSDT) before anything reaches here.
  */
 class EngineSyncController extends Controller
 {
@@ -59,6 +65,7 @@ class EngineSyncController extends Controller
             'initial_margin', 'maint_margin', 'isolated_margin', 'isolated_wallet',
         ];
 
+        $table = $this->schema($exchange)->positions;
         $deleted = 0;
         $inserted = 0;
 
@@ -80,12 +87,12 @@ class EngineSyncController extends Controller
                 $rows[] = $row;
             }
 
-            DB::transaction(function () use ($account, $rows, &$deleted, &$inserted) {
-                $deleted += DB::table('binance_positions')
+            DB::transaction(function () use ($table, $account, $rows, &$deleted, &$inserted) {
+                $deleted += DB::table($table)
                     ->where('api_key', $account['api_key'])
                     ->delete();
                 if ($rows) {
-                    DB::table('binance_positions')->insert($rows);
+                    DB::table($table)->insert($rows);
                     $inserted += count($rows);
                 }
             });
@@ -115,8 +122,10 @@ class EngineSyncController extends Controller
             'entry_price' => ['nullable', 'numeric'],
         ]);
 
-        $result = DB::transaction(function () use ($data) {
-            $query = DB::table('binance_positions')
+        $table = $this->schema($exchange)->positions;
+
+        $result = DB::transaction(function () use ($table, $data) {
+            $query = DB::table($table)
                 ->where('api_key', $data['api_key'])
                 ->where('symbol', $data['symbol'])
                 ->where('position_side', $data['position_side']);
@@ -139,7 +148,7 @@ class EngineSyncController extends Controller
                 return 'updated';
             }
 
-            DB::table('binance_positions')->insert([
+            DB::table($table)->insert([
                 'api_key' => $data['api_key'],
                 'uni_id' => $data['uni_id'],
                 'symbol' => $data['symbol'],
@@ -170,7 +179,7 @@ class EngineSyncController extends Controller
             'position_side' => ['nullable', 'string', 'max:16'],
         ]);
 
-        $query = DB::table('binance_positions')
+        $query = DB::table($this->schema($exchange)->positions)
             ->where('symbol', $data['symbol'])
             ->whereRaw('ABS(position_amt) > 0.00000001');
         if (! empty($data['position_side'])) {
@@ -233,12 +242,13 @@ class EngineSyncController extends Controller
             'rows.*.strategy' => ['nullable', 'string', 'max:100'],
         ]);
 
+        $table = $this->schema($exchange)->pastPositions;
         $inserted = 0;
         $updated = 0;
         $skipped = 0;
 
         foreach ($data['rows'] as $row) {
-            $existing = DB::table('binance_pastpositions')
+            $existing = DB::table($table)
                 ->where('api_key', $row['api_key'])
                 ->where('symbol', $row['symbol'])
                 ->where('order_id', $row['order_id'])
@@ -249,10 +259,11 @@ class EngineSyncController extends Controller
                 (float) $row['position_amt'],
                 isset($row['exit_price']) ? (float) $row['exit_price'] : null,
                 $row['closed_at'],
+                $exchange,
             );
 
             if (! $existing) {
-                DB::table('binance_pastpositions')->insert([
+                DB::table($table)->insert([
                     'api_key' => $row['api_key'],
                     'uni_id' => $row['uni_id'],
                     'symbol' => $row['symbol'],
@@ -292,7 +303,7 @@ class EngineSyncController extends Controller
             }
 
             if ($fill) {
-                DB::table('binance_pastpositions')->where('id', $existing->id)->update($fill);
+                DB::table($table)->where('id', $existing->id)->update($fill);
                 $updated++;
             } else {
                 $skipped++;
@@ -325,10 +336,11 @@ class EngineSyncController extends Controller
             'rows.*.initial_deposit' => ['nullable', 'numeric'],
         ]);
 
+        $schema = $this->schema($exchange);
         $updatedCount = 0;
 
         foreach ($data['rows'] as $row) {
-            $account = BinanceAccount::where('api_key', $row['api_key'])->first();
+            $account = $schema->accountQuery()->where('api_key', $row['api_key'])->first();
             if (! $account) {
                 continue;
             }
@@ -379,15 +391,15 @@ class EngineSyncController extends Controller
             'message' => ['nullable', 'string', 'max:255'],
         ]);
 
-        $account = BinanceAccount::where('api_key', $data['api_key'])->first();
+        $account = $this->schema($exchange)->accountQuery()->where('api_key', $data['api_key'])->first();
         if (! $account) {
             return response()->json(['success' => true, 'updated' => false]);
         }
 
-        $blocked = $data['status'] === BinanceAccount::KEY_BLOCKED;
+        $blocked = $data['status'] === ExchangeAccount::KEY_BLOCKED;
         $wasBlocked = $account->keyIsBlocked();
 
-        $account->key_status = $blocked ? BinanceAccount::KEY_BLOCKED : BinanceAccount::KEY_OK;
+        $account->key_status = $blocked ? ExchangeAccount::KEY_BLOCKED : ExchangeAccount::KEY_OK;
         $account->key_checked_at = now();
 
         if ($blocked) {
@@ -450,7 +462,7 @@ class EngineSyncController extends Controller
             'created_at' => now(),
         ], $data['rows']);
 
-        $inserted = DB::table('binance_transactions')->insertOrIgnore($rows);
+        $inserted = DB::table($this->schema($exchange)->transactions)->insertOrIgnore($rows);
 
         return response()->json(['success' => true, 'inserted' => $inserted]);
     }
@@ -535,7 +547,7 @@ class EngineSyncController extends Controller
 
         foreach ($pairs as [$apiKey, $symbol]) {
             try {
-                $report = $rebase->pair($apiKey, $symbol);
+                $report = $rebase->pair($apiKey, $symbol, false, $exchange);
                 $rebased += $report['rebased'];
                 $unchanged += $report['unchanged'];
                 $unconfirmed += count($report['unconfirmed']);

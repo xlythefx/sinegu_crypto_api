@@ -162,7 +162,7 @@ class EngineFeesTest extends EngineTestCase
     {
         $this->app->instance(FeeRebase::class, new class extends FeeRebase
         {
-            public function pair(string $apiKey, string $symbol, bool $dryRun = false): array
+            public function pair(string $apiKey, string $symbol, bool $dryRun = false, string $exchange = 'binance'): array
             {
                 throw new \RuntimeException('boom');
             }

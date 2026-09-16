@@ -2,6 +2,7 @@
 
 namespace App\Console\Commands;
 
+use App\Services\Exchanges\ExchangeSchema;
 use App\Services\Pnl\FeeRebase;
 use App\Services\Pnl\TradingFee;
 use Illuminate\Console\Command;
@@ -30,6 +31,7 @@ class FeesReconcile extends Command
     protected $signature = 'fees:reconcile
         {--dry-run : Report what would change, write nothing}
         {--api-key= : One account only}
+        {--exchange= : One exchange only (default: every wired exchange)}
         {--since= : Only closes at/after this UTC datetime (default: the net-of-fees cutoff)}';
 
     protected $description = 'Rebase closed trades from estimated to actual exchange fees using the receipts ledger';
@@ -39,20 +41,42 @@ class FeesReconcile extends Command
         $dryRun = (bool) $this->option('dry-run');
         $since = $this->option('since') ?: TradingFee::NET_SINCE;
 
-        $pairs = FeeRebase::qualifying()
-            ->where('closed_at', '>=', $since)
-            ->when($this->option('api-key'), fn ($q, $key) => $q->where('api_key', $key))
-            ->whereExists(function ($q) {
-                $q->select(DB::raw(1))
-                    ->from('exchange_fee_receipts as f')
-                    ->whereColumn('f.api_key', 'binance_pastpositions.api_key')
-                    ->whereColumn('f.symbol', 'binance_pastpositions.symbol');
-            })
-            ->select('api_key', 'symbol')
-            ->distinct()
-            ->orderBy('api_key')
-            ->orderBy('symbol')
-            ->get();
+        $exchanges = $this->option('exchange')
+            ? [strtolower((string) $this->option('exchange'))]
+            : ExchangeSchema::supported();
+        foreach ($exchanges as $exchange) {
+            if (! ExchangeSchema::isSupported($exchange)) {
+                $this->error("Exchange '{$exchange}' is not wired to the engine.");
+
+                return self::FAILURE;
+            }
+        }
+
+        // One (exchange, api_key, symbol) triple per row: each exchange has its
+        // own pastpositions table, and its receipts are the ledger rows
+        // stamped with that exchange.
+        $pairs = collect();
+        foreach ($exchanges as $exchange) {
+            $table = ExchangeSchema::for($exchange)->pastPositions;
+            $pairs = $pairs->concat(
+                FeeRebase::qualifying($exchange)
+                    ->where('closed_at', '>=', $since)
+                    ->when($this->option('api-key'), fn ($q, $key) => $q->where('api_key', $key))
+                    ->whereExists(function ($q) use ($exchange, $table) {
+                        $q->select(DB::raw(1))
+                            ->from('exchange_fee_receipts as f')
+                            ->where('f.exchange', $exchange)
+                            ->whereColumn('f.api_key', "{$table}.api_key")
+                            ->whereColumn('f.symbol', "{$table}.symbol");
+                    })
+                    ->select('api_key', 'symbol')
+                    ->distinct()
+                    ->orderBy('api_key')
+                    ->orderBy('symbol')
+                    ->get()
+                    ->map(fn ($row) => (object) ['exchange' => $exchange, 'api_key' => $row->api_key, 'symbol' => $row->symbol])
+            );
+        }
 
         if ($pairs->isEmpty()) {
             $this->info('No closed trades with receipts to reconcile.');
@@ -67,17 +91,18 @@ class FeesReconcile extends Command
 
         foreach ($pairs as $pair) {
             try {
-                $report = $rebase->pair($pair->api_key, $pair->symbol, $dryRun);
+                $report = $rebase->pair($pair->api_key, $pair->symbol, $dryRun, $pair->exchange);
             } catch (\Throwable $e) {
                 report($e);
                 $failed++;
-                $this->error(sprintf('%s %s — FAILED: %s', $this->keyHint($pair->api_key), $pair->symbol, $e->getMessage()));
+                $this->error(sprintf('%s %s %s — FAILED: %s', $pair->exchange, $this->keyHint($pair->api_key), $pair->symbol, $e->getMessage()));
 
                 continue;
             }
 
             $this->line(sprintf(
-                '%s %-10s rows=%d %s=%d unchanged=%d unconfirmed=%d skipped=%d',
+                '%-7s %s %-10s rows=%d %s=%d unchanged=%d unconfirmed=%d skipped=%d',
+                $pair->exchange,
                 $this->keyHint($pair->api_key),
                 $pair->symbol,
                 $report['rows'],
@@ -95,6 +120,7 @@ class FeesReconcile extends Command
 
             foreach ($report['changes'] as $c) {
                 $changes[] = [
+                    $pair->exchange,
                     $this->keyHint($pair->api_key),
                     $pair->symbol,
                     $c['order_id'],
@@ -105,20 +131,20 @@ class FeesReconcile extends Command
                 ];
             }
             foreach ($report['unconfirmed'] as $u) {
-                $unconfirmed[] = [$this->keyHint($pair->api_key), $pair->symbol, $u['order_id'], $u['reason']];
+                $unconfirmed[] = [$pair->exchange, $this->keyHint($pair->api_key), $pair->symbol, $u['order_id'], $u['reason']];
             }
         }
 
         if ($changes) {
             $this->newLine();
             $this->info($dryRun ? 'Would change:' : 'Changed:');
-            $this->table(['account', 'symbol', 'order', 'closed at', 'fee', 'realized P&L', 'was'], $changes);
+            $this->table(['exchange', 'account', 'symbol', 'order', 'closed at', 'fee', 'realized P&L', 'was'], $changes);
         }
 
         if ($unconfirmed) {
             $this->newLine();
             $this->warn('Still estimated (cannot be confirmed from the ledger):');
-            $this->table(['account', 'symbol', 'order', 'reason'], $unconfirmed);
+            $this->table(['exchange', 'account', 'symbol', 'order', 'reason'], $unconfirmed);
         }
 
         $this->newLine();
