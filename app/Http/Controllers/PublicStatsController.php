@@ -102,7 +102,7 @@ class PublicStatsController extends Controller
         $trades = DB::table('binance_pastpositions')
             ->whereIn('api_key', $apiKeys)
             ->orderBy('closed_at')
-            ->get(['realized_pnl', 'closed_at', 'symbol']);
+            ->get(['realized_pnl', 'closed_at', 'symbol', 'increments_closed']);
 
         if ($trades->isEmpty()) {
             return $this->unavailable();
@@ -116,19 +116,27 @@ class PublicStatsController extends Controller
         // "A day" is a calendar day in the reporting timezone, not UTC — see
         // `services.track_record.timezone`. Timestamps are stored in UTC, so a
         // trade closed at 20:00 UTC belongs to the NEXT Manila day.
+        //
+        // A "trade" is an entry-sized INCREMENT, not a row. A row is one close
+        // order, and the engine closes a whole stacked position in one order —
+        // so three announced entries (`Increment (1/3)`…`(3/3)`) close as one
+        // row. The channel counts increments on both sides; a recap that counted
+        // rows read as missing trades. NULL (a row from before the column, or
+        // one the reconciliation poller wrote) is at least one close.
         $timezone = $this->timezone();
         $pnlByDay = [];
         $tradesByDay = [];
         $pnlBySymbol = [];     // [day][symbol] => realized P&L
-        $tradesBySymbol = [];  // [day][symbol] => closed trades
+        $tradesBySymbol = [];  // [day][symbol] => closed increments
         foreach ($trades as $trade) {
             $day = $this->localDay($trade->closed_at, $timezone);
             $symbol = (string) $trade->symbol;
             $pnl = (float) $trade->realized_pnl;
+            $increments = max(1, (int) $trade->increments_closed);
             $pnlByDay[$day] = ($pnlByDay[$day] ?? 0) + $pnl;
-            $tradesByDay[$day] = ($tradesByDay[$day] ?? 0) + 1;
+            $tradesByDay[$day] = ($tradesByDay[$day] ?? 0) + $increments;
             $pnlBySymbol[$day][$symbol] = ($pnlBySymbol[$day][$symbol] ?? 0) + $pnl;
-            $tradesBySymbol[$day][$symbol] = ($tradesBySymbol[$day][$symbol] ?? 0) + 1;
+            $tradesBySymbol[$day][$symbol] = ($tradesBySymbol[$day][$symbol] ?? 0) + $increments;
         }
 
         $flowByDay = [];

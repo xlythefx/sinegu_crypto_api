@@ -123,6 +123,38 @@ class EngineSyncTest extends EngineTestCase
         $this->assertSame(TradingFee::SOURCE_ESTIMATED, $stored[0]->fee_source);
     }
 
+    /**
+     * The webhook close path knows how many entry-sized increments a close took
+     * off (`Increments Closed (3/3)`); the reconciliation poller does not. The
+     * row keeps whichever arrived, and a later sync without it never blanks it.
+     */
+    public function test_past_positions_keep_the_increments_the_close_reported(): void
+    {
+        $headers = $this->engineHeaders();
+        $base = [
+            'api_key' => 'key-a', 'uni_id' => 'uni-key-a', 'symbol' => 'LTCUSDT',
+            'position_side' => 'LONG', 'position_amt' => 42.0, 'side' => 'SELL',
+            'order_id' => 555, 'closed_at' => '2026-09-16 09:45:00',
+        ];
+
+        // Poller row first (no increments), then the webhook's bookkeeping fills it.
+        $this->postJson('/api/engine/binance/past-positions/sync', ['rows' => [$base]], $headers)
+            ->assertOk()->assertJson(['inserted' => 1]);
+        $this->assertNull(DB::table('binance_pastpositions')->where('order_id', 555)->value('increments_closed'));
+
+        $this->postJson('/api/engine/binance/past-positions/sync', ['rows' => [$base + ['increments_closed' => 3]]], $headers)
+            ->assertOk()->assertJson(['updated' => 1]);
+        $this->assertSame(3, (int) DB::table('binance_pastpositions')->where('order_id', 555)->value('increments_closed'));
+
+        // A re-sync without the field (the poller again) leaves it alone.
+        $this->postJson('/api/engine/binance/past-positions/sync', ['rows' => [$base]], $headers)
+            ->assertOk()->assertJson(['skipped' => 1]);
+        $this->assertSame(3, (int) DB::table('binance_pastpositions')->where('order_id', 555)->value('increments_closed'));
+
+        $this->postJson('/api/engine/binance/past-positions/sync', ['rows' => [$base + ['increments_closed' => 0]]], $headers)
+            ->assertStatus(422);
+    }
+
     public function test_past_positions_net_the_fee_once_even_when_backfilled(): void
     {
         $headers = $this->engineHeaders();

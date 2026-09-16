@@ -233,6 +233,10 @@ class EngineSyncController extends Controller
             'rows.*.symbol' => ['required', 'string', 'max:32'],
             'rows.*.position_side' => ['required', 'string', 'max:16'],
             'rows.*.position_amt' => ['required', 'numeric'],
+            // Entry-sized increments this close took off (the engine's
+            // `Increments Closed (n/cap)` figure). Only the webhook close path
+            // knows it; the poller's reconciliation rows leave it null.
+            'rows.*.increments_closed' => ['nullable', 'integer', 'min:1', 'max:65535'],
             'rows.*.entry_price' => ['nullable', 'numeric'],
             'rows.*.exit_price' => ['nullable', 'numeric'],
             'rows.*.realized_pnl' => ['nullable', 'numeric'],
@@ -269,6 +273,7 @@ class EngineSyncController extends Controller
                     'symbol' => $row['symbol'],
                     'position_side' => $row['position_side'],
                     'position_amt' => $row['position_amt'],
+                    'increments_closed' => $row['increments_closed'] ?? null,
                     'entry_price' => $row['entry_price'] ?? null,
                     'exit_price' => $row['exit_price'] ?? null,
                     'realized_pnl' => $netPnl,
@@ -287,7 +292,7 @@ class EngineSyncController extends Controller
 
             // Fill only the gaps — never overwrite what an earlier sync wrote.
             $fill = [];
-            foreach (['entry_price', 'exit_price', 'strategy'] as $col) {
+            foreach (['entry_price', 'exit_price', 'strategy', 'increments_closed'] as $col) {
                 if ($existing->$col === null && isset($row[$col])) {
                     $fill[$col] = $row[$col];
                 }

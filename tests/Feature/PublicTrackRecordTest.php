@@ -40,7 +40,7 @@ class PublicTrackRecordTest extends EngineTestCase
         return $uniId;
     }
 
-    private function makeTrade(string $uniId, string $closedAt, float $pnl, string $apiKey = self::KEY, string $symbol = 'BTCUSDT'): void
+    private function makeTrade(string $uniId, string $closedAt, float $pnl, string $apiKey = self::KEY, string $symbol = 'BTCUSDT', ?int $increments = null): void
     {
         DB::table('binance_pastpositions')->insert([
             'uni_id' => $uniId,
@@ -48,6 +48,7 @@ class PublicTrackRecordTest extends EngineTestCase
             'symbol' => $symbol,
             'position_side' => 'LONG',
             'position_amt' => 0.01,
+            'increments_closed' => $increments,
             'entry_price' => 100000,
             'exit_price' => 101000,
             'realized_pnl' => $pnl,
@@ -183,6 +184,31 @@ class PublicTrackRecordTest extends EngineTestCase
         $this->assertSame(['2026-01-02', '2026-01-03'], array_column($body['series'], 'date'));
         $this->assertEquals(10.0, $body['series'][0]['pct']);  // 100 on 1000
         $this->assertEquals(10.0, $body['series'][1]['pct']);  // 110 on 1100 — its own day, its own capital
+    }
+
+    /**
+     * A row is one close ORDER, and a stacked position closes in one order —
+     * so the channel's `Increment (1/3)…(3/3)` entries end as a single row.
+     * The published trade count is increments, not rows, or the daily recap
+     * says "4 trades" under six announced closes. A row without the figure
+     * (history, poller rows) is at least one.
+     */
+    public function test_trade_counts_are_increments_closed_not_rows(): void
+    {
+        $uniId = $this->makeMaster(['initial_deposit' => 1000]);
+        $this->makeTrade($uniId, '2026-01-02 10:00:00', 30, self::KEY, 'LTCUSDT', 3);
+        $this->makeTrade($uniId, '2026-01-02 11:00:00', 10, self::KEY, 'LTCUSDT', 1);
+        $this->makeTrade($uniId, '2026-01-02 12:00:00', 10, self::KEY, 'BTCUSDT', null);
+
+        $body = $this->getJson('/api/public/track-record')->assertOk()->json();
+
+        $this->assertSame(5, $body['series'][0]['trades']);
+        $this->assertSame(5, $body['stats']['trades']);
+        $this->assertEquals(
+            [['symbol' => 'LTCUSDT', 'pct' => 4.0, 'trades' => 4],
+                ['symbol' => 'BTCUSDT', 'pct' => 1.0, 'trades' => 1]],
+            $body['series'][0]['assets'],
+        );
     }
 
     public function test_a_mid_history_deposit_does_not_rewrite_earlier_days(): void
