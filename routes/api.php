@@ -37,6 +37,10 @@ use Illuminate\Support\Facades\Route;
 // cached, so the landing page's traffic never turns into query load.
 Route::prefix('public')->group(function () {
     Route::get('/track-record', [PublicStatsController::class, 'trackRecord']);
+    // One exchange's slice of the same record — what the Telegram recaps post,
+    // one message per exchange. Unknown names 404 (no query, nothing to leak).
+    Route::get('/track-record/{exchange}', [PublicStatsController::class, 'trackRecordForExchange'])
+        ->whereIn('exchange', \App\Services\Exchanges\ExchangeSchema::supported());
 });
 
 Route::prefix('auth')->group(function () {

@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\UserCredential;
+use App\Services\Exchanges\ExchangeSchema;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\Cache;
@@ -23,11 +24,15 @@ class PublicStatsController extends Controller
 
     private const CACHE_KEY = 'public.track-record';
 
+    /** The `exchange` value of the record that pools every exchange. */
+    public const ALL_EXCHANGES = 'all';
+
     /**
      * GET /api/public/track-record
      * The master account's verified track record: daily percentage returns,
      * their running sum, and the headline stats — feeds the landing page's
-     * "See every trade, verified" section.
+     * "See every trade, verified" section. Every supported exchange the master
+     * trades on is pooled as ONE portfolio (capital summed, P&L summed).
      *
      * Always 200. `available: false` means there is nothing to publish yet
      * (no master account, or no closed trades) — the landing page renders its
@@ -35,9 +40,26 @@ class PublicStatsController extends Controller
      */
     public function trackRecord(): JsonResponse
     {
-        return response()->json(
-            Cache::remember(self::CACHE_KEY, self::CACHE_TTL_SECONDS, fn () => $this->compute())
-        );
+        return response()->json($this->cached(null));
+    }
+
+    /**
+     * GET /api/public/track-record/{exchange}
+     * The same record restricted to one exchange's accounts, capital and
+     * trades. The Telegram recaps read this, one message per exchange, so the
+     * channel that labels every entry `LTCUSDT · Binance` recaps the same way.
+     * The route's whereIn keeps unknown names out of here.
+     */
+    public function trackRecordForExchange(string $exchange): JsonResponse
+    {
+        return response()->json($this->cached($exchange));
+    }
+
+    private function cached(?string $exchange): array
+    {
+        $key = self::CACHE_KEY.'.'.($exchange ?? self::ALL_EXCHANGES);
+
+        return Cache::remember($key, self::CACHE_TTL_SECONDS, fn () => $this->compute($exchange));
     }
 
     /**
@@ -70,13 +92,15 @@ class PublicStatsController extends Controller
      * two disagree about, the total is the one a customer can verify against a
      * balance, and this section's whole claim is that it is verifiable.
      */
-    private function compute(): array
+    private function compute(?string $exchange): array
     {
         $master = UserCredential::where('type', 'master')->first();
 
         if (! $master) {
-            return $this->unavailable();
+            return $this->unavailable($exchange);
         }
+
+        $exchanges = $exchange === null ? ExchangeSchema::supported() : [$exchange];
 
         // Scoped by API KEY, not by uni_id: the master's uni_id can also own a
         // TESTNET account (demo=1) and invoice-sandbox scratch accounts, whose
@@ -85,28 +109,46 @@ class PublicStatsController extends Controller
         // applies no soft-delete scope) — a key that has since been
         // disconnected still traded real money, and dropping it would rewrite
         // history every time an account is rotated.
-        $accounts = DB::table('binance_accounts')
-            ->where('uni_id', $master->uni_id)
-            ->where('demo', 0)
-            ->where('is_sandbox', 0)
-            ->get(['api_key', 'initial_deposit']);
-
-        if ($accounts->isEmpty()) {
-            return $this->unavailable();
+        //
+        // Each exchange has its own four tables (ExchangeSchema); the pooled
+        // record walks all of them into ONE set of per-day buckets. An API key
+        // is unique within its exchange, so trades and transfers are read per
+        // exchange against that exchange's own keys, never across.
+        $openingCapital = 0.0;
+        $contributing = [];   // exchanges on which the master has a real account
+        $trades = collect();
+        $transactions = collect();
+        foreach ($exchanges as $name) {
+            $schema = ExchangeSchema::for($name);
+            $accounts = DB::table($schema->accountsTable)
+                ->where('uni_id', $master->uni_id)
+                ->where('demo', 0)
+                ->where('is_sandbox', 0)
+                ->get(['api_key', 'initial_deposit']);
+            if ($accounts->isEmpty()) {
+                continue;
+            }
+            $contributing[] = $name;
+            $apiKeys = $accounts->pluck('api_key')->all();
+            $openingCapital += (float) $accounts->sum(fn ($a) => (float) $a->initial_deposit);
+            $trades = $trades->concat(
+                DB::table($schema->pastPositions)
+                    ->whereIn('api_key', $apiKeys)
+                    ->get(['realized_pnl', 'closed_at', 'symbol', 'increments_closed'])
+            );
+            $transactions = $transactions->concat(
+                DB::table($schema->transactions)
+                    ->whereIn('api_key', $apiKeys)
+                    ->get(['type', 'amount', 'created_at'])
+            );
         }
 
-        $apiKeys = $accounts->pluck('api_key')->all();
-        $openingCapital = (float) $accounts->sum(fn ($a) => (float) $a->initial_deposit);
+        if (! $contributing || $trades->isEmpty()) {
+            return $this->unavailable($exchange);
+        }
+
+        $trades = $trades->sortBy('closed_at')->values();
         $cumulativePnl = 0.0;   // running realized P&L, for return-on-capital
-
-        $trades = DB::table('binance_pastpositions')
-            ->whereIn('api_key', $apiKeys)
-            ->orderBy('closed_at')
-            ->get(['realized_pnl', 'closed_at', 'symbol', 'increments_closed']);
-
-        if ($trades->isEmpty()) {
-            return $this->unavailable();
-        }
 
         // --- Per-day aggregates ---------------------------------------------
         // Also split per SYMBOL within the day, for the per-asset ranking each
@@ -140,9 +182,6 @@ class PublicStatsController extends Controller
         }
 
         $flowByDay = [];
-        $transactions = DB::table('binance_transactions')
-            ->whereIn('api_key', $apiKeys)
-            ->get(['type', 'amount', 'created_at']);
         foreach ($transactions as $tx) {
             $day = $this->localDay($tx->created_at, $timezone);
             $delta = (float) $tx->amount * ($tx->type === 'WITHDRAWAL' ? -1 : 1);
@@ -208,7 +247,7 @@ class PublicStatsController extends Controller
         }
 
         if (! $series) {  // trades exist but no capital was ever recorded
-            return $this->unavailable();
+            return $this->unavailable($exchange);
         }
 
         // --- Headline stats ---------------------------------------------------
@@ -222,6 +261,11 @@ class PublicStatsController extends Controller
         return [
             'success' => true,
             'available' => true,
+            'exchange' => $exchange ?? self::ALL_EXCHANGES,
+            // Which exchanges the figures are drawn from — names only, never
+            // how many accounts. On the pooled record this is what tells a
+            // reader "Binance only, so far".
+            'exchanges' => $contributing,
             'timezone' => $timezone,
             'stats' => [
                 // TWO different questions, deliberately both published:
@@ -292,11 +336,13 @@ class PublicStatsController extends Controller
     }
 
     /** Nothing to publish yet — a shape the landing page can render safely. */
-    private function unavailable(): array
+    private function unavailable(?string $exchange): array
     {
         return [
             'success' => true,
             'available' => false,
+            'exchange' => $exchange ?? self::ALL_EXCHANGES,
+            'exchanges' => [],
             'timezone' => $this->timezone(),
             'stats' => null,
             'series' => [],

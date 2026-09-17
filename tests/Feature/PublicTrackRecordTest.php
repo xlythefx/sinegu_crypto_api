@@ -388,6 +388,69 @@ class PublicTrackRecordTest extends EngineTestCase
         }
     }
 
+    /* ============ per exchange ============ */
+
+    private function makeMexcAccount(string $uniId, float $initialDeposit, string $apiKey = 'mexc-key'): void
+    {
+        $this->makeAccount($uniId, ['api_key' => $apiKey, 'initial_deposit' => $initialDeposit], 'mexc');
+    }
+
+    private function makeMexcTrade(string $uniId, string $closedAt, float $pnl, string $apiKey = 'mexc-key'): void
+    {
+        DB::table('mexc_pastpositions')->insert([
+            'uni_id' => $uniId, 'api_key' => $apiKey, 'symbol' => 'LTC_USDT',
+            'position_side' => 'LONG', 'position_amt' => 1, 'entry_price' => 50, 'exit_price' => 51,
+            'realized_pnl' => $pnl, 'side' => 'SELL', 'closed_at' => $closedAt,
+        ]);
+    }
+
+    /**
+     * The pooled record is one portfolio across exchanges; the per-exchange
+     * routes slice it. The Telegram recaps post one message per exchange from
+     * the slices, so each must be measured on ITS OWN capital, not the pool's.
+     */
+    public function test_the_record_pools_exchanges_and_slices_per_exchange(): void
+    {
+        $uniId = $this->makeMaster(['initial_deposit' => 1000]);
+        $this->makeMexcAccount($uniId, 4000);
+        $this->makeTrade($uniId, '2026-01-02 12:00:00', 100);       // Binance: +10% of 1000
+        $this->makeMexcTrade($uniId, '2026-01-02 13:00:00', 400);   // MEXC: +10% of 4000
+
+        $all = $this->getJson('/api/public/track-record')->assertOk()->json();
+        $this->assertSame('all', $all['exchange']);
+        $this->assertSame(['binance', 'mexc'], $all['exchanges']);
+        $this->assertEquals(10.0, $all['series'][0]['pct']);   // 500 on 5000
+        $this->assertSame(2, $all['series'][0]['trades']);
+
+        $binance = $this->getJson('/api/public/track-record/binance')->assertOk()->json();
+        $this->assertSame('binance', $binance['exchange']);
+        $this->assertSame(['binance'], $binance['exchanges']);
+        $this->assertEquals(10.0, $binance['series'][0]['pct']);
+        $this->assertSame(1, $binance['series'][0]['trades']);
+        $this->assertSame('BTCUSDT', $binance['series'][0]['assets'][0]['symbol']);
+
+        $mexc = $this->getJson('/api/public/track-record/mexc')->assertOk()->json();
+        $this->assertEquals(10.0, $mexc['series'][0]['pct']);
+        $this->assertSame('LTC_USDT', $mexc['series'][0]['assets'][0]['symbol']);
+    }
+
+    public function test_an_exchange_the_master_does_not_trade_is_unavailable_not_empty_zeros(): void
+    {
+        $uniId = $this->makeMaster(['initial_deposit' => 1000]);
+        $this->makeTrade($uniId, '2026-01-02 12:00:00', 100);
+
+        $this->getJson('/api/public/track-record/mexc')->assertOk()
+            ->assertJson(['available' => false, 'exchange' => 'mexc', 'exchanges' => []]);
+        // ...and the pooled record says which exchanges it is actually drawn from.
+        $this->getJson('/api/public/track-record')->assertOk()
+            ->assertJson(['available' => true, 'exchanges' => ['binance']]);
+    }
+
+    public function test_unknown_exchange_is_a_404_not_a_query(): void
+    {
+        $this->getJson('/api/public/track-record/bybit')->assertNotFound();
+    }
+
     public function test_other_users_trades_are_not_counted(): void
     {
         $master = $this->makeMaster();
