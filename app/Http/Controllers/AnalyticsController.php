@@ -2,11 +2,11 @@
 
 namespace App\Http\Controllers;
 
+use App\Services\Exchanges\ExchangeSchema;
 use App\Services\UserStatsService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
-use Illuminate\Support\Facades\DB;
 
 class AnalyticsController extends Controller
 {
@@ -17,15 +17,14 @@ class AnalyticsController extends Controller
 
     /**
      * GET /api/analytics
-     * Aggregated performance analytics for the authenticated user,
-     * computed from the binance_* tables (all connected accounts).
-     * Per-exchange data is shaped as arrays so mexc / bybit tables
-     * can append later without contract changes.
+     * Aggregated performance analytics for the authenticated user over every
+     * connected account's `{exchange}_*` tables (UserStatsService decides
+     * the scope; `by_exchange` carries one entry per venue in it).
      *
      * Query filters — every one of them narrows the closed-trade set that
      * feeds EVERY metric below, so the page can never mix a filtered headline
      * with unfiltered detail:
-     *   exchange       all | binance (anything else has no tables yet)
+     *   exchange       all | binance | mexc (a venue without tables is a 400)
      *   from, to       inclusive 'YYYY-MM-DD' bounds on the close date
      *   symbols[]      + symbol_mode   = include | exclude (default exclude)
      *   strategies[]   + strategy_mode = include | exclude (default exclude)
@@ -35,8 +34,14 @@ class AnalyticsController extends Controller
     {
         $uniId = $request->user()->uni_id;
 
-        $rawExchange = $request->query('exchange', 'all');
-        $exchange = is_string($rawExchange) ? strtolower(trim($rawExchange)) : '';
+        $exchange = UserStatsService::normalizeExchange($request->query('exchange'));
+        if ($exchange === null) {
+            return response()->json([
+                'success' => false,
+                'error' => 'EXCHANGE_NOT_SUPPORTED',
+                'message' => 'That exchange is not available yet.',
+            ], 400);
+        }
         $from = $this->date($request->query('from'));
         $to = $this->date($request->query('to'));
         $symbols = $this->chips($request->query('symbols'));
@@ -44,35 +49,19 @@ class AnalyticsController extends Controller
         $strategies = $this->chips($request->query('strategies'));
         $strategyMode = $this->mode($request->query('strategy_mode'));
 
-        // Only the binance_* tables exist today. Asking for another exchange
-        // yields an empty dataset rather than silently serving Binance numbers.
-        $supported = $exchange === 'all' || $exchange === 'binance';
-
-        $accounts = $supported ? $this->stats->displayAccounts($uniId) : collect();
-        $apiKeys = $accounts->pluck('api_key')->all();
+        $accounts = $this->stats->displayAccounts($uniId, $exchange);
 
         // Scoped by the accounts above rather than by uni_id, so a
         // disconnected account's trades stop counting once its balance no
-        // longer does — see UserStatsService::displayApiKeys().
+        // longer does — see UserStatsService::displayApiKeys(). Each account
+        // is read from its own exchange's tables.
         // BASIS: everything below is computed BEFORE exchange fees
         // (`pnl_gross`) — the page reports the strategy, and fees are its
         // running cost, shown as their own figure (`fees`) and as the `*_net`
         // twin beside each money figure for the hover breakdown.
-        $everyTrade = $supported
-            ? UserStatsService::withFeeBasis(
-                DB::table('binance_pastpositions')
-                    ->whereIn('api_key', $apiKeys)
-                    ->orderBy('closed_at')
-                    ->get()
-            )
-            : collect();
+        $everyTrade = UserStatsService::withFeeBasis($this->stats->pastPositions($accounts));
 
-        $transactions = $supported
-            ? DB::table('binance_transactions')
-                ->whereIn('api_key', $apiKeys)
-                ->orderBy('created_at')
-                ->get()
-            : collect();
+        $transactions = $this->stats->transactions($accounts);
 
         $passesChips = fn ($p) => $this->passes($symbols, $symbolMode, trim((string) $p->symbol))
             && $this->passes($strategies, $strategyMode, $this->strategyKey($p->strategy));
@@ -208,14 +197,12 @@ class AnalyticsController extends Controller
         usort($bySymbol, fn ($a, $b) => abs($b['realized_pnl']) <=> abs($a['realized_pnl']));
         $bySymbol = array_slice($bySymbol, 0, 12);
 
-        // ---- Per-exchange (array so new exchanges append later) -------
-        $byExchange = [
-            [
-                'exchange' => 'Binance',
-                'balance' => round($currentCapital, 2),
-                'unrealized' => round($totalUnrealized, 2),
-            ],
-        ];
+        // ---- Per-exchange: one entry per venue in scope ----------------
+        $byExchange = array_map(fn (string $ex) => [
+            'exchange' => ExchangeSchema::for($ex)->brokerLabel,
+            'balance' => round((float) $accounts->where('exchange', $ex)->sum('balance'), 2),
+            'unrealized' => round((float) $accounts->where('exchange', $ex)->sum('unrealized_pnl'), 2),
+        ], UserStatsService::exchanges($exchange));
 
         // ---- Flows -----------------------------------------------------
         $recentFlows = $transactions

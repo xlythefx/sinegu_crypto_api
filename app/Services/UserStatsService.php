@@ -2,7 +2,7 @@
 
 namespace App\Services;
 
-use App\Models\BinanceAccount;
+use App\Services\Exchanges\ExchangeSchema;
 use App\Services\Pnl\TradingFee;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Collection;
@@ -11,12 +11,51 @@ use Illuminate\Support\Facades\DB;
 /**
  * Per-user (uni_id) trading statistics shared by the user dashboard and the
  * admin user-detail endpoints, so both compute identical numbers.
+ *
+ * Every read here spans EVERY supported exchange by default (Binance + MEXC
+ * today, each in its own `{x}_*` tables) and narrows to one when the caller
+ * passes the venue the dashboard's top-bar filter names. The scope is decided
+ * ONCE, in displayAccounts(): rows come back stamped with `exchange`, and
+ * pastPositions() / transactions() follow that stamp to the right table per
+ * account — so a screen can never sum MEXC equity beside Binance-only P&L.
  */
 class UserStatsService
 {
     /**
+     * The exchanges a per-user read spans: all supported ones for null/'all',
+     * else exactly the one named. Unknown names throw — controllers validate
+     * with normalizeExchange() first and answer 400.
+     *
+     * @return list<string>
+     */
+    public static function exchanges(?string $exchange = null): array
+    {
+        return $exchange === null || $exchange === 'all'
+            ? ExchangeSchema::supported()
+            : [ExchangeSchema::for($exchange)->exchange];
+    }
+
+    /**
+     * A `?exchange=` query value → 'all' | a supported exchange, or null when
+     * it names nothing we have tables for (bybit, a typo). Missing means all.
+     */
+    public static function normalizeExchange(mixed $raw): ?string
+    {
+        if ($raw === null || $raw === '') {
+            return 'all';
+        }
+        if (! is_string($raw)) {
+            return null;
+        }
+        $value = strtolower(trim($raw));
+
+        return $value === 'all' || ExchangeSchema::isSupported($value) ? $value : null;
+    }
+
+    /**
      * Accounts whose money a user's dashboard should show: everything still
-     * connected (`deleted_at IS NULL`).
+     * connected (`deleted_at IS NULL`) on the exchange(s) asked for, each row
+     * stamped with its `exchange`.
      *
      * Deliberately NOT filtered by `demo` or `enabled`, because the realized
      * P&L / trade history on the same screens is keyed by uni_id alone. When
@@ -30,17 +69,25 @@ class UserStatsService
      * (enabled + non-sandbox + owner not suspended). Billing is likewise
      * independent — invoices are generated per account, demo opt-in.
      */
-    public function displayAccounts(string $uniId): Collection
+    public function displayAccounts(string $uniId, ?string $exchange = null): Collection
     {
-        return DB::table('binance_accounts')
-            ->where('uni_id', $uniId)
-            ->whereNull('deleted_at')
-            ->get();
+        $rows = collect();
+        foreach (self::exchanges($exchange) as $ex) {
+            $rows = $rows->concat(
+                DB::table(ExchangeSchema::for($ex)->accountsTable)
+                    ->where('uni_id', $uniId)
+                    ->whereNull('deleted_at')
+                    ->get()
+                    ->each(fn ($a) => $a->exchange = $ex)
+            );
+        }
+
+        return $rows->values();
     }
 
     /**
      * The api_keys behind displayAccounts() — the scope every per-user trade
-     * and funding query below must use.
+     * and funding query must use.
      *
      * Trade and transaction rows carry `uni_id` denormalized, so scoping them
      * by uni_id alone counts rows belonging to accounts displayAccounts() has
@@ -54,23 +101,93 @@ class UserStatsService
      * here would resurrect the $0.00-equity-vs-real-P&L bug from the other
      * direction.
      *
+     * Prefer pastPositions() / transactions(), which pair each key with its
+     * own exchange's table; this flat list is for callers that already know
+     * which table they are reading.
+     *
      * @return list<string>
      */
-    public function displayApiKeys(string $uniId): array
+    public function displayApiKeys(string $uniId, ?string $exchange = null): array
     {
-        return $this->displayAccounts($uniId)->pluck('api_key')->all();
+        return $this->displayAccounts($uniId, $exchange)->pluck('api_key')->all();
     }
 
     /**
-     * Every exchange account including soft-deleted (disconnected) ones —
-     * feeds the admin account cards.
+     * Closed trades of the given accounts, read from each account's own
+     * exchange table and merged oldest-first, every row stamped `exchange`.
+     * Accounts come from displayAccounts() (or allAccounts()); a row without
+     * the stamp is treated as Binance, the only table that predates it.
+     */
+    public function pastPositions(Collection $accounts, array $columns = ['*']): Collection
+    {
+        return $this->perExchange($accounts, fn (ExchangeSchema $s) => $s->pastPositions, $columns)
+            ->sortBy('closed_at')
+            ->values();
+    }
+
+    /**
+     * Deposits / withdrawals of the given accounts, per exchange table,
+     * oldest-first, stamped `exchange`.
+     */
+    public function transactions(Collection $accounts, array $columns = ['*']): Collection
+    {
+        return $this->perExchange($accounts, fn (ExchangeSchema $s) => $s->transactions, $columns)
+            ->sortBy('created_at')
+            ->values();
+    }
+
+    /**
+     * Open positions of the given accounts, per exchange table, stamped
+     * `exchange`, ordered by symbol.
+     */
+    public function openPositions(Collection $accounts, array $columns = ['*']): Collection
+    {
+        return $this->perExchange($accounts, fn (ExchangeSchema $s) => $s->positions, $columns)
+            ->sortBy('symbol')
+            ->values();
+    }
+
+    /**
+     * One query per exchange present in $accounts against the table $table
+     * picks off that exchange's schema, keyed by the api_keys of that
+     * exchange's accounts only — a Binance key is never looked up in
+     * `mexc_pastpositions` and vice versa.
+     */
+    private function perExchange(Collection $accounts, callable $table, array $columns): Collection
+    {
+        $rows = collect();
+        foreach ($accounts->groupBy(fn ($a) => $a->exchange ?? 'binance') as $exchange => $group) {
+            $schema = ExchangeSchema::for($exchange);
+            $rows = $rows->concat(
+                DB::table($table($schema))
+                    ->whereIn('api_key', $group->pluck('api_key')->all())
+                    ->get($columns)
+                    ->each(fn ($r) => $r->exchange = $exchange)
+            );
+        }
+
+        return $rows;
+    }
+
+    /**
+     * Every exchange account on every supported exchange, including
+     * soft-deleted (disconnected) ones, newest first, each model stamped
+     * `exchange` — feeds the admin account cards.
      */
     public function allAccounts(string $uniId)
     {
-        return BinanceAccount::withTrashed()
-            ->where('uni_id', $uniId)
-            ->orderByDesc('created_at')
-            ->get();
+        $rows = collect();
+        foreach (ExchangeSchema::supported() as $ex) {
+            $model = ExchangeSchema::for($ex)->accountModel;
+            $rows = $rows->concat(
+                $model::withTrashed()
+                    ->where('uni_id', $uniId)
+                    ->get()
+                    ->each(fn ($a) => $a->exchange = $ex)
+            );
+        }
+
+        return $rows->sortByDesc('created_at')->values();
     }
 
     /**
@@ -293,11 +410,17 @@ class UserStatsService
      * UI can show the three-line breakdown on hover; `realized_pnl` /
      * `total_pnl` keep their after-fees meaning for the readers that list
      * trades beside them (Positions page, admin user detail).
+     *
+     * SCOPE: $exchange is the top-bar filter — null/'all' pools every
+     * supported exchange into one portfolio (equity summed, closed trades
+     * merged, one commissions row per venue); a venue name narrows every
+     * figure to that venue's accounts and tables alone. The payload names the
+     * scope it was computed for (`exchange`, `exchanges`, `accounts`).
      */
-    public function summary(string $uniId, ?Collection $accounts = null): array
+    public function summary(string $uniId, ?string $exchange = null, ?Collection $accounts = null): array
     {
-        $accounts ??= $this->displayAccounts($uniId);
-        $apiKeys = $accounts->pluck('api_key')->all();
+        $exchanges = self::exchanges($exchange);
+        $accounts ??= $this->displayAccounts($uniId, $exchange);
 
         $balance = (float) $accounts->sum('balance');
         $unrealized = (float) $accounts->sum('unrealized_pnl');
@@ -306,17 +429,9 @@ class UserStatsService
         // Scoped by the same accounts that produced $equity above, not by
         // uni_id — see displayApiKeys(). A caller passing its own $accounts
         // gets its trades narrowed to that same list.
-        $past = self::withFeeBasis(
-            DB::table('binance_pastpositions')
-                ->whereIn('api_key', $apiKeys)
-                ->orderBy('closed_at')
-                ->get()
-        );
+        $past = self::withFeeBasis($this->pastPositions($accounts));
 
-        $transactions = DB::table('binance_transactions')
-            ->whereIn('api_key', $apiKeys)
-            ->orderBy('created_at')
-            ->get();
+        $transactions = $this->transactions($accounts);
 
         $realized = (float) $past->sum('pnl_net');
         $realizedGross = (float) $past->sum('pnl_gross');
@@ -429,21 +544,24 @@ class UserStatsService
         $byStrategy = $groupSeries($past->groupBy(fn ($p) => $p->strategy ?? 'Manual'));
 
         // ---- High-water mark & commissions ----------------------------
+        // Invoices are already per exchange (the unified table's
+        // discriminator), so the same filter narrows them.
         $invoices = DB::table('invoices')
             ->where('user_id', $uniId)
-            ->where('exchange', 'binance')
+            ->whereIn('exchange', $exchanges)
             ->get();
         $hwm = (float) ($invoices->max('hwm_after') ?? 0);
         $hwm = max($hwm, $equity);
 
         $currentMonth = Carbon::now()->format('Y-m');
-        $monthFee = (float) $invoices->where('month_year', $currentMonth)->sum('total_fee');
+        $monthInvoices = $invoices->where('month_year', $currentMonth);
         $commissions = [
-            'total' => round($monthFee, 2),
+            'total' => round((float) $monthInvoices->sum('total_fee'), 2),
             'month' => $currentMonth,
-            'rows' => [
-                ['exchange' => 'Binance', 'amount' => round($monthFee, 2)],
-            ],
+            'rows' => array_map(fn (string $ex) => [
+                'exchange' => ExchangeSchema::for($ex)->brokerLabel,
+                'amount' => round((float) $monthInvoices->where('exchange', $ex)->sum('total_fee'), 2),
+            ], $exchanges),
         ];
 
         // ---- Realized P&L breakdown (today / 7d / month-to-date) ------
@@ -467,6 +585,12 @@ class UserStatsService
         }
 
         return [
+            'exchange' => $exchange ?? 'all',
+            'exchanges' => $exchanges,
+            // Connected accounts inside this scope — zero under a venue filter
+            // means "nothing connected on that exchange", which the card shows
+            // instead of a $0.00 equity that reads as a wiped account.
+            'accounts' => $accounts->count(),
             'equity' => round($equity, 2),
             'balance' => round($balance, 2),
             'realized_pnl' => round($realized, 2),
@@ -496,19 +620,20 @@ class UserStatsService
      * individual trades — the days map behind every P&L calendar
      * (user dashboard, admin dashboard and admin user detail).
      */
-    public function dailyPnlDays(string $uniId): array
+    public function dailyPnlDays(string $uniId, ?string $exchange = null): array
     {
-        $past = self::withFeeBasis(DB::table('binance_pastpositions')
-            ->whereIn('api_key', $this->displayApiKeys($uniId))
-            ->orderByDesc('closed_at')
-            ->get([
+        $past = self::withFeeBasis(
+            $this->pastPositions($this->displayAccounts($uniId, $exchange), [
                 // `id` and `exit_price` are what let an admin correct a row
                 // straight from the calendar's day popup (PUT/DELETE
                 // /admin/past-positions/{id}); the write itself is still gated
-                // by the admin middleware, this only names the row.
+                // by the admin middleware, this only names the row. Each trade
+                // also says which exchange table that id lives in, because ids
+                // repeat across the per-exchange tables.
                 'id', 'symbol', 'position_side', 'position_amt', 'realized_pnl',
                 'exchange_fee', 'fee_source', 'exit_price', 'side', 'strategy', 'closed_at',
-            ]));
+            ])->sortByDesc('closed_at')->values()
+        );
 
         // The calendar is the one before-fees-era screen that keeps AFTER fees
         // as its headline: a cell is "what landed that day". `total_gross` and
@@ -523,6 +648,7 @@ class UserStatsService
                 'losses' => $trades->where('pnl_net', '<', 0)->count(),
                 'trades' => $trades->map(fn ($t) => [
                     'id' => $t->id,
+                    'exchange' => $t->exchange,
                     'symbol' => $t->symbol,
                     'position_side' => $t->position_side,
                     'position_amt' => (float) $t->position_amt,
@@ -580,14 +706,15 @@ class UserStatsService
     }
 
     /**
-     * Deposit / withdrawal totals and transaction counts from
-     * binance_transactions.
+     * Deposit / withdrawal totals and transaction counts over the connected
+     * accounts' transfer tables (every exchange, or the one named).
      */
-    public function capitalFlow(string $uniId): array
+    public function capitalFlow(string $uniId, ?string $exchange = null): array
     {
-        $transactions = DB::table('binance_transactions')
-            ->whereIn('api_key', $this->displayApiKeys($uniId))
-            ->get(['type', 'amount']);
+        $transactions = $this->transactions(
+            $this->displayAccounts($uniId, $exchange),
+            ['type', 'amount', 'created_at'],
+        );
 
         $deposits = $transactions->where('type', 'DEPOSIT');
         $withdrawals = $transactions->where('type', 'WITHDRAWAL');

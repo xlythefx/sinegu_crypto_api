@@ -286,17 +286,55 @@ class AnalyticsFiltersTest extends EngineTestCase
 
     /* ============ exchange ============ */
 
-    public function test_unsupported_exchange_returns_an_empty_dataset(): void
+    public function test_a_venue_with_no_account_returns_an_empty_dataset(): void
     {
         $this->seedTrades();
 
+        // This user has no MEXC account — the MEXC view is empty, never
+        // Binance's numbers under a MEXC label.
         $a = $this->analytics(['exchange' => 'mexc']);
 
-        // mexc_* tables do not exist yet — better empty than Binance's numbers
         $this->assertEquals(0, $a['total_realized']);
         $this->assertSame(0, $a['trading_days']);
         $this->assertSame([], $a['filters']['available_symbols']);
         $this->assertNull($a['return_on_deposit']['pct']);
+    }
+
+    public function test_a_venue_without_tables_is_refused(): void
+    {
+        $this->getJson('/api/analytics?exchange=bybit')
+            ->assertStatus(400)
+            ->assertJsonPath('error', 'EXCHANGE_NOT_SUPPORTED');
+    }
+
+    public function test_mexc_trades_are_read_from_the_mexc_tables(): void
+    {
+        $this->seedTrades();
+        $this->makeAccount($this->uniId, ['api_key' => 'mexc-key', 'balance' => 500], 'mexc');
+        DB::table('mexc_pastpositions')->insert([
+            'uni_id' => $this->uniId,
+            'api_key' => 'mexc-key',
+            'symbol' => 'BTCUSDT',
+            'position_side' => 'LONG',
+            'position_amt' => 0.01,
+            'entry_price' => 100,
+            'exit_price' => 110,
+            'realized_pnl' => 7,
+            'side' => 'SELL',
+            'strategy' => 'ABCD-v1',
+            'closed_at' => '2026-05-10 12:00:00',
+        ]);
+
+        $mexc = $this->analytics(['exchange' => 'mexc']);
+        $this->assertEquals(7, $mexc['total_realized']);
+        $this->assertSame(1, $mexc['trading_days']);
+        $this->assertSame(['MEXC'], array_column($mexc['by_exchange'], 'exchange'));
+        $this->assertEquals(500, $mexc['by_exchange'][0]['balance']);
+
+        // "All" pools both venues: Binance's +140 plus MEXC's +7.
+        $all = $this->analytics();
+        $this->assertEquals(147, $all['total_realized']);
+        $this->assertSame(['Binance', 'MEXC'], array_column($all['by_exchange'], 'exchange'));
     }
 
     public function test_binance_exchange_matches_all(): void

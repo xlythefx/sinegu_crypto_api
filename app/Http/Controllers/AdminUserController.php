@@ -6,6 +6,7 @@ use App\Models\Invoice;
 use App\Models\ReferralTracking;
 use App\Models\UserCredential;
 use App\Services\InvoiceService;
+use App\Services\Exchanges\ExchangeSchema;
 use App\Services\UserStatsService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -39,12 +40,17 @@ class AdminUserController extends Controller
 
         $accounts = $this->stats->allAccounts($uniId);
 
-        // Per-account aggregates in two grouped queries (no N+1).
-        $realizedByKey = DB::table('binance_pastpositions')
-            ->where('uni_id', $uniId)
-            ->groupBy('api_key')
-            ->selectRaw('api_key, SUM(realized_pnl) AS pnl')
-            ->pluck('pnl', 'api_key');
+        // Per-account aggregates in one grouped query per exchange (no N+1).
+        $realizedByKey = collect();
+        foreach (ExchangeSchema::supported() as $ex) {
+            $realizedByKey = $realizedByKey->union(
+                DB::table(ExchangeSchema::for($ex)->pastPositions)
+                    ->where('uni_id', $uniId)
+                    ->groupBy('api_key')
+                    ->selectRaw('api_key, SUM(realized_pnl) AS pnl')
+                    ->pluck('pnl', 'api_key')
+            );
+        }
 
         $hwmByAccount = DB::table('invoices')
             ->where('user_id', $uniId)
@@ -58,7 +64,7 @@ class AdminUserController extends Controller
                 'accounts' => $accounts->map(fn ($a) => [
                     'id' => $a->id,
                     'name' => $a->name,
-                    'exchange' => 'binance',
+                    'exchange' => $a->exchange,
                     'api_key' => $this->maskKey($a->api_key),
                     'demo' => (bool) $a->demo,
                     'enabled' => (bool) $a->enabled,
@@ -91,9 +97,7 @@ class AdminUserController extends Controller
         $unrealized = (float) $accounts->sum('unrealized_pnl');
         $equity = $balance + $unrealized;
 
-        $past = DB::table('binance_pastpositions')
-            ->where('uni_id', $uniId)
-            ->get(['realized_pnl', 'closed_at']);
+        $past = $this->stats->pastPositions($accounts, ['realized_pnl', 'closed_at']);
         $realized = (float) $past->sum('realized_pnl');
 
         $flow = $this->stats->capitalFlow($uniId);
@@ -103,7 +107,6 @@ class AdminUserController extends Controller
         // Same HWM the user dashboard shows: never below current equity.
         $hwm = (float) (DB::table('invoices')
             ->where('user_id', $uniId)
-            ->where('exchange', 'binance')
             ->max('hwm_after') ?? 0);
         $hwm = max($hwm, $equity);
 
