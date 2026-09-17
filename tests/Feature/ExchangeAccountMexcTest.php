@@ -16,8 +16,8 @@ use Laravel\Sanctum\Sanctum;
  * Accounts live in one table per exchange, so the rules that were "one
  * account per user" become "one per user PER exchange", every listed row
  * says which exchange it is on, and an id is only meaningful together with
- * its exchange. MEXC adds one rule of its own: it has no futures testnet, so
- * a demo MEXC account cannot exist.
+ * its exchange. A demo MEXC account routes the engine to MEXC's futures
+ * testnet, which takes the same keys as live.
  */
 class ExchangeAccountMexcTest extends EngineTestCase
 {
@@ -57,19 +57,21 @@ class ExchangeAccountMexcTest extends EngineTestCase
         $this->assertSame($this->uniId, DB::table('mexc_accounts')->value('uni_id'));
     }
 
-    public function test_a_demo_mexc_account_is_refused_because_there_is_no_testnet(): void
+    public function test_a_demo_mexc_account_is_stored_with_the_flag_the_engine_routes_on(): void
     {
+        // MEXC's futures testnet takes the same keys; `demo` is what sends the
+        // engine to futures.testnet.mexc.com instead of api.mexc.com.
         $this->postJson('/api/exchange/mexc', $this->payload(['demo' => true]))
-            ->assertStatus(422)
-            ->assertJsonPath('error_code', 'DEMO_NOT_AVAILABLE')
-            ->assertJsonValidationErrors('demo');
-
-        $this->assertDatabaseCount('mexc_accounts', 0);
-
-        // Binance keeps its testnet.
-        $this->postJson('/api/exchange/binance', $this->payload(['name' => 'Testnet', 'demo' => true]))
             ->assertStatus(201)
-            ->assertJsonPath('account.demo', true);
+            ->assertJsonPath('account.demo', true)
+            ->assertJsonPath('account.exchange', 'mexc');
+
+        $this->assertSame(1, (int) DB::table('mexc_accounts')->value('demo'));
+
+        // A demo row still occupies the one MEXC slot.
+        $this->postJson('/api/exchange/mexc', $this->payload(['name' => 'Second']))
+            ->assertStatus(422)
+            ->assertJsonPath('error_code', 'ALREADY_CONNECTED');
     }
 
     public function test_one_account_per_user_per_exchange(): void

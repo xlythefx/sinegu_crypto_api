@@ -33,11 +33,13 @@ class ExchangeAccountController extends Controller
 
     /**
      * Exchanges with a futures TESTNET the engine can route a demo account to.
-     * MEXC has none: its only host is the real one, so a `demo` MEXC row could
-     * never be anything but a live account wearing the wrong badge — the engine
-     * refuses to trade one, and this refuses to create one.
+     * Binance: testnet.binancefuture.com (separate keys). MEXC:
+     * futures.testnet.mexc.com — same login and same API keys as live, but the
+     * key must carry NO IP binding (the testnet sits behind a CDN and refuses
+     * IP-bound keys). A venue without one would refuse `demo` here, because a
+     * demo row on it could only be a live account wearing the wrong badge.
      */
-    private const HAS_TESTNET = ['binance' => true, 'mexc' => false];
+    private const HAS_TESTNET = ['binance' => true, 'mexc' => true];
 
     public function __construct(private EngineCache $engineCache) {}
 
