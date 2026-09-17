@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Http\Controllers\Concerns\GuardsEngineExchange;
 use App\Models\ExchangeAccount;
+use App\Services\EngineCache;
 use App\Services\Pnl\FeeRebase;
 use App\Services\Pnl\TradingFee;
 use Illuminate\Http\JsonResponse;
@@ -382,7 +383,7 @@ class EngineSyncController extends Controller
      * every five minutes would push the 3-day disconnect deadline forward
      * forever and the account would never age out.
      */
-    public function keyStatus(string $exchange, Request $request): JsonResponse
+    public function keyStatus(string $exchange, Request $request, EngineCache $engineCache): JsonResponse
     {
         if ($guard = $this->guardExchange($exchange)) {
             return $guard;
@@ -422,6 +423,16 @@ class EngineSyncController extends Controller
         }
 
         $account->save();
+
+        // The verdict changed what the fan-out may do with this account
+        // (`key_blocked` rides on the engine's cached account list), so the
+        // engine must drop that list now rather than at its 90s TTL. Seen live
+        // on 2026-09-17: a recheck cleared the flag and the very next signal
+        // was still skipped as "api key blocked" from the stale cache.
+        // Transitions only — the pollers re-report the same verdict every tick.
+        if ($wasBlocked !== $blocked) {
+            $engineCache->refreshAccounts();
+        }
 
         return response()->json([
             'success' => true,

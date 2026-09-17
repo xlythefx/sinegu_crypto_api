@@ -26,10 +26,37 @@ class BlockedApiKeyTest extends PaymentTestCase
 
     private function report(array $body)
     {
+        // A status TRANSITION pings the engine's account cache on 127.0.0.1:5010.
+        Http::fake();
+
         return $this->withHeaders($this->engineHeaders())->postJson($this->keyStatusUrl(), $body);
     }
 
     // ---- recording the verdict -------------------------------------------
+
+    /**
+     * `key_blocked` rides on the engine's cached account list, so a verdict that
+     * changes it must drop that cache now — a recheck that clears the flag and
+     * a signal 10 seconds later would otherwise still be skipped as blocked.
+     * Only transitions ping: the pollers repeat the same verdict every tick.
+     */
+    public function test_a_status_transition_refreshes_the_engines_account_list(): void
+    {
+        config(['services.engine.webhook_secrets.binance' => 'engine-hook-secret']);
+        $uniId = $this->makeUser();
+        $this->makeAccount($uniId, ['api_key' => 'flip-key']);
+
+        $this->report(['api_key' => 'flip-key', 'status' => 'blocked', 'code' => '406'])->assertOk();
+        Http::assertSentCount(1);
+        Http::assertSent(fn ($request) => str_ends_with($request->url(), '/admin/refresh-accounts'));
+
+        // report() re-fakes per call, so each count below is that call's own traffic.
+        $this->report(['api_key' => 'flip-key', 'status' => 'blocked', 'code' => '406'])->assertOk();
+        Http::assertNothingSent(); // same verdict again: no ping
+
+        $this->report(['api_key' => 'flip-key', 'status' => 'ok'])->assertOk();
+        Http::assertSentCount(1);
+    }
 
     public function test_the_engine_can_flag_a_refused_key(): void
     {
@@ -205,6 +232,7 @@ class BlockedApiKeyTest extends PaymentTestCase
         $uniId = $this->makeUser();
         $id = $this->makeAccount($uniId, ['api_key' => 'blocked-key']);
         $this->report(['api_key' => 'blocked-key', 'status' => 'blocked', 'code' => '-2015']);
+        Http::fake(); // forget the transition ping above — only the dry run is under test
 
         $this->travel(BinanceAccount::KEY_GRACE_DAYS + 1)->days();
         $this->artisan('exchange:disconnect-blocked-keys --dry-run')->assertExitCode(0);
