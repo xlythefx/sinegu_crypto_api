@@ -18,6 +18,13 @@ use Illuminate\Validation\Rule;
  * the /admin/users/{uniId} page renders: profile + accounts, headline stats,
  * daily P&L calendar, positions, invoices, and the admin edits (fee
  * percentages, suspend / reactivate).
+ *
+ * Every read here honours `?exchange=` — the page's exchange pill. It is the
+ * same scope the trader's own dashboard applies (UserStatsService), so the
+ * admin looking at "MEXC" sees exactly the figures the user sees under their
+ * MEXC pill: equity, P&L, calendar, positions and invoices all narrowed to
+ * that venue's accounts and tables, never one card filtered beside another
+ * still pooling every exchange.
  */
 class AdminUserController extends Controller
 {
@@ -25,6 +32,27 @@ class AdminUserController extends Controller
         private UserStatsService $stats,
         private InvoiceService $invoices,
     ) {}
+
+    /**
+     * The `?exchange=` filter: missing/'all' pools every supported exchange,
+     * a venue name narrows to it, and a venue we have no tables for (bybit)
+     * is a 400 rather than a silent Binance answer under a MEXC label.
+     *
+     * @return string|JsonResponse  the normalized scope, or the error response
+     */
+    private function exchangeScope(Request $request): string|JsonResponse
+    {
+        $exchange = UserStatsService::normalizeExchange($request->query('exchange'));
+        if ($exchange === null) {
+            return response()->json([
+                'success' => false,
+                'error' => 'EXCHANGE_NOT_SUPPORTED',
+                'message' => 'That exchange is not available yet.',
+            ], 400);
+        }
+
+        return $exchange;
+    }
 
     /**
      * GET /api/admin/users/{uniId}
@@ -81,18 +109,23 @@ class AdminUserController extends Controller
     }
 
     /**
-     * GET /api/admin/users/{uniId}/summary
+     * GET /api/admin/users/{uniId}/summary?exchange=
      * Headline figures computed over LIVE accounts — the same filter the
      * user's own dashboard uses, so both show identical numbers.
      */
-    public function summary(string $uniId): JsonResponse
+    public function summary(Request $request, string $uniId): JsonResponse
     {
         $user = UserCredential::find($uniId);
         if (! $user) {
             return $this->userNotFound();
         }
 
-        $accounts = $this->stats->displayAccounts($uniId);
+        $exchange = $this->exchangeScope($request);
+        if ($exchange instanceof JsonResponse) {
+            return $exchange;
+        }
+
+        $accounts = $this->stats->displayAccounts($uniId, $exchange);
         $balance = (float) $accounts->sum('balance');
         $unrealized = (float) $accounts->sum('unrealized_pnl');
         $equity = $balance + $unrealized;
@@ -100,13 +133,16 @@ class AdminUserController extends Controller
         $past = $this->stats->pastPositions($accounts, ['realized_pnl', 'closed_at']);
         $realized = (float) $past->sum('realized_pnl');
 
-        $flow = $this->stats->capitalFlow($uniId);
+        $flow = $this->stats->capitalFlow($uniId, $exchange);
         $netDeposits = $flow['net_flow'];
         $pctBase = $netDeposits > 0 ? $netDeposits : max($equity, 1);
 
         // Same HWM the user dashboard shows: never below current equity.
+        // Invoices are already per exchange (the unified table's
+        // discriminator), so the same filter narrows them.
         $hwm = (float) (DB::table('invoices')
             ->where('user_id', $uniId)
+            ->whereIn('exchange', UserStatsService::exchanges($exchange))
             ->max('hwm_after') ?? 0);
         $hwm = max($hwm, $equity);
 
@@ -127,6 +163,8 @@ class AdminUserController extends Controller
         return response()->json([
             'success' => true,
             'summary' => [
+                'exchange' => $exchange,
+                'accounts' => $accounts->count(),
                 'balance' => round($balance, 2),
                 'unrealized_pnl' => round($unrealized, 2),
                 'realized_pnl' => round($realized, 2),
@@ -148,67 +186,84 @@ class AdminUserController extends Controller
                     'initial_deposit' => round($initialDeposit, 2),
                     'capital' => round($initialDeposit + $flow['net_flow'], 2),
                 ],
-                'commissions' => $this->stats->commissions($uniId),
+                'commissions' => $this->stats->commissions($uniId, $exchange),
             ],
         ]);
     }
 
     /**
-     * GET /api/admin/users/{uniId}/daily-pnl
+     * GET /api/admin/users/{uniId}/daily-pnl?exchange=
      * Days map — identical shape to GET /admin/daily-pnl so the frontend
      * reuses its DailyPnlMap type.
      */
-    public function dailyPnl(string $uniId): JsonResponse
+    public function dailyPnl(Request $request, string $uniId): JsonResponse
     {
         $user = UserCredential::find($uniId);
         if (! $user) {
             return $this->userNotFound();
         }
 
+        $exchange = $this->exchangeScope($request);
+        if ($exchange instanceof JsonResponse) {
+            return $exchange;
+        }
+
         return response()->json([
             'success' => true,
-            'days' => $this->stats->dailyPnlDays($uniId),
+            'exchange' => $exchange,
+            'days' => $this->stats->dailyPnlDays($uniId, $exchange),
         ]);
     }
 
     /**
-     * GET /api/admin/users/{uniId}/positions
+     * GET /api/admin/users/{uniId}/positions?exchange=
      * Open positions + closed trades — same row shapes as the admin-wide
-     * AdminController::positions, scoped to one user.
+     * AdminController::positions, scoped to one user. Every row this user
+     * owns on the exchange(s) asked for, read from each exchange's own tables
+     * and joined to that exchange's accounts (disconnected ones included —
+     * this is the admin's view of everything the user ever traded).
      */
-    public function positions(string $uniId): JsonResponse
+    public function positions(Request $request, string $uniId): JsonResponse
     {
         $user = UserCredential::find($uniId);
         if (! $user) {
             return $this->userNotFound();
         }
 
-        $open = DB::table('binance_positions as p')
-            ->leftJoin('binance_accounts as a', 'p.api_key', '=', 'a.api_key')
-            ->where('p.uni_id', $uniId)
-            ->orderBy('a.name')
-            ->orderBy('p.symbol')
-            ->get([
-                'p.id', 'a.id as account_id', 'a.name as account_name',
-                'a.balance as account_balance', 'p.symbol', 'p.position_side',
-                'p.position_amt', 'p.entry_price', 'p.mark_price', 'p.unrealized_profit',
-            ]);
+        $exchange = $this->exchangeScope($request);
+        if ($exchange instanceof JsonResponse) {
+            return $exchange;
+        }
 
-        $past = DB::table('binance_pastpositions as t')
-            ->leftJoin('binance_accounts as a', 't.api_key', '=', 'a.api_key')
-            ->where('t.uni_id', $uniId)
-            ->orderByDesc('t.closed_at')
-            ->get([
-                't.id', 'a.id as account_id', 'a.name as account_name',
-                'a.balance as account_balance', 't.symbol', 't.exit_price',
-                't.realized_pnl', 't.exchange_fee', 't.fee_source', 't.side', 't.strategy',
-                't.closed_at', 't.position_amt',
-            ]);
+        $positions = collect();
+        $trades = collect();
 
-        return response()->json([
-            'success' => true,
-            'positions' => $open->map(fn ($p) => [
+        foreach (UserStatsService::exchanges($exchange) as $ex) {
+            $schema = ExchangeSchema::for($ex);
+            $broker = $schema->brokerLabel;
+
+            $open = DB::table("{$schema->positions} as p")
+                ->leftJoin("{$schema->accountsTable} as a", 'p.api_key', '=', 'a.api_key')
+                ->where('p.uni_id', $uniId)
+                ->get([
+                    'p.id', 'a.id as account_id', 'a.name as account_name',
+                    'a.balance as account_balance', 'p.symbol', 'p.position_side',
+                    'p.position_amt', 'p.entry_price', 'p.mark_price', 'p.unrealized_profit',
+                ]);
+
+            $past = DB::table("{$schema->pastPositions} as t")
+                ->leftJoin("{$schema->accountsTable} as a", 't.api_key', '=', 'a.api_key')
+                ->where('t.uni_id', $uniId)
+                ->get([
+                    't.id', 'a.id as account_id', 'a.name as account_name',
+                    'a.balance as account_balance', 't.symbol', 't.exit_price',
+                    't.realized_pnl', 't.exchange_fee', 't.fee_source', 't.side', 't.strategy',
+                    't.closed_at', 't.position_amt',
+                ]);
+
+            $positions = $positions->concat($open->map(fn ($p) => [
                 'id' => $p->id,
+                'exchange' => $ex,
                 'account_id' => $p->account_id,
                 'account_name' => $p->account_name,
                 'account_balance' => round((float) ($p->account_balance ?? 0), 2),
@@ -217,10 +272,12 @@ class AdminUserController extends Controller
                 'position_amt' => (float) $p->position_amt,
                 'price' => round((float) ($p->mark_price ?? $p->entry_price ?? 0), 8),
                 'unrealized_pnl' => round((float) ($p->unrealized_profit ?? 0), 2),
-                'broker' => 'Binance',
-            ])->values(),
-            'trades' => $past->map(fn ($t) => [
+                'broker' => $broker,
+            ]));
+
+            $trades = $trades->concat($past->map(fn ($t) => [
                 'id' => $t->id,
+                'exchange' => $ex,
                 'account_id' => $t->account_id,
                 'account_name' => $t->account_name,
                 'account_balance' => round((float) ($t->account_balance ?? 0), 2),
@@ -236,25 +293,44 @@ class AdminUserController extends Controller
                 'strategy' => $t->strategy,
                 'closed_at' => $t->closed_at,
                 'position_amt' => (float) $t->position_amt,
-                'broker' => 'Binance',
-            ])->values(),
+                'broker' => $broker,
+            ]));
+        }
+
+        return response()->json([
+            'success' => true,
+            'exchange' => $exchange,
+            // Same order the single-table version had: open by account then
+            // symbol, closed newest first — now across every table read.
+            'positions' => $positions
+                ->sortBy(fn (array $p) => [(string) $p['account_name'], $p['symbol']])
+                ->values(),
+            'trades' => $trades
+                ->sortByDesc(fn (array $t) => (string) $t['closed_at'])
+                ->values(),
         ]);
     }
 
     /**
-     * GET /api/admin/users/{uniId}/invoices
+     * GET /api/admin/users/{uniId}/invoices?exchange=
      * One user's invoices, newest first — same mapping as the user-facing
      * invoice list.
      */
-    public function invoices(string $uniId): JsonResponse
+    public function invoices(Request $request, string $uniId): JsonResponse
     {
         $user = UserCredential::find($uniId);
         if (! $user) {
             return $this->userNotFound();
         }
 
+        $exchange = $this->exchangeScope($request);
+        if ($exchange instanceof JsonResponse) {
+            return $exchange;
+        }
+
         $invoices = Invoice::with('account')
             ->forUser($uniId)
+            ->whereIn('exchange', UserStatsService::exchanges($exchange))
             ->orderByDesc('month_year')
             ->orderByDesc('id')
             ->get();

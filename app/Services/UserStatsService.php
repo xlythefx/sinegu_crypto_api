@@ -732,12 +732,14 @@ class UserStatsService
 
     /**
      * Commission (invoices.total_fee) sums for a user: current month,
-     * all time, and all time actually paid.
+     * all time, and all time actually paid — every exchange's invoices, or
+     * the one named (the table carries the exchange discriminator).
      */
-    public function commissions(string $uniId): array
+    public function commissions(string $uniId, ?string $exchange = null): array
     {
         $invoices = DB::table('invoices')
             ->where('user_id', $uniId)
+            ->whereIn('exchange', self::exchanges($exchange))
             ->get(['month_year', 'total_fee', 'status']);
 
         $currentMonth = Carbon::now()->format('Y-m');

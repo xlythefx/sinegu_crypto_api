@@ -2,8 +2,10 @@
 
 namespace App\Http\Controllers;
 
-use App\Models\BinanceAccount;
+use App\Http\Controllers\Concerns\GuardsEngineExchange;
+use App\Models\ExchangeAccount;
 use App\Services\EngineCache;
+use App\Services\Exchanges\ExchangeSchema;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
@@ -23,6 +25,8 @@ use Illuminate\Support\Facades\Process;
  */
 class AdminEngineController extends Controller
 {
+    use GuardsEngineExchange;
+
     private function service(): string
     {
         return (string) config('services.engine.service', 'sinegualerts-engine');
@@ -82,47 +86,60 @@ class AdminEngineController extends Controller
      * disconnect. Support's view of a failure that is otherwise invisible:
      * the trader sees "connected", the balance freezes, and no trades arrive.
      *
-     * Reads columns the engine writes — it never touches Binance itself, so
-     * opening this page costs nothing at the exchange.
+     * Reads columns the engine writes — it never touches an exchange itself,
+     * so opening this page costs nothing there. Every exchange's table is
+     * read (the engine reports MEXC credential errors the same way), and each
+     * row names its `exchange` because ids repeat across the tables.
      */
     public function keyIssues(): JsonResponse
     {
-        $blocked = BinanceAccount::query()
-            ->leftJoin('user_credentials', 'user_credentials.uni_id', '=', 'binance_accounts.uni_id')
-            ->where('binance_accounts.key_status', BinanceAccount::KEY_BLOCKED)
-            ->orderByDesc('binance_accounts.key_blocked_at')
-            ->get([
-                'binance_accounts.id',
-                'binance_accounts.name',
-                'binance_accounts.uni_id',
-                'binance_accounts.api_key',
-                'binance_accounts.demo',
-                'binance_accounts.enabled',
-                'binance_accounts.balance',
-                'binance_accounts.key_error_code',
-                'binance_accounts.key_error_reason',
-                'binance_accounts.key_error_message',
-                'binance_accounts.key_blocked_at',
-                'binance_accounts.key_checked_at',
-                'user_credentials.name as owner_name',
-                'user_credentials.email as owner_email',
-                'user_credentials.status as owner_status',
-            ]);
+        $blocked = collect();
+        foreach (ExchangeSchema::supported() as $exchange) {
+            $table = ExchangeSchema::for($exchange)->accountsTable;
+
+            $rows = ExchangeSchema::for($exchange)->accountQuery()
+                ->leftJoin('user_credentials', 'user_credentials.uni_id', '=', "{$table}.uni_id")
+                ->where("{$table}.key_status", ExchangeAccount::KEY_BLOCKED)
+                ->get([
+                    "{$table}.id",
+                    "{$table}.name",
+                    "{$table}.uni_id",
+                    "{$table}.api_key",
+                    "{$table}.demo",
+                    "{$table}.enabled",
+                    "{$table}.balance",
+                    "{$table}.key_error_code",
+                    "{$table}.key_error_reason",
+                    "{$table}.key_error_message",
+                    "{$table}.key_blocked_at",
+                    "{$table}.key_checked_at",
+                    'user_credentials.name as owner_name',
+                    'user_credentials.email as owner_email',
+                    'user_credentials.status as owner_status',
+                ])
+                ->each(fn ($a) => $a->exchange = $exchange);
+
+            $blocked = $blocked->concat($rows);
+        }
+
+        // Newest fault first across every exchange.
+        $blocked = $blocked->sortByDesc(fn ($a) => (string) $a->key_blocked_at)->values();
 
         return response()->json([
             'success' => true,
-            'grace_days' => BinanceAccount::KEY_GRACE_DAYS,
+            'grace_days' => ExchangeAccount::KEY_GRACE_DAYS,
             'server_ip' => config('services.engine.public_ip'),
             'accounts' => $blocked->map(function ($a) {
                 $blockedAt = $a->key_blocked_at ? Carbon::parse($a->key_blocked_at) : null;
-                $graceEnds = $blockedAt?->copy()->addDays(BinanceAccount::KEY_GRACE_DAYS);
+                $graceEnds = $blockedAt?->copy()->addDays(ExchangeAccount::KEY_GRACE_DAYS);
 
                 return [
                     'id' => $a->id,
+                    'exchange' => $a->exchange,
                     'name' => $a->name,
                     'uni_id' => $a->uni_id,
-                    // Enough to identify the key in the Binance UI, never the
-                    // whole credential — this is a support screen, not a vault.
+                    // Enough to identify the key in the exchange's UI, never
+                    // the whole credential — a support screen, not a vault.
                     'api_key_hint' => substr((string) $a->api_key, 0, 6).'…'
                         .substr((string) $a->api_key, -4),
                     'owner_name' => $a->owner_name,
@@ -147,16 +164,22 @@ class AdminEngineController extends Controller
     }
 
     /**
-     * POST /api/admin/engine/key-issues/{id}/recheck
+     * POST /api/admin/engine/key-issues/{exchange}/{id}/recheck
      *
-     * Re-test one account against the exchange from here, instead of waiting
+     * Re-test one account against its exchange from here, instead of waiting
      * for a poller tick or asking the trader to press their own button. The
      * engine's verdict lands on the row, so a fixed allow-list clears the flag
-     * immediately.
+     * immediately. Addressed by (exchange, id) because ids repeat across the
+     * per-exchange tables; the engine itself finds the account by api_key
+     * across every venue it runs.
      */
-    public function recheckKey(int $id, EngineCache $engineCache): JsonResponse
+    public function recheckKey(string $exchange, int $id, EngineCache $engineCache): JsonResponse
     {
-        $account = BinanceAccount::find($id);
+        if ($unsupported = $this->guardExchange($exchange)) {
+            return $unsupported;
+        }
+
+        $account = $this->schema($exchange)->accountQuery()->find($id);
         if (! $account) {
             return response()->json(['success' => false, 'message' => 'Account not found.'], 404);
         }

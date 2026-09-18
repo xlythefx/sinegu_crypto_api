@@ -287,6 +287,7 @@ class BlockedApiKeyTest extends PaymentTestCase
         $accounts = $response->json('accounts');
         $this->assertCount(1, $accounts, 'only refused accounts belong on this screen');
         $row = $accounts[0];
+        $this->assertSame('binance', $row['exchange']);
         $this->assertSame('Blocked Owner', $row['owner_name']);
         $this->assertSame('blocked@test.local', $row['owner_email']);
         $this->assertSame('IP_OR_PERMISSION', $row['error_reason']);
@@ -335,10 +336,64 @@ class BlockedApiKeyTest extends PaymentTestCase
 
         $this->app['auth']->forgetGuards();
         $this->withHeaders($this->userHeaders($this->makeUser(['type' => 'admin'])))
-            ->postJson("/api/admin/engine/key-issues/{$id}/recheck")
+            ->postJson("/api/admin/engine/key-issues/binance/{$id}/recheck")
             ->assertOk()
             ->assertJson(['cleared' => true, 'status' => 'ok']);
 
         $this->assertSame('ok', BinanceAccount::find($id)->key_status);
+    }
+
+    /**
+     * MEXC reports credential errors to /engine/mexc/key-status the same way,
+     * so its refused keys belong on the same admin screen — each row naming
+     * its exchange, because ids repeat across the per-exchange tables.
+     */
+    public function test_admin_sees_refused_mexc_keys_too_and_rechecks_them_by_exchange(): void
+    {
+        $owner = $this->makeUser(['name' => 'MEXC Owner']);
+        $binanceId = $this->makeAccount($owner, ['api_key' => 'fine-binance-key']);
+        // Same id as the healthy Binance row — the collision the address exists for.
+        $mexcId = $this->makeAccount($owner, ['id' => $binanceId, 'api_key' => 'blocked-mexc-key'], 'mexc');
+
+        Http::fake();
+        $this->withHeaders($this->engineHeaders())
+            ->postJson('/api/engine/mexc/key-status', [
+                'api_key' => 'blocked-mexc-key', 'status' => 'blocked', 'code' => '406',
+            ])
+            ->assertOk();
+
+        $this->app['auth']->forgetGuards();
+        $admin = $this->userHeaders($this->makeUser(['type' => 'admin']));
+
+        $accounts = $this->withHeaders($admin)
+            ->getJson('/api/admin/engine/key-issues')
+            ->assertOk()
+            ->json('accounts');
+        $this->assertCount(1, $accounts);
+        $this->assertSame('mexc', $accounts[0]['exchange']);
+        $this->assertSame($mexcId, $accounts[0]['id']);
+        $this->assertSame('MEXC Owner', $accounts[0]['owner_name']);
+
+        // Rechecking by the MEXC address touches the MEXC row, not Binance's
+        // row of the same id.
+        Http::fake(function () {
+            Http::fake(); // the status transition's own cache ping, swallowed
+            $this->withHeaders($this->engineHeaders())
+                ->postJson('/api/engine/mexc/key-status', ['api_key' => 'blocked-mexc-key', 'status' => 'ok']);
+
+            return Http::response(['success' => true], 200);
+        });
+
+        $this->withHeaders($admin)
+            ->postJson("/api/admin/engine/key-issues/mexc/{$mexcId}/recheck")
+            ->assertOk()
+            ->assertJson(['cleared' => true, 'status' => 'ok']);
+
+        $this->assertSame('ok', \App\Models\MexcAccount::find($mexcId)->key_status);
+        $this->assertSame('ok', BinanceAccount::find($binanceId)->key_status);
+
+        $this->withHeaders($admin)
+            ->postJson("/api/admin/engine/key-issues/bybit/{$mexcId}/recheck")
+            ->assertStatus(400);
     }
 }

@@ -200,19 +200,28 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/engine/logs', [AdminEngineController::class, 'logs']);
         Route::post('/engine/restart', [AdminEngineController::class, 'restart']);
 
-        // Accounts the exchange is refusing (Binance -2015 and friends), with
-        // an admin-side re-test so support does not have to wait for a poll.
+        // Accounts an exchange is refusing (Binance -2015 and friends, MEXC
+        // 401/406…), with an admin-side re-test so support does not have to
+        // wait for a poll. Accounts live in one table per exchange, so the
+        // re-test is addressed by both — an id alone names a different row
+        // on every venue.
         Route::get('/engine/key-issues', [AdminEngineController::class, 'keyIssues']);
-        Route::post('/engine/key-issues/{id}/recheck', [AdminEngineController::class, 'recheckKey']);
+        Route::post('/engine/key-issues/{exchange}/{id}/recheck', [AdminEngineController::class, 'recheckKey'])
+            ->whereIn('exchange', ['binance', 'bybit', 'mexc'])
+            ->whereNumber('id');
 
         // API-key inventory: every exchange account with its owner. Delete is
         // the same soft disconnect the trader performs — bulk-delete carries
-        // explicit ids so it can only remove what the admin actually saw.
+        // explicit (exchange, id) pairs so it can only remove what the admin
+        // actually saw. Known-but-unwired exchanges (bybit) answer 400 from
+        // the controller, unknown names 404 here.
         Route::get('/api-keys', [AdminApiKeyController::class, 'index']);
         Route::post('/api-keys/bulk-delete', [AdminApiKeyController::class, 'bulkDestroy']);
-        Route::put('/api-keys/{id}', [AdminApiKeyController::class, 'update']);
-        Route::delete('/api-keys/{id}/purge', [AdminApiKeyController::class, 'purge']);
-        Route::delete('/api-keys/{id}', [AdminApiKeyController::class, 'destroy']);
+        Route::prefix('api-keys/{exchange}')->whereIn('exchange', ['binance', 'bybit', 'mexc'])->group(function () {
+            Route::put('/{id}', [AdminApiKeyController::class, 'update'])->whereNumber('id');
+            Route::delete('/{id}/purge', [AdminApiKeyController::class, 'purge'])->whereNumber('id');
+            Route::delete('/{id}', [AdminApiKeyController::class, 'destroy'])->whereNumber('id');
+        });
 
         // Server-side cache flush (Laravel + engine). Browser caching is
         // handled by nginx headers, not here.

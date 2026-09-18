@@ -2,11 +2,15 @@
 
 namespace App\Http\Controllers;
 
-use App\Models\BinanceAccount;
+use App\Http\Controllers\Concerns\GuardsEngineExchange;
+use App\Models\ExchangeAccount;
 use App\Services\EngineCache;
+use App\Services\Exchanges\ExchangeSchema;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
 
@@ -15,17 +19,21 @@ use Illuminate\Validation\Rule;
  * account in the system with its owner, at /admin/api-keys.
  *
  * The user-facing ExchangeAccountController answers "my accounts"; this
- * answers "all of them, including the broken and the disconnected". It is a
- * support screen, so:
+ * answers "all of them, on every exchange, including the broken and the
+ * disconnected". Accounts live in one table per exchange (ExchangeSchema),
+ * so ids collide across venues: every row carries its `exchange`, and every
+ * write is addressed as /admin/api-keys/{exchange}/{id}, never by id alone.
+ * It is a support screen, so:
  *  - **Secrets never leave the server.** Rows carry a `api_key_hint` (first 6
  *    + last 4), never the api_key in full and never `secret_key`. Enough to
- *    match a key in the Binance UI, useless to anyone who copies the page.
- *  - **Nothing here talks to Binance.** The listing reads columns the engine
- *    writes, so opening the page costs no exchange requests. Rechecking one
- *    key is a separate, explicit action (admin/engine/key-issues/{id}/recheck).
+ *    match a key in the exchange's UI, useless to anyone who copies the page.
+ *  - **Nothing here talks to an exchange.** The listing reads columns the
+ *    engine writes, so opening the page costs no exchange requests. Rechecking
+ *    one key is a separate, explicit action
+ *    (admin/engine/key-issues/{exchange}/{id}/recheck).
  *  - **Disconnect is the same soft delete the trader and the grace-period
  *    sweep perform** — the row keeps its history (positions and invoices are
- *    joined on api_key) and the user's one-account slot is freed.
+ *    joined on api_key) and the user's one-account-per-exchange slot is freed.
  *  - **Permanent delete exists but is narrow**: only a key that is not working
  *    (refused by the exchange, or already disconnected) and has no invoices.
  *    See {@see purgeBlockedReason()} — it is a tool for clearing rubbish rows,
@@ -33,6 +41,8 @@ use Illuminate\Validation\Rule;
  */
 class AdminApiKeyController extends Controller
 {
+    use GuardsEngineExchange;
+
     /** Upper bound on one bulk call — a bad filter should not wipe the table. */
     private const MAX_BULK = 500;
 
@@ -41,45 +51,31 @@ class AdminApiKeyController extends Controller
     /**
      * GET /api/admin/api-keys
      *
-     * Every account ever connected, soft-deleted ones included, newest first.
-     * `counts` is computed here rather than in the browser so the chips, the
-     * filters and any future consumer share one definition of "faulty".
+     * Every account ever connected on every exchange, soft-deleted ones
+     * included, newest first. `counts` is computed here rather than in the
+     * browser so the chips, the filters and any future consumer share one
+     * definition of "faulty".
      */
     public function index(): JsonResponse
     {
-        $accounts = BinanceAccount::withTrashed()
-            ->leftJoin('user_credentials', 'user_credentials.uni_id', '=', 'binance_accounts.uni_id')
-            ->orderByDesc('binance_accounts.created_at')
-            ->get([
-                'binance_accounts.id',
-                'binance_accounts.name',
-                'binance_accounts.uni_id',
-                'binance_accounts.api_key',
-                'binance_accounts.demo',
-                'binance_accounts.enabled',
-                'binance_accounts.is_sandbox',
-                'binance_accounts.balance',
-                'binance_accounts.unrealized_pnl',
-                'binance_accounts.currency_type',
-                'binance_accounts.created_at',
-                'binance_accounts.deleted_at',
-                'binance_accounts.key_status',
-                'binance_accounts.key_error_code',
-                'binance_accounts.key_error_reason',
-                'binance_accounts.key_error_message',
-                'binance_accounts.key_blocked_at',
-                'binance_accounts.key_checked_at',
-                'user_credentials.name as owner_name',
-                'user_credentials.email as owner_email',
-                'user_credentials.status as owner_status',
-                'user_credentials.type as owner_type',
-            ]);
+        $rows = collect();
+        foreach (ExchangeSchema::supported() as $exchange) {
+            $schema = ExchangeSchema::for($exchange);
+            $accounts = $this->listing($schema)->get($this->columns($schema));
 
-        // What each key would take with it if it were erased. Three grouped
-        // queries, not one per row — this page lists every account ever made.
-        $usage = $this->usageFor($accounts->pluck('api_key')->all(), $accounts->pluck('id')->all());
+            // What each key would take with it if it were erased. Three grouped
+            // queries per exchange, not one per row — this page lists every
+            // account ever made.
+            $usage = $this->usageFor(
+                $schema,
+                $accounts->pluck('api_key')->all(),
+                $accounts->pluck('id')->all(),
+            );
 
-        $rows = $accounts->map(fn ($a) => $this->row($a, $usage))->values();
+            $rows = $rows->concat($accounts->map(fn ($a) => $this->row($a, $schema, $usage)));
+        }
+
+        $rows = $rows->sortByDesc('created_at')->values();
 
         // A disconnected row is neither disabled nor faulty for counting
         // purposes — it is gone, and listing it under "needs attention" would
@@ -88,8 +84,9 @@ class AdminApiKeyController extends Controller
 
         return response()->json([
             'success' => true,
-            'grace_days' => BinanceAccount::KEY_GRACE_DAYS,
+            'grace_days' => ExchangeAccount::KEY_GRACE_DAYS,
             'server_ip' => config('services.engine.public_ip'),
+            'exchanges' => ExchangeSchema::supported(),
             'counts' => [
                 'all' => $rows->count(),
                 'connected' => $live->count(),
@@ -103,7 +100,7 @@ class AdminApiKeyController extends Controller
     }
 
     /**
-     * PUT /api/admin/api-keys/{id}
+     * PUT /api/admin/api-keys/{exchange}/{id}
      *
      * Rename, and enable / disable. Deliberately NOT editable here: the key
      * and secret themselves (re-keying is the owner's job, from their own
@@ -111,9 +108,14 @@ class AdminApiKeyController extends Controller
      * support screen turns into a credential store) and `demo`, which decides
      * testnet-vs-real orders and must not be a two-click accident.
      */
-    public function update(Request $request, int $id): JsonResponse
+    public function update(Request $request, string $exchange, int $id): JsonResponse
     {
-        $account = BinanceAccount::withTrashed()->find($id);
+        if ($unsupported = $this->guardExchange($exchange)) {
+            return $unsupported;
+        }
+        $schema = $this->schema($exchange);
+
+        $account = $this->find($schema, $id);
         if (! $account) {
             return $this->notFound();
         }
@@ -123,7 +125,7 @@ class AdminApiKeyController extends Controller
                 'sometimes',
                 'string',
                 'max:128',
-                Rule::unique('binance_accounts', 'name')->ignore($account->id),
+                Rule::unique($schema->accountsTable, 'name')->ignore($account->id),
             ],
             'enabled' => ['sometimes', 'boolean'],
         ], [
@@ -142,19 +144,23 @@ class AdminApiKeyController extends Controller
         return response()->json([
             'success' => true,
             'message' => 'API key updated.',
-            'key' => $this->rowFor($account->id),
+            'key' => $this->rowFor($schema, $account->id),
         ]);
     }
 
     /**
-     * DELETE /api/admin/api-keys/{id}
+     * DELETE /api/admin/api-keys/{exchange}/{id}
      * Disconnect one account (soft delete), exactly as the trader's own
      * disconnect does — including telling the engine immediately, so a key the
      * admin has just pulled cannot receive one more signal on the cache TTL.
      */
-    public function destroy(int $id): JsonResponse
+    public function destroy(string $exchange, int $id): JsonResponse
     {
-        $account = BinanceAccount::withTrashed()->find($id);
+        if ($unsupported = $this->guardExchange($exchange)) {
+            return $unsupported;
+        }
+
+        $account = $this->find($this->schema($exchange), $id);
         if (! $account) {
             return $this->notFound();
         }
@@ -176,7 +182,7 @@ class AdminApiKeyController extends Controller
     }
 
     /**
-     * DELETE /api/admin/api-keys/{id}/purge
+     * DELETE /api/admin/api-keys/{exchange}/{id}/purge
      *
      * Erase the row and this account's own market data — the only hard delete
      * on this screen, and the only way a stored credential ever leaves the
@@ -188,14 +194,19 @@ class AdminApiKeyController extends Controller
      * page loading and the button being pressed, and a working key must not be
      * erasable on the strength of a stale row.
      */
-    public function purge(int $id): JsonResponse
+    public function purge(string $exchange, int $id): JsonResponse
     {
-        $account = BinanceAccount::withTrashed()->find($id);
+        if ($unsupported = $this->guardExchange($exchange)) {
+            return $unsupported;
+        }
+        $schema = $this->schema($exchange);
+
+        $account = $this->find($schema, $id);
         if (! $account) {
             return $this->notFound();
         }
 
-        $usage = $this->usageFor([$account->api_key], [$account->id]);
+        $usage = $this->usageFor($schema, [$account->api_key], [$account->id]);
         $reason = $this->purgeBlockedReason($account, $usage);
         if ($reason !== null) {
             return response()->json([
@@ -208,12 +219,13 @@ class AdminApiKeyController extends Controller
         $apiKey = $account->api_key;
 
         // One transaction: a half-purged account (rows gone, credential left
-        // behind) is worse than either outcome.
-        $removed = DB::transaction(function () use ($account, $apiKey) {
+        // behind) is worse than either outcome. Only THIS exchange's tables —
+        // the api_key is venue-specific and so is every row keyed by it.
+        $removed = DB::transaction(function () use ($account, $apiKey, $schema) {
             $counts = [
-                'positions' => DB::table('binance_positions')->where('api_key', $apiKey)->delete(),
-                'trades' => DB::table('binance_pastpositions')->where('api_key', $apiKey)->delete(),
-                'transactions' => DB::table('binance_transactions')->where('api_key', $apiKey)->delete(),
+                'positions' => DB::table($schema->positions)->where('api_key', $apiKey)->delete(),
+                'trades' => DB::table($schema->pastPositions)->where('api_key', $apiKey)->delete(),
+                'transactions' => DB::table($schema->transactions)->where('api_key', $apiKey)->delete(),
             ];
 
             $account->forceDelete();
@@ -238,37 +250,48 @@ class AdminApiKeyController extends Controller
      *
      * Disconnect several at once — the "clear out the faulty keys" button.
      *
-     * The ids are REQUIRED and come from the client. A server-side
+     * The keys are REQUIRED and come from the client as (exchange, id) pairs —
+     * an id alone names a different account on every exchange. A server-side
      * "delete everything currently faulty" would act on rows the admin never
      * saw (the engine can flag another account between the page loading and
      * the button being pressed), so what gets deleted is exactly what was on
-     * screen. Already-disconnected ids are skipped, not errors — two admins
+     * screen. Already-disconnected keys are skipped, not errors — two admins
      * pressing the same button must not produce a failure.
      */
     public function bulkDestroy(Request $request): JsonResponse
     {
         $validated = $request->validate([
-            'ids' => ['required', 'array', 'min:1', 'max:'.self::MAX_BULK],
-            'ids.*' => ['integer'],
+            'keys' => ['required', 'array', 'min:1', 'max:'.self::MAX_BULK],
+            'keys.*.exchange' => ['required', 'string', Rule::in(ExchangeSchema::supported())],
+            'keys.*.id' => ['required', 'integer'],
         ]);
 
-        $ids = array_values(array_unique($validated['ids']));
+        $deleted = 0;
+        $skipped = 0;
+        $missing = 0;
 
-        $accounts = BinanceAccount::withTrashed()->whereIn('id', $ids)->get();
-        $deletable = $accounts->reject(fn ($a) => $a->trashed());
+        foreach (collect($validated['keys'])->groupBy('exchange') as $exchange => $refs) {
+            $ids = $refs->pluck('id')->map(fn ($id) => (int) $id)->unique()->values()->all();
 
-        foreach ($deletable as $account) {
-            $account->delete();
+            $accounts = ExchangeSchema::for($exchange)->accountQuery()
+                ->withTrashed()
+                ->whereIn('id', $ids)
+                ->get();
+            $deletable = $accounts->reject(fn ($a) => $a->trashed());
+
+            foreach ($deletable as $account) {
+                $account->delete();
+            }
+
+            $deleted += $deletable->count();
+            $skipped += $accounts->count() - $deletable->count();
+            $missing += count($ids) - $accounts->count();
         }
 
         // One invalidation for the whole batch, not one per row.
-        if ($deletable->isNotEmpty()) {
+        if ($deleted > 0) {
             $this->engineCache->refreshAccounts();
         }
-
-        $deleted = $deletable->count();
-        $skipped = $accounts->count() - $deleted;
-        $missing = count($ids) - $accounts->count();
 
         return response()->json([
             'success' => true,
@@ -280,20 +303,71 @@ class AdminApiKeyController extends Controller
         ]);
     }
 
+    /** Every row of one exchange's table, trashed included, owner joined. */
+    private function listing(ExchangeSchema $schema): Builder
+    {
+        $table = $schema->accountsTable;
+
+        return $schema->accountQuery()
+            ->withTrashed()
+            ->leftJoin('user_credentials', 'user_credentials.uni_id', '=', "{$table}.uni_id")
+            ->orderByDesc("{$table}.created_at");
+    }
+
+    /** The listing's select list, qualified by the exchange's table. */
+    private function columns(ExchangeSchema $schema): array
+    {
+        $table = $schema->accountsTable;
+
+        return [
+            "{$table}.id",
+            "{$table}.name",
+            "{$table}.uni_id",
+            "{$table}.api_key",
+            "{$table}.demo",
+            "{$table}.enabled",
+            "{$table}.is_sandbox",
+            "{$table}.balance",
+            "{$table}.unrealized_pnl",
+            "{$table}.currency_type",
+            "{$table}.created_at",
+            "{$table}.deleted_at",
+            "{$table}.key_status",
+            "{$table}.key_error_code",
+            "{$table}.key_error_reason",
+            "{$table}.key_error_message",
+            "{$table}.key_blocked_at",
+            "{$table}.key_checked_at",
+            'user_credentials.name as owner_name',
+            'user_credentials.email as owner_email',
+            'user_credentials.status as owner_status',
+            'user_credentials.type as owner_type',
+        ];
+    }
+
+    /** One account by (exchange, id), soft-deleted included. */
+    private function find(ExchangeSchema $schema, int $id): ?ExchangeAccount
+    {
+        return $schema->accountQuery()->withTrashed()->find($id);
+    }
+
     /**
-     * Row counts for every listed key, in three grouped queries.
+     * Row counts for every listed key of one exchange, in three grouped
+     * queries against that exchange's own tables.
      *
      * `invoices` matches on account_id OR api_key: an invoice carries both, and
      * a row that matched on only one of them would under-report the billing
-     * history the purge guard is protecting.
+     * history the purge guard is protecting. Narrowed to the exchange as well,
+     * because `account_id` repeats across the per-exchange tables — a Binance
+     * invoice must not shield the MEXC account that happens to share its id.
      *
      * @param  string[]  $apiKeys
      * @param  int[]  $ids
      */
-    private function usageFor(array $apiKeys, array $ids): array
+    private function usageFor(ExchangeSchema $schema, array $apiKeys, array $ids): array
     {
         if ($apiKeys === []) {
-            return ['trades' => [], 'positions' => [], 'transactions' => [], 'invoices' => []];
+            return ['trades' => [], 'positions' => [], 'transactions' => [], 'invoices' => collect()];
         }
 
         $countBy = fn (string $table) => DB::table($table)
@@ -304,15 +378,16 @@ class AdminApiKeyController extends Controller
             ->all();
 
         $invoices = DB::table('invoices')
+            ->where('exchange', $schema->exchange)
             ->where(function ($q) use ($ids, $apiKeys) {
                 $q->whereIn('account_id', $ids)->orWhereIn('api_key', $apiKeys);
             })
             ->get(['account_id', 'api_key']);
 
         return [
-            'trades' => $countBy('binance_pastpositions'),
-            'positions' => $countBy('binance_positions'),
-            'transactions' => $countBy('binance_transactions'),
+            'trades' => $countBy($schema->pastPositions),
+            'positions' => $countBy($schema->positions),
+            'transactions' => $countBy($schema->transactions),
             'invoices' => $invoices,
         ];
     }
@@ -321,7 +396,7 @@ class AdminApiKeyController extends Controller
     private function invoiceCount(array $usage, int $id, string $apiKey): int
     {
         $rows = $usage['invoices'] ?? null;
-        if (! $rows) {
+        if (! $rows instanceof Collection || $rows->isEmpty()) {
             return 0;
         }
 
@@ -330,20 +405,19 @@ class AdminApiKeyController extends Controller
         )->count();
     }
 
-    /** One listing row. `$a` is the joined stdClass or a re-read model. */
-    private function row(object $a, array $usage = []): array
+    /** One listing row. `$a` is the joined model or a re-read one. */
+    private function row(object $a, ExchangeSchema $schema, array $usage = []): array
     {
         $blockedAt = $a->key_blocked_at ? Carbon::parse($a->key_blocked_at) : null;
-        $blocked = $a->key_status === BinanceAccount::KEY_BLOCKED;
+        $blocked = $a->key_status === ExchangeAccount::KEY_BLOCKED;
         $graceEnds = $blocked && $blockedAt
-            ? $blockedAt->copy()->addDays(BinanceAccount::KEY_GRACE_DAYS)
+            ? $blockedAt->copy()->addDays(ExchangeAccount::KEY_GRACE_DAYS)
             : null;
 
         return [
             'id' => $a->id,
-            // Hard-coded until bybit_*/mexc_* land; the column does not exist
-            // yet, and inventing one here would be a schema claim.
-            'exchange' => 'binance',
+            // The table this id lives in — the client routes every write by it.
+            'exchange' => $schema->exchange,
             'name' => $a->name,
             // First 6 + last 4. The full key and the secret stay server-side.
             'api_key_hint' => $this->maskKey((string) $a->api_key),
@@ -408,7 +482,7 @@ class AdminApiKeyController extends Controller
      */
     private function purgeBlockedReason(object $a, array $usage = []): ?string
     {
-        $blocked = $a->key_status === BinanceAccount::KEY_BLOCKED;
+        $blocked = $a->key_status === ExchangeAccount::KEY_BLOCKED;
         $disconnected = $a->deleted_at !== null;
 
         if (! $blocked && ! $disconnected) {
@@ -429,29 +503,17 @@ class AdminApiKeyController extends Controller
      * One re-read row, complete with its usage counts — so a single-row
      * response carries the same `purgeable` verdict the listing would.
      */
-    private function rowFor(int $id): array
+    private function rowFor(ExchangeSchema $schema, int $id): array
     {
-        $account = $this->reload($id);
+        $account = $this->listing($schema)
+            ->where("{$schema->accountsTable}.id", $id)
+            ->first($this->columns($schema));
 
         return $this->row(
             $account,
-            $this->usageFor([$account->api_key], [(int) $account->id]),
+            $schema,
+            $this->usageFor($schema, [$account->api_key], [(int) $account->id]),
         );
-    }
-
-    /** Re-read one row through the same join the listing uses. */
-    private function reload(int $id): object
-    {
-        return BinanceAccount::withTrashed()
-            ->leftJoin('user_credentials', 'user_credentials.uni_id', '=', 'binance_accounts.uni_id')
-            ->where('binance_accounts.id', $id)
-            ->first([
-                'binance_accounts.*',
-                'user_credentials.name as owner_name',
-                'user_credentials.email as owner_email',
-                'user_credentials.status as owner_status',
-                'user_credentials.type as owner_type',
-            ]);
     }
 
     private function maskKey(string $key): string

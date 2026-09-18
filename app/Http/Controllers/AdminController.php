@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\BinanceAccount;
 use App\Models\UserCredential;
+use App\Services\Exchanges\ExchangeSchema;
 use App\Services\Pnl\TradingFee;
 use App\Services\UserStatsService;
 use Illuminate\Database\QueryException;
@@ -437,7 +438,9 @@ class AdminController extends Controller
      */
     public function users(): JsonResponse
     {
-        $users = UserCredential::orderByRaw("FIELD(status, 'pending') DESC")
+        // Pending first (the approval queue), then newest. CASE rather than
+        // MySQL's FIELD() so the same query runs on the SQLite test database.
+        $users = UserCredential::orderByRaw("CASE WHEN status = 'pending' THEN 0 ELSE 1 END")
             ->orderByDesc('created_at')
             ->get([
                 'uni_id', 'name', 'email', 'status', 'type',
@@ -445,24 +448,37 @@ class AdminController extends Controller
                 'created_at', 'last_activity',
             ]);
 
-        // Exchange accounts per user (incl. disconnected ones), keys masked.
-        $accounts = BinanceAccount::withTrashed()
-            ->whereIn('uni_id', $users->pluck('uni_id'))
-            ->orderByDesc('created_at')
-            ->get()
+        // Exchange accounts per user (incl. disconnected ones), keys masked —
+        // one query per exchange table, every row stamped with its `exchange`
+        // because ids repeat across the tables.
+        $accounts = collect();
+        foreach (ExchangeSchema::supported() as $exchange) {
+            $rows = ExchangeSchema::for($exchange)->accountQuery()
+                ->withTrashed()
+                ->whereIn('uni_id', $users->pluck('uni_id'))
+                ->get()
+                ->map(fn ($a) => [
+                    'id' => $a->id,
+                    'uni_id' => $a->uni_id,
+                    'name' => $a->name,
+                    'exchange' => $exchange,
+                    'api_key' => $this->maskKey($a->api_key),
+                    'demo' => (bool) $a->demo,
+                    'enabled' => (bool) $a->enabled,
+                    'balance' => round((float) $a->balance, 2),
+                    'unrealized_pnl' => round((float) $a->unrealized_pnl, 2),
+                    'currency_type' => $a->currency_type,
+                    'created_at' => $a->created_at,
+                    'deleted_at' => $a->deleted_at?->toISOString(),
+                ]);
+            $accounts = $accounts->concat($rows);
+        }
+        $accounts = $accounts
+            ->sortByDesc(fn (array $a) => (string) $a['created_at'])
             ->groupBy('uni_id')
-            ->map(fn ($rows) => $rows->map(fn ($a) => [
-                'id' => $a->id,
-                'name' => $a->name,
-                'exchange' => 'Binance',
-                'api_key' => $this->maskKey($a->api_key),
-                'demo' => (bool) $a->demo,
-                'enabled' => (bool) $a->enabled,
-                'balance' => round((float) $a->balance, 2),
-                'unrealized_pnl' => round((float) $a->unrealized_pnl, 2),
-                'currency_type' => $a->currency_type,
-                'deleted_at' => $a->deleted_at?->toISOString(),
-            ])->values());
+            ->map(fn ($rows) => $rows
+                ->map(fn (array $a) => array_diff_key($a, ['uni_id' => 1, 'created_at' => 1]))
+                ->values());
 
         return response()->json([
             'success' => true,
