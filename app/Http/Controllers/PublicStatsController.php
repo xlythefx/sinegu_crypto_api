@@ -199,10 +199,18 @@ class PublicStatsController extends Controller
         // make the line leap upward the day a deposit lands, with no trading
         // behind the jump (on the live master, −25.6% to −3.2% in one July day).
         //
-        // The cost of fixing it is that a new deposit rescales every past `roc`.
-        // That is why `roc` is a HEADLINE figure only and `cumulative` still
-        // draws the chart: the chart's compounded points are never revised,
-        // which is the property that makes a published percentage checkable.
+        // The cost of fixing it is that a new deposit rescales every past `roc`
+        // — the whole curve compresses, its shape untouched. Accepted (2026-09-18)
+        // for the landing page's CUMULATIVE view, which draws `roc` rather than
+        // `cumulative`: `roc` is the dashboard's equity curve as a percentage
+        // (the dollar curve over one constant), so the two rise together and
+        // the curve ends on the Return on Capital card. The compounded
+        // `cumulative` — which on this account fell to −17% while the equity
+        // climbed, because chaining measured the early losses against ~1k and
+        // every later gain against ~6k — is still published, just not drawn.
+        // The DAILY figures (`pct`) keep the per-day capital basis: the
+        // Telegram recaps post them, and a day must read the same on the site
+        // and in the channel.
         $capitalContributed = $openingCapital + array_sum($flowByDay);
 
         $capital = $openingCapital;  // + net flows and realized P&L as we walk
@@ -270,12 +278,13 @@ class PublicStatsController extends Controller
             'stats' => [
                 // TWO different questions, deliberately both published:
                 //  return_on_capital_pct — what every dollar committed has
-                //    returned so far. The headline, and the figure the Telegram
-                //    recap quotes as "All-time".
+                //    returned so far. The headline, the figure the Telegram
+                //    recap quotes as "All-time", and where the landing page's
+                //    cumulative curve (the per-day `roc`) ends — one figure,
+                //    so the card and the curve can never disagree.
                 //  total_pnl_pct — the compounded (time-weighted) return, which
-                //    is what the chart's `cumulative` points build to. Kept as
-                //    the chart's own total so the curve and its endpoint can
-                //    never disagree.
+                //    is what the series' `cumulative` points build to. Kept
+                //    for consumers of that series; the site no longer draws it.
                 // They differ whenever capital arrived unevenly — on the live
                 // master, most of it landed AFTER the losing early months, so
                 // the compounded figure is much the harsher of the two. Label
