@@ -366,6 +366,81 @@ class PublicTrackRecordTest extends EngineTestCase
         $this->assertSame(2, $body['series'][0]['trades']);
     }
 
+    /* ============ symbol filter ============ */
+
+    /**
+     * `?symbols=` narrows the TRADES, never the capital: every position is
+     * backed by the whole account, so a filtered day is that strategy's P&L
+     * over all the capital it had. The landing page shows LTC/USDT alone this
+     * way and labels it from the echoed `symbols`.
+     */
+    public function test_symbols_filter_narrows_trades_but_not_capital(): void
+    {
+        $uniId = $this->makeMaster(['initial_deposit' => 1000]);
+        $this->makeTrade($uniId, '2026-01-02 10:00:00', 50, self::KEY, 'LTCUSDT');   // +5% on 1000
+        $this->makeTrade($uniId, '2026-01-02 11:00:00', -30, self::KEY, 'BTCUSDT');
+        $this->makeTrade($uniId, '2026-01-03 10:00:00', -20, self::KEY, 'BTCUSDT');  // a BTC-only day
+
+        $body = $this->getJson('/api/public/track-record?symbols=LTCUSDT')->assertOk()->json();
+
+        $this->assertSame(['LTCUSDT'], $body['symbols']);
+        $this->assertCount(1, $body['series']);  // the BTC-only day is not a trading day here
+        $this->assertEquals(5.0, $body['series'][0]['pct']);
+        $this->assertSame(1, $body['series'][0]['trades']);
+        $this->assertEquals([['symbol' => 'LTCUSDT', 'pct' => 5.0, 'trades' => 1]], $body['series'][0]['assets']);
+        $this->assertEquals(5.0, $body['stats']['return_on_capital_pct']);
+        $this->assertSame(1, $body['stats']['trades']);
+
+        // The unfiltered record is untouched — and separately cached.
+        $all = $this->getJson('/api/public/track-record')->assertOk()->json();
+        $this->assertSame([], $all['symbols']);
+        $this->assertSame(3, $all['stats']['trades']);
+    }
+
+    /** One market, two spellings: Binance `LTCUSDT`, MEXC `LTC_USDT`. */
+    public function test_symbols_filter_matches_the_same_market_across_venue_spellings(): void
+    {
+        $uniId = $this->makeMaster(['initial_deposit' => 1000]);
+        $this->makeMexcAccount($uniId, 1000);
+        $this->makeTrade($uniId, '2026-01-02 10:00:00', 100, self::KEY, 'LTCUSDT');
+        $this->makeTrade($uniId, '2026-01-02 11:00:00', 999, self::KEY, 'BTCUSDT');
+        $this->makeMexcTrade($uniId, '2026-01-02 12:00:00', 100);  // LTC_USDT
+
+        $body = $this->getJson('/api/public/track-record?symbols=ltc_usdt')->assertOk()->json();
+
+        $this->assertSame(['LTCUSDT'], $body['symbols']);
+        $this->assertEquals(10.0, $body['series'][0]['pct']);  // 200 on 2000, BTC left out
+        $this->assertSame(2, $body['series'][0]['trades']);
+    }
+
+    public function test_symbols_filter_with_nothing_in_scope_is_unavailable_not_zeros(): void
+    {
+        $uniId = $this->makeMaster(['initial_deposit' => 1000]);
+        $this->makeTrade($uniId, '2026-01-02 10:00:00', 50, self::KEY, 'BTCUSDT');
+
+        $this->getJson('/api/public/track-record?symbols=DOGEUSDT')->assertOk()
+            ->assertJson(['available' => false, 'symbols' => ['DOGEUSDT'], 'series' => []]);
+    }
+
+    /** A public route answers with what it can publish; junk is dropped, not 4xx'd. */
+    public function test_symbols_filter_drops_anything_that_is_not_a_ticker_and_caps_the_list(): void
+    {
+        $uniId = $this->makeMaster(['initial_deposit' => 1000]);
+        $this->makeTrade($uniId, '2026-01-02 10:00:00', 50, self::KEY, 'LTCUSDT');
+
+        // Punctuation-only, too short, too long, and a duplicate in another
+        // case — everything but one canonical LTCUSDT survives.
+        $body = $this->getJson('/api/public/track-record?symbols=<!>,ltcusdt,LTCUSDT,x,'.str_repeat('A', 30))
+            ->assertOk()->json();
+        $this->assertSame(['LTCUSDT'], $body['symbols']);
+        $this->assertEquals(5.0, $body['series'][0]['pct']);
+
+        $many = implode(',', ['AAAUSDT', 'BBBUSDT', 'CCCUSDT', 'DDDUSDT', 'EEEUSDT', 'LTCUSDT']);
+        $capped = $this->getJson('/api/public/track-record?symbols='.$many)->assertOk()->json();
+        $this->assertCount(5, $capped['symbols']);
+        $this->assertNotContains('LTCUSDT', $capped['symbols']);  // sorted, then capped
+    }
+
     /* ============ privacy ============ */
 
     public function test_needs_no_token_and_leaks_no_amounts_or_identity(): void

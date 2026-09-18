@@ -34,8 +34,11 @@ use Illuminate\Support\Facades\Route;
 
 // Marketing site — unauthenticated. Percentages and counts only, never
 // balances or amounts (see PublicStatsController's privacy rule). Server-side
-// cached, so the landing page's traffic never turns into query load.
-Route::prefix('public')->group(function () {
+// cached, so the landing page's traffic never turns into query load — but the
+// `symbols` filter is part of the cache key and caller-chosen, so an unknown
+// ticker per request would be a fresh computation each time. 60/min per IP is
+// far above one call per page view and keeps that from becoming query load.
+Route::prefix('public')->middleware('throttle:60,1')->group(function () {
     Route::get('/track-record', [PublicStatsController::class, 'trackRecord']);
     // One exchange's slice of the same record — what the Telegram recaps post,
     // one message per exchange. Unknown names 404 (no query, nothing to leak).

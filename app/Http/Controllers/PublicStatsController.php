@@ -6,6 +6,7 @@ use App\Models\UserCredential;
 use App\Services\Exchanges\ExchangeSchema;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 
@@ -28,38 +29,91 @@ class PublicStatsController extends Controller
     public const ALL_EXCHANGES = 'all';
 
     /**
-     * GET /api/public/track-record
+     * Most tickers one request may narrow to. Every distinct filter is its own
+     * cached computation, and the filter is caller-supplied on a public route,
+     * so the space of keys is capped here and the route is throttled.
+     */
+    private const MAX_SYMBOLS = 5;
+
+    /**
+     * GET /api/public/track-record[?symbols=LTCUSDT,…]
      * The master account's verified track record: daily percentage returns,
      * their running sum, and the headline stats — feeds the landing page's
      * "See every trade, verified" section. Every supported exchange the master
      * trades on is pooled as ONE portfolio (capital summed, P&L summed).
      *
+     * `symbols` narrows the TRADES to those tickers (2026-09-18: the landing
+     * page shows the LTC/USDT strategy alone). The capital is still the whole
+     * account's — it is not partitioned per asset, every position is backed by
+     * all of it — so a filtered `roc` is "what that strategy made on the
+     * capital it had". The applied filter is echoed as `symbols` so the page
+     * labels what it shows rather than claiming the whole account.
+     *
      * Always 200. `available: false` means there is nothing to publish yet
-     * (no master account, or no closed trades) — the landing page renders its
-     * empty state rather than inventing numbers.
+     * (no master account, or no closed trades in scope) — the landing page
+     * renders its empty state rather than inventing numbers.
      */
-    public function trackRecord(): JsonResponse
+    public function trackRecord(Request $request): JsonResponse
     {
-        return response()->json($this->cached(null));
+        return response()->json($this->cached(null, $this->symbolsFilter($request)));
     }
 
     /**
-     * GET /api/public/track-record/{exchange}
+     * GET /api/public/track-record/{exchange}[?symbols=…]
      * The same record restricted to one exchange's accounts, capital and
      * trades. The Telegram recaps read this, one message per exchange, so the
      * channel that labels every entry `LTCUSDT · Binance` recaps the same way.
-     * The route's whereIn keeps unknown names out of here.
+     * The route's whereIn keeps unknown names out of here. The recaps send no
+     * `symbols`: the channel announces every asset's entries and exits, so its
+     * recap covers every asset.
      */
-    public function trackRecordForExchange(string $exchange): JsonResponse
+    public function trackRecordForExchange(Request $request, string $exchange): JsonResponse
     {
-        return response()->json($this->cached($exchange));
+        return response()->json($this->cached($exchange, $this->symbolsFilter($request)));
     }
 
-    private function cached(?string $exchange): array
+    /**
+     * @param  list<string>  $symbols  normalized, sorted, deduplicated
+     */
+    private function cached(?string $exchange, array $symbols): array
     {
-        $key = self::CACHE_KEY.'.'.($exchange ?? self::ALL_EXCHANGES);
+        $key = self::CACHE_KEY.'.'.($exchange ?? self::ALL_EXCHANGES)
+            .($symbols ? '.'.implode('+', $symbols) : '');
 
-        return Cache::remember($key, self::CACHE_TTL_SECONDS, fn () => $this->compute($exchange));
+        return Cache::remember($key, self::CACHE_TTL_SECONDS, fn () => $this->compute($exchange, $symbols));
+    }
+
+    /**
+     * The `symbols` query as a canonical list: each name reduced to its
+     * {@see symbolKey}, shape-checked, deduplicated, sorted, capped. Anything
+     * that does not look like a ticker is dropped rather than rejected — a
+     * public route answers 200 with the record it CAN publish.
+     *
+     * @return list<string>
+     */
+    private function symbolsFilter(Request $request): array
+    {
+        $keys = [];
+        foreach (explode(',', (string) $request->query('symbols', '')) as $part) {
+            $key = self::symbolKey($part);
+            if ($key !== '' && preg_match('/^[A-Z0-9]{3,20}$/', $key)) {
+                $keys[$key] = true;
+            }
+        }
+        $symbols = array_keys($keys);
+        sort($symbols);
+
+        return array_slice($symbols, 0, self::MAX_SYMBOLS);
+    }
+
+    /**
+     * One name for one market across venues: Binance stores `LTCUSDT`, MEXC
+     * `LTC_USDT`. Stripping punctuation and case lets a single filter match
+     * the same market wherever the master trades it.
+     */
+    private static function symbolKey(string $symbol): string
+    {
+        return strtoupper((string) preg_replace('/[^A-Za-z0-9]/', '', $symbol));
     }
 
     /**
@@ -92,12 +146,12 @@ class PublicStatsController extends Controller
      * two disagree about, the total is the one a customer can verify against a
      * balance, and this section's whole claim is that it is verifiable.
      */
-    private function compute(?string $exchange): array
+    private function compute(?string $exchange, array $symbols = []): array
     {
         $master = UserCredential::where('type', 'master')->first();
 
         if (! $master) {
-            return $this->unavailable($exchange);
+            return $this->unavailable($exchange, $symbols);
         }
 
         $exchanges = $exchange === null ? ExchangeSchema::supported() : [$exchange];
@@ -143,8 +197,16 @@ class PublicStatsController extends Controller
             );
         }
 
+        // The filter narrows the TRADES only; the transactions above still
+        // seed the capital, because the whole account backs every position.
+        if ($symbols) {
+            $trades = $trades->filter(
+                fn ($t) => in_array(self::symbolKey((string) $t->symbol), $symbols, true)
+            );
+        }
+
         if (! $contributing || $trades->isEmpty()) {
-            return $this->unavailable($exchange);
+            return $this->unavailable($exchange, $symbols);
         }
 
         $trades = $trades->sortBy('closed_at')->values();
@@ -255,7 +317,7 @@ class PublicStatsController extends Controller
         }
 
         if (! $series) {  // trades exist but no capital was ever recorded
-            return $this->unavailable($exchange);
+            return $this->unavailable($exchange, $symbols);
         }
 
         // --- Headline stats ---------------------------------------------------
@@ -274,6 +336,9 @@ class PublicStatsController extends Controller
             // how many accounts. On the pooled record this is what tells a
             // reader "Binance only, so far".
             'exchanges' => $contributing,
+            // The ticker filter applied, canonical form; [] is the whole
+            // account. A ticker is already public on every announced entry.
+            'symbols' => $symbols,
             'timezone' => $timezone,
             'stats' => [
                 // TWO different questions, deliberately both published:
@@ -345,13 +410,14 @@ class PublicStatsController extends Controller
     }
 
     /** Nothing to publish yet — a shape the landing page can render safely. */
-    private function unavailable(?string $exchange): array
+    private function unavailable(?string $exchange, array $symbols = []): array
     {
         return [
             'success' => true,
             'available' => false,
             'exchange' => $exchange ?? self::ALL_EXCHANGES,
             'exchanges' => [],
+            'symbols' => $symbols,
             'timezone' => $this->timezone(),
             'stats' => null,
             'series' => [],
