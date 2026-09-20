@@ -188,7 +188,7 @@ class PublicStatsController extends Controller
             $trades = $trades->concat(
                 DB::table($schema->pastPositions)
                     ->whereIn('api_key', $apiKeys)
-                    ->get(['realized_pnl', 'closed_at', 'symbol', 'increments_closed'])
+                    ->get(['realized_pnl', 'closed_at', 'symbol'])
             );
             $transactions = $transactions->concat(
                 DB::table($schema->transactions)
@@ -221,26 +221,25 @@ class PublicStatsController extends Controller
         // `services.track_record.timezone`. Timestamps are stored in UTC, so a
         // trade closed at 20:00 UTC belongs to the NEXT Manila day.
         //
-        // A "trade" is an entry-sized INCREMENT, not a row. A row is one close
-        // order, and the engine closes a whole stacked position in one order —
-        // so three announced entries (`Increment (1/3)`…`(3/3)`) close as one
-        // row. The channel counts increments on both sides; a recap that counted
-        // rows read as missing trades. NULL (a row from before the column, or
-        // one the reconciliation poller wrote) is at least one close.
+        // A "trade" is a ROW — one close order — not the increments it took
+        // off. Between 2026-09-17 and 2026-09-20 this summed `increments_closed`
+        // instead, so a 2-increment stack closed in one order published as
+        // "2 trades closed"; the owner counts a close as one trade, and that
+        // is what the reference bot's recap (one row, one trade) prints. The
+        // column stays: the close message still says `Increments Closed (n/cap)`.
         $timezone = $this->timezone();
         $pnlByDay = [];
         $tradesByDay = [];
         $pnlBySymbol = [];     // [day][symbol] => realized P&L
-        $tradesBySymbol = [];  // [day][symbol] => closed increments
+        $tradesBySymbol = [];  // [day][symbol] => close orders
         foreach ($trades as $trade) {
             $day = $this->localDay($trade->closed_at, $timezone);
             $symbol = (string) $trade->symbol;
             $pnl = (float) $trade->realized_pnl;
-            $increments = max(1, (int) $trade->increments_closed);
             $pnlByDay[$day] = ($pnlByDay[$day] ?? 0) + $pnl;
-            $tradesByDay[$day] = ($tradesByDay[$day] ?? 0) + $increments;
+            $tradesByDay[$day] = ($tradesByDay[$day] ?? 0) + 1;
             $pnlBySymbol[$day][$symbol] = ($pnlBySymbol[$day][$symbol] ?? 0) + $pnl;
-            $tradesBySymbol[$day][$symbol] = ($tradesBySymbol[$day][$symbol] ?? 0) + $increments;
+            $tradesBySymbol[$day][$symbol] = ($tradesBySymbol[$day][$symbol] ?? 0) + 1;
         }
 
         $flowByDay = [];

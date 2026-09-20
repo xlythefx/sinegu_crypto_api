@@ -187,13 +187,14 @@ class PublicTrackRecordTest extends EngineTestCase
     }
 
     /**
-     * A row is one close ORDER, and a stacked position closes in one order —
-     * so the channel's `Increment (1/3)…(3/3)` entries end as a single row.
-     * The published trade count is increments, not rows, or the daily recap
-     * says "4 trades" under six announced closes. A row without the figure
-     * (history, poller rows) is at least one.
+     * A trade is one close ORDER (one row), however many entry-sized
+     * increments it took off. For three days (2026-09-17..20) the count summed
+     * `increments_closed`, and a 2-increment stack closed in one order was
+     * published as "Trades closed: 2" — which the owner, counting closes, read
+     * as wrong. The column is still written and still shown on the close
+     * message; it just does not multiply the count.
      */
-    public function test_trade_counts_are_increments_closed_not_rows(): void
+    public function test_trade_counts_are_close_orders_not_increments(): void
     {
         $uniId = $this->makeMaster(['initial_deposit' => 1000]);
         $this->makeTrade($uniId, '2026-01-02 10:00:00', 30, self::KEY, 'LTCUSDT', 3);
@@ -202,10 +203,10 @@ class PublicTrackRecordTest extends EngineTestCase
 
         $body = $this->getJson('/api/public/track-record')->assertOk()->json();
 
-        $this->assertSame(5, $body['series'][0]['trades']);
-        $this->assertSame(5, $body['stats']['trades']);
+        $this->assertSame(3, $body['series'][0]['trades']);
+        $this->assertSame(3, $body['stats']['trades']);
         $this->assertEquals(
-            [['symbol' => 'LTCUSDT', 'pct' => 4.0, 'trades' => 4],
+            [['symbol' => 'LTCUSDT', 'pct' => 4.0, 'trades' => 2],
                 ['symbol' => 'BTCUSDT', 'pct' => 1.0, 'trades' => 1]],
             $body['series'][0]['assets'],
         );
