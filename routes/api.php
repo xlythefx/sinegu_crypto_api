@@ -21,6 +21,7 @@ use App\Http\Controllers\EngineSyncController;
 use App\Http\Controllers\ExchangeAccountController;
 use App\Http\Controllers\InvoiceController;
 use App\Http\Controllers\PaymentController;
+use App\Http\Controllers\PasswordResetController;
 use App\Http\Controllers\PayoutMethodController;
 use App\Http\Controllers\ProfileController;
 use App\Http\Controllers\PublicStatsController;
@@ -46,9 +47,23 @@ Route::prefix('public')->middleware('throttle:60,1')->group(function () {
         ->whereIn('exchange', \App\Services\Exchanges\ExchangeSchema::supported());
 });
 
+// Per-IP limits on the four unauthenticated writes. An account here holds
+// exchange API keys, so login is what credential stuffing aims at; 10/min is
+// still generous for a person mistyping a password. Register is lower because
+// a bot creating accounts has no legitimate rate at all. The reset pair is
+// the lowest: forgot SENDS MAIL on every call. Reset sits ABOVE its per-code
+// attempt cap (PasswordResetController::MAX_ATTEMPTS, 5) on purpose — the cap
+// is what voids a guessed-at code, and it must be reachable before the IP
+// limit hides it; the IP limit is the backstop against hammering many codes.
 Route::prefix('auth')->group(function () {
-    Route::post('/register', [AuthController::class, 'register']);
-    Route::post('/login', [AuthController::class, 'login']);
+    Route::post('/register', [AuthController::class, 'register'])
+        ->middleware('throttle:5,1');
+    Route::post('/login', [AuthController::class, 'login'])
+        ->middleware('throttle:10,1');
+    Route::post('/forgot-password', [PasswordResetController::class, 'forgot'])
+        ->middleware('throttle:3,1');
+    Route::post('/reset-password', [PasswordResetController::class, 'reset'])
+        ->middleware('throttle:10,1');
 
     Route::middleware('auth:sanctum')->group(function () {
         Route::get('/me', [AuthController::class, 'me']);
@@ -199,6 +214,9 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/engine/status', [AdminEngineController::class, 'status']);
         Route::get('/engine/logs', [AdminEngineController::class, 'logs']);
         Route::post('/engine/restart', [AdminEngineController::class, 'restart']);
+        // Render a daily/weekly/monthly recap and send it to the ADMIN chat as
+        // a test — never the public channel. Forwarded to the engine.
+        Route::post('/engine/reports/preview', [AdminEngineController::class, 'previewReport']);
 
         // Accounts an exchange is refusing (Binance -2015 and friends, MEXC
         // 401/406…), with an admin-side re-test so support does not have to

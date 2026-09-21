@@ -92,6 +92,89 @@ class AdminEngineTest extends EngineTestCase
         });
     }
 
+    /* ============ recap previews ============ */
+
+    public function test_recap_preview_is_forwarded_to_the_engine_with_the_admin_secret(): void
+    {
+        config(['services.engine.webhook_secrets.binance' => 'engine-admin-secret']);
+        Http::fake([
+            '127.0.0.1:5010/admin/reports/preview' => Http::response([
+                'success' => true,
+                'kind' => 'daily',
+                'on' => '2026-09-20',
+                'telegram' => true,
+                'messages' => [[
+                    'html' => "📅 <b>Daily Report — 20 Sep 2026 · Binance</b>\n\nReturn: <b>+2.820%</b>",
+                    'text' => "📅 Daily Report — 20 Sep 2026 · Binance\n\nReturn: +2.820%",
+                ]],
+            ]),
+        ]);
+
+        $this->postJson('/api/admin/engine/reports/preview', ['kind' => 'daily', 'on' => '2026-09-20'], $this->admin())
+            ->assertOk()
+            ->assertJsonPath('success', true)
+            ->assertJsonPath('kind', 'daily')
+            ->assertJsonPath('on', '2026-09-20')
+            ->assertJsonPath('telegram', true)
+            ->assertJsonPath('messages.0.text', "📅 Daily Report — 20 Sep 2026 · Binance\n\nReturn: +2.820%");
+
+        Http::assertSent(fn ($request) => $request->url() === 'http://127.0.0.1:5010/admin/reports/preview'
+            && $request->hasHeader('X-Admin-Secret', 'engine-admin-secret')
+            && $request['kind'] === 'daily'
+            && $request['on'] === '2026-09-20');
+    }
+
+    public function test_recap_preview_rejects_a_bad_kind_or_day_before_calling_the_engine(): void
+    {
+        Http::fake();
+
+        $this->postJson('/api/admin/engine/reports/preview', ['kind' => 'hourly'], $this->admin())
+            ->assertStatus(422);
+        $this->postJson('/api/admin/engine/reports/preview', ['kind' => 'daily', 'on' => 'last tuesday'], $this->admin())
+            ->assertStatus(422);
+
+        Http::assertNothingSent();
+    }
+
+    public function test_recap_preview_without_an_engine_secret_is_503_not_a_leak(): void
+    {
+        config(['services.engine.webhook_secrets.binance' => '']);
+        Http::fake();
+
+        $this->postJson('/api/admin/engine/reports/preview', ['kind' => 'daily'], $this->admin())
+            ->assertStatus(503)
+            ->assertJsonPath('message', 'No engine secret is configured on this server.');
+
+        Http::assertNothingSent();
+    }
+
+    public function test_recap_preview_reports_an_unreachable_engine_as_503(): void
+    {
+        if (PHP_OS_FAMILY === 'Windows') {
+            // The faked ConnectionException path crashes PHP natively (0xC0000005)
+            // on the WAMP dev box, like the other outbound-HTTP tests; CI runs it.
+            $this->markTestSkipped('ConnectionException fake crashes PHP on Windows/WAMP.');
+        }
+        config(['services.engine.webhook_secrets.binance' => 'engine-admin-secret']);
+        Http::fake(['127.0.0.1:5010/*' => Http::failedConnection('connection refused')]);
+
+        $this->postJson('/api/admin/engine/reports/preview', ['kind' => 'weekly'], $this->admin())
+            ->assertStatus(503)
+            ->assertJsonPath('message', 'Could not reach the engine.');
+    }
+
+    public function test_recap_preview_relays_the_engines_refusal(): void
+    {
+        config(['services.engine.webhook_secrets.binance' => 'engine-admin-secret']);
+        Http::fake([
+            '127.0.0.1:5010/admin/reports/preview' => Http::response(['error' => 'weekly recap is disabled'], 422),
+        ]);
+
+        $this->postJson('/api/admin/engine/reports/preview', ['kind' => 'weekly'], $this->admin())
+            ->assertStatus(422)
+            ->assertJsonPath('message', 'weekly recap is disabled');
+    }
+
     public function test_restart_uses_sudo_and_returns_state(): void
     {
         Process::fake([

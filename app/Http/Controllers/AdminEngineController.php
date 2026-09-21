@@ -255,6 +255,72 @@ class AdminEngineController extends Controller
         ]);
     }
 
+    /**
+     * POST /api/admin/engine/reports/preview
+     *
+     * Ask the engine to render a daily / weekly / monthly recap and send it
+     * to the ADMIN Telegram group under a test banner — the "Recap previews"
+     * card on the Bot Engine page. The engine renders it through the same
+     * function its 23:55 scheduler uses, so what the admin sees is what the
+     * public channel would get; nothing reaches that channel and the
+     * scheduler's state is untouched.
+     *
+     * `on` is the day to render "as of" (`YYYY-MM-DD`), or `yesterday`, which
+     * the ENGINE resolves in the report timezone — the browser's clock must
+     * never decide which day that is. The engine's rendered messages come
+     * back for the page to show, so the admin does not have to switch to
+     * Telegram to read them.
+     */
+    public function previewReport(Request $request): JsonResponse
+    {
+        $data = $request->validate([
+            'kind' => ['required', 'in:daily,weekly,monthly'],
+            'on' => ['nullable', 'string', 'regex:/^(\d{4}-\d{2}-\d{2}|yesterday)$/'],
+        ]);
+
+        $base = rtrim((string) config('services.engine.targets.local', 'http://127.0.0.1:5010'), '/');
+        $secret = (string) (config('services.engine.webhook_secrets.binance') ?? '');
+        if ($secret === '') {
+            return response()->json([
+                'success' => false,
+                'message' => 'No engine secret is configured on this server.',
+            ], 503);
+        }
+
+        try {
+            $response = Http::withHeaders(['X-Admin-Secret' => $secret])
+                ->timeout(30)
+                ->post("{$base}/admin/reports/preview", [
+                    'kind' => $data['kind'],
+                    'on' => $data['on'] ?? null,
+                ]);
+        } catch (\Throwable) {
+            return response()->json(['success' => false, 'message' => 'Could not reach the engine.'], 503);
+        }
+
+        if (! $response->successful()) {
+            $error = (string) ($response->json('error') ?? '');
+
+            return response()->json([
+                'success' => false,
+                'message' => $error !== '' ? $error : 'The engine refused the preview.',
+            ], $response->status() >= 500 ? 502 : 422);
+        }
+
+        $messages = collect($response->json('messages') ?? [])
+            ->map(fn ($m) => ['text' => (string) ($m['text'] ?? ''), 'html' => (string) ($m['html'] ?? '')])
+            ->values()
+            ->all();
+
+        return response()->json([
+            'success' => true,
+            'kind' => $response->json('kind') ?? $data['kind'],
+            'on' => $response->json('on'),
+            'telegram' => (bool) $response->json('telegram'),
+            'messages' => $messages,
+        ]);
+    }
+
     public function restart(): JsonResponse
     {
         if (! $this->systemdAvailable()) {
