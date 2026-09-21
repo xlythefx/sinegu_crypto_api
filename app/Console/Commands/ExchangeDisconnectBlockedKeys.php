@@ -3,6 +3,7 @@
 namespace App\Console\Commands;
 
 use App\Models\BinanceAccount;
+use App\Services\Discord\DiscordRoleSync;
 use App\Services\EngineCache;
 use Illuminate\Console\Command;
 
@@ -29,7 +30,7 @@ class ExchangeDisconnectBlockedKeys extends Command
 
     protected $description = 'Disconnect exchange accounts whose API key has been refused for over the grace period';
 
-    public function handle(EngineCache $engineCache): int
+    public function handle(EngineCache $engineCache, DiscordRoleSync $discordRoles): int
     {
         $deadline = now()->subDays(BinanceAccount::KEY_GRACE_DAYS);
 
@@ -61,6 +62,10 @@ class ExchangeDisconnectBlockedKeys extends Command
 
         if (! $this->option('dry-run')) {
             $engineCache->refreshAccounts();
+            // Losing the last live account takes the Discord Trader role with it.
+            foreach ($expired->pluck('uni_id')->unique() as $uniId) {
+                $discordRoles->syncUniId((string) $uniId);
+            }
         }
 
         $this->info(sprintf(

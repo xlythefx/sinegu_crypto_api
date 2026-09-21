@@ -36,3 +36,9 @@ Schedule::command('fees:reconcile')->dailyAt('00:30')->withoutOverlapping(30);
 // interval buys nothing. withoutOverlapping takes an expiry so a killed process
 // cannot hold the lock indefinitely.
 Schedule::command('payments:watch-tron')->everyMinute()->withoutOverlapping(5);
+
+// Discord server roles (Member / Trader) follow the account: every approve,
+// suspend, connect and disconnect syncs the user on the spot, so this nightly
+// pass only catches the write that happened while Discord was down and the
+// role someone removed by hand in the server.
+Schedule::command('discord:sync-roles')->dailyAt('00:40')->withoutOverlapping(30);

@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\ExchangeAccount;
+use App\Services\Discord\DiscordRoleSync;
 use App\Services\EngineCache;
 use App\Services\Exchanges\ExchangeSchema;
 use Illuminate\Http\JsonResponse;
@@ -41,7 +42,10 @@ class ExchangeAccountController extends Controller
      */
     private const HAS_TESTNET = ['binance' => true, 'mexc' => true];
 
-    public function __construct(private EngineCache $engineCache) {}
+    public function __construct(
+        private EngineCache $engineCache,
+        private DiscordRoleSync $discordRoles,
+    ) {}
 
     /**
      * GET /api/exchange/accounts
@@ -200,6 +204,8 @@ class ExchangeAccountController extends Controller
 
         // Tradeable from the next signal, not from the next TTL expiry.
         $this->engineCache->refreshAccounts();
+        // A live account is what earns the Discord "Trader" role (demo does not).
+        $this->discordRoles->syncUser($request->user());
 
         return response()->json([
             'success' => true,
@@ -352,6 +358,7 @@ class ExchangeAccountController extends Controller
         // Stops receiving the fan-out now — a disconnect that lingers for a
         // TTL is trading with keys the user believes they revoked.
         $this->engineCache->refreshAccounts();
+        $this->discordRoles->syncUser($request->user());
 
         return response()->json([
             'success' => true,

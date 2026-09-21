@@ -8,6 +8,7 @@ use App\Http\Controllers\AdminInvoiceController;
 use App\Http\Controllers\AdminMaintenanceController;
 use App\Http\Controllers\AdminManualTradeController;
 use App\Http\Controllers\AdminReferralController;
+use App\Http\Controllers\AdminTodoController;
 use App\Http\Controllers\AdminTradeLogController;
 use App\Http\Controllers\AdminTronTransferController;
 use App\Http\Controllers\AdminUserController;
@@ -16,6 +17,7 @@ use App\Http\Controllers\AssetController;
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\CoinsbuyWebhookController;
 use App\Http\Controllers\DashboardController;
+use App\Http\Controllers\DiscordAuthController;
 use App\Http\Controllers\EngineController;
 use App\Http\Controllers\EngineSyncController;
 use App\Http\Controllers\ExchangeAccountController;
@@ -64,6 +66,22 @@ Route::prefix('auth')->group(function () {
         ->middleware('throttle:3,1');
     Route::post('/reset-password', [PasswordResetController::class, 'reset'])
         ->middleware('throttle:10,1');
+
+    // "Sign in with Discord". config is read on every /auth page view and
+    // carries nothing secret (60/min, like /public). callback and
+    // link-with-password are LOGINS — the latter takes a password guess, so
+    // both sit on login's 10/min beside the per-token attempt cap. complete
+    // creates an account and gets register's 5/min.
+    Route::prefix('discord')->group(function () {
+        Route::get('/config', [DiscordAuthController::class, 'config'])
+            ->middleware('throttle:60,1');
+        Route::post('/callback', [DiscordAuthController::class, 'callback'])
+            ->middleware('throttle:10,1');
+        Route::post('/link-with-password', [DiscordAuthController::class, 'linkWithPassword'])
+            ->middleware('throttle:10,1');
+        Route::post('/complete', [DiscordAuthController::class, 'complete'])
+            ->middleware('throttle:5,1');
+    });
 
     Route::middleware('auth:sanctum')->group(function () {
         Route::get('/me', [AuthController::class, 'me']);
@@ -119,6 +137,12 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::put('/profile', [ProfileController::class, 'updateProfile']);
         Route::post('/image', [ProfileController::class, 'uploadImage']);
         Route::put('/password', [ProfileController::class, 'updatePassword']);
+        // The first password of a Discord-only account (refused once one exists).
+        Route::post('/password/set', [ProfileController::class, 'setPassword']);
+        // Settings → Connect / Disconnect Discord for a signed-in user.
+        Route::post('/discord/link', [DiscordAuthController::class, 'link'])
+            ->middleware('throttle:10,1');
+        Route::delete('/discord', [DiscordAuthController::class, 'unlink']);
     });
 
     Route::prefix('referrals')->group(function () {
@@ -142,6 +166,12 @@ Route::middleware('auth:sanctum')->group(function () {
     });
 
     Route::prefix('admin')->middleware('admin')->group(function () {
+        // Admin → To be Done: the owner's done-state per item slug. The items
+        // themselves ship with the frontend, so the slug is shape-checked only.
+        Route::get('/todos', [AdminTodoController::class, 'index']);
+        Route::put('/todos/{slug}', [AdminTodoController::class, 'update'])
+            ->where('slug', '(?=.{1,80}$)[a-z0-9]+(?:-[a-z0-9]+)*');
+
         Route::get('/master-stats', [AdminController::class, 'masterStats']);
         Route::get('/daily-pnl', [AdminController::class, 'dailyPnl']);
         Route::get('/performance', [AdminController::class, 'performance']);

@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Http\Controllers\Concerns\GuardsEngineExchange;
 use App\Models\ExchangeAccount;
+use App\Services\Discord\DiscordRoleSync;
 use App\Services\EngineCache;
 use App\Services\Exchanges\ExchangeSchema;
 use Illuminate\Database\Eloquent\Builder;
@@ -46,7 +47,10 @@ class AdminApiKeyController extends Controller
     /** Upper bound on one bulk call — a bad filter should not wipe the table. */
     private const MAX_BULK = 500;
 
-    public function __construct(private EngineCache $engineCache) {}
+    public function __construct(
+        private EngineCache $engineCache,
+        private DiscordRoleSync $discordRoles,
+    ) {}
 
     /**
      * GET /api/admin/api-keys
@@ -174,6 +178,8 @@ class AdminApiKeyController extends Controller
 
         $account->delete();
         $this->engineCache->refreshAccounts();
+        // The owner may have just lost their last live account → Trader role off.
+        $this->discordRoles->syncUniId($account->uni_id);
 
         return response()->json([
             'success' => true,
@@ -237,6 +243,7 @@ class AdminApiKeyController extends Controller
         // (blocked accounts stay listed so recovery can be detected), so the
         // cache must drop a credential that no longer exists.
         $this->engineCache->refreshAccounts();
+        $this->discordRoles->syncUniId($account->uni_id);
 
         return response()->json([
             'success' => true,
@@ -269,6 +276,7 @@ class AdminApiKeyController extends Controller
         $deleted = 0;
         $skipped = 0;
         $missing = 0;
+        $owners = [];
 
         foreach (collect($validated['keys'])->groupBy('exchange') as $exchange => $refs) {
             $ids = $refs->pluck('id')->map(fn ($id) => (int) $id)->unique()->values()->all();
@@ -281,6 +289,7 @@ class AdminApiKeyController extends Controller
 
             foreach ($deletable as $account) {
                 $account->delete();
+                $owners[$account->uni_id] = true;
             }
 
             $deleted += $deletable->count();
@@ -291,6 +300,10 @@ class AdminApiKeyController extends Controller
         // One invalidation for the whole batch, not one per row.
         if ($deleted > 0) {
             $this->engineCache->refreshAccounts();
+        }
+        // One Discord sync per OWNER, not per key.
+        foreach (array_keys($owners) as $uniId) {
+            $this->discordRoles->syncUniId((string) $uniId);
         }
 
         return response()->json([

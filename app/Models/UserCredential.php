@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Services\Exchanges\ExchangeSchema;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Support\Facades\Storage;
@@ -29,6 +30,9 @@ class UserCredential extends Authenticatable
         'email_verified',
         'terms_accepted_at',
         'terms_version',
+        'discord_id',
+        'discord_username',
+        'discord_linked_at',
         'user_profile',
         'user_banner',
         'is_sandbox',
@@ -50,7 +54,25 @@ class UserCredential extends Authenticatable
             'unrealized_percentage' => 'decimal:2',
             'affiliate_percentage' => 'decimal:2',
             'last_activity' => 'datetime',
+            'discord_linked_at' => 'datetime',
         ];
+    }
+
+    /**
+     * Whether the account can be entered with a password at all. NULL means a
+     * Discord-only account: login answers DISCORD_ONLY, Settings offers "Set a
+     * password" instead of "Change password", and unlinking Discord is refused
+     * (it would leave no way in).
+     */
+    public function hasPassword(): bool
+    {
+        return $this->password !== null;
+    }
+
+    /** Whether a Discord identity is linked to this account. */
+    public function hasDiscord(): bool
+    {
+        return $this->discord_id !== null;
     }
 
     /**
@@ -80,6 +102,26 @@ class UserCredential extends Authenticatable
     }
 
     /**
+     * Whether the user holds a LIVE account (demo = 0) on any exchange — what
+     * earns the Discord "Trader" role. A testnet account trades play money,
+     * so it counts for the onboarding nudge above but not here.
+     */
+    public function hasLiveExchangeAccount(): bool
+    {
+        foreach (ExchangeSchema::supported() as $exchange) {
+            $exists = ExchangeSchema::for($exchange)->accountQuery()
+                ->where('uni_id', $this->uni_id)
+                ->where('demo', 0)
+                ->exists();
+            if ($exists) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
      * The user shape returned by auth/profile endpoints.
      */
     public function toAuthPayload(): array
@@ -94,6 +136,13 @@ class UserCredential extends Authenticatable
             'user_profile' => $this->imageUrl($this->user_profile),
             'user_banner' => $this->imageUrl($this->user_banner),
             'has_exchange_account' => $this->hasExchangeAccount(),
+            'has_password' => $this->hasPassword(),
+            // The id stays a string: a Discord snowflake overflows a JS number.
+            'discord' => $this->hasDiscord() ? [
+                'id' => (string) $this->discord_id,
+                'username' => $this->discord_username,
+                'linked_at' => $this->discord_linked_at?->toISOString(),
+            ] : null,
         ];
     }
 

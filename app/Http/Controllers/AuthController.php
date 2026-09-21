@@ -89,6 +89,16 @@ class AuthController extends Controller
             ], 401);
         }
 
+        // A Discord-only account has no password to compare — say so, rather
+        // than "incorrect password" against a hash that does not exist.
+        if (! $user->hasPassword()) {
+            return response()->json([
+                'success' => false,
+                'error_code' => 'DISCORD_ONLY',
+                'message' => 'This account signs in with Discord. Use "Continue with Discord" below.',
+            ], 401);
+        }
+
         if (! Hash::check($validated['password'], $user->password)) {
             return response()->json([
                 'success' => false,

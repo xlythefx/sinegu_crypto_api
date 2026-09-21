@@ -101,4 +101,41 @@ return [
         'timezone' => env('TRACK_RECORD_TIMEZONE', 'Asia/Manila'),
     ],
 
+    // "Sign in with Discord" + the bot that grants server roles from account
+    // state (App\Services\Discord). Two credential sets, two switches:
+    //
+    // `client_id` / `client_secret` — the OAuth app. Both set = the login flow
+    //     WORKS (a developer can rehearse it on prod via /auth/discord/start).
+    // `login_public`   — whether the button is SHOWN on /auth. A rollout switch,
+    //     not a security gate: the flow is reachable by URL while it is false,
+    //     and an early sign-up merely lands in the pending queue like any other.
+    // `redirect_uris`  — the allow-list a client-sent redirect_uri is checked
+    //     against (CSV). Both the prod origin and localhost:5173 are registered
+    //     with Discord, so a local SPA on the prod API still round-trips.
+    // `bot_token` / `guild_id` — the server-side bot. Without them the login
+    //     still works; nobody is joined or given a role.
+    // `role_member_id` / `role_trader_id` — the roles DiscordRoleSync manages:
+    //     Member while status = active, Trader while a live (demo = 0) exchange
+    //     account is connected. An empty id turns that rule off; the bot never
+    //     touches a role it was not given.
+    'discord' => [
+        'client_id' => env('DISCORD_CLIENT_ID'),
+        'client_secret' => env('DISCORD_CLIENT_SECRET'),
+        'redirect_uris' => array_values(array_filter(array_map(
+            'trim',
+            explode(',', (string) env('DISCORD_REDIRECT_URIS', 'http://localhost:5173/auth/discord/callback')),
+        ))),
+        'login_public' => filter_var(env('DISCORD_LOGIN_PUBLIC', false), FILTER_VALIDATE_BOOLEAN),
+        'bot_token' => env('DISCORD_BOT_TOKEN'),
+        'guild_id' => env('DISCORD_GUILD_ID'),
+        'role_member_id' => env('DISCORD_ROLE_MEMBER_ID'),
+        'role_trader_id' => env('DISCORD_ROLE_TRADER_ID'),
+        // Discord blocks requests without a `DiscordBot (url, version)` agent.
+        'user_agent' => env('DISCORD_USER_AGENT', 'DiscordBot (https://pixel-alpha.com, 1.0)'),
+        'timeout' => (int) env('DISCORD_TIMEOUT', 5),
+        'connect_timeout' => (int) env('DISCORD_CONNECT_TIMEOUT', 3),
+        // WAMP ships no CA bundle; the TRON one is the same file.
+        'ca_bundle' => env('DISCORD_CACERT', env('TRON_CACERT')),
+    ],
+
 ];

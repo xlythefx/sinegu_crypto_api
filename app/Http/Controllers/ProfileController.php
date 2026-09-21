@@ -80,6 +80,16 @@ class ProfileController extends Controller
 
         $user = $request->user();
 
+        if (! $user->hasPassword()) {
+            // A Discord-only account has nothing to compare against; the
+            // "set a password" route is the one for it.
+            return response()->json([
+                'success' => false,
+                'error_code' => 'NO_PASSWORD',
+                'message' => 'This account has no password yet. Set one first.',
+            ], 422);
+        }
+
         if (! Hash::check($validated['current_password'], $user->password)) {
             return response()->json([
                 'success' => false,
@@ -88,18 +98,58 @@ class ProfileController extends Controller
             ], 422);
         }
 
-        // The model's 'hashed' cast hashes this on save (same as register()).
-        $user->password = $validated['new_password'];
-        $user->save();
-
-        // Revoke every other session; keep the token making this request.
-        $user->tokens()
-            ->where('id', '!=', $request->user()->currentAccessToken()->id)
-            ->delete();
+        $this->storePassword($request, $validated['new_password']);
 
         return response()->json([
             'success' => true,
             'message' => 'Password updated',
         ]);
+    }
+
+    /**
+     * POST /api/user/password/set (auth:sanctum)
+     *
+     * The first password of an account that was created through Discord.
+     * Being signed in is the proof — there is no current password to ask
+     * for — and it is allowed ONLY while the column is NULL: once a password
+     * exists, changing it goes through updatePassword() and its check.
+     */
+    public function setPassword(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'password' => ['required', 'string', 'min:8', 'confirmed'],
+        ]);
+
+        $user = $request->user();
+
+        if ($user->hasPassword()) {
+            return response()->json([
+                'success' => false,
+                'error_code' => 'HAS_PASSWORD',
+                'message' => 'This account already has a password. Use "Change password" instead.',
+            ], 409);
+        }
+
+        $this->storePassword($request, $validated['password']);
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Password set',
+            'user' => $user->toAuthPayload(),
+        ]);
+    }
+
+    /** Save the new password and revoke every other session, keeping this one. */
+    private function storePassword(Request $request, string $password): void
+    {
+        $user = $request->user();
+
+        // The model's 'hashed' cast hashes this on save (same as register()).
+        $user->password = $password;
+        $user->save();
+
+        $user->tokens()
+            ->where('id', '!=', $request->user()->currentAccessToken()->id)
+            ->delete();
     }
 }

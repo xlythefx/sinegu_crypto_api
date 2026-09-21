@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\Invoice;
 use App\Models\ReferralTracking;
 use App\Models\UserCredential;
+use App\Services\Discord\DiscordRoleSync;
 use App\Services\InvoiceService;
 use App\Services\Exchanges\ExchangeSchema;
 use App\Services\UserStatsService;
@@ -31,6 +32,7 @@ class AdminUserController extends Controller
     public function __construct(
         private UserStatsService $stats,
         private InvoiceService $invoices,
+        private DiscordRoleSync $discordRoles,
     ) {}
 
     /**
@@ -473,8 +475,16 @@ class AdminUserController extends Controller
             }
         }
 
+        $statusChanged = isset($validated['status']) && $validated['status'] !== $user->status;
+
         // Percentage columns are not fillable — forceFill is deliberate.
         $user->forceFill($validated)->save();
+
+        // Suspend / reactivate moves the Discord roles; a fee edit does not
+        // deserve a Discord round trip.
+        if ($statusChanged) {
+            $this->discordRoles->syncUser($user);
+        }
 
         return response()->json([
             'success' => true,

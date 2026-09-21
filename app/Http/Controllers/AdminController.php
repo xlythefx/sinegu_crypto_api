@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\BinanceAccount;
 use App\Models\UserCredential;
+use App\Services\Discord\DiscordRoleSync;
 use App\Services\Exchanges\ExchangeSchema;
 use App\Services\Pnl\TradingFee;
 use App\Services\UserStatsService;
@@ -20,7 +21,10 @@ use Illuminate\Support\Facades\DB;
  */
 class AdminController extends Controller
 {
-    public function __construct(private UserStatsService $stats) {}
+    public function __construct(
+        private UserStatsService $stats,
+        private DiscordRoleSync $discordRoles,
+    ) {}
 
     /**
      * GET /api/admin/master-stats
@@ -535,6 +539,10 @@ class AdminController extends Controller
         }
 
         $user->forceFill(['status' => $status])->save();
+
+        // Approval is what earns the Discord "Member" role; best-effort, after
+        // the row is saved, so a Discord outage can never fail an approval.
+        $this->discordRoles->syncUser($user);
 
         return response()->json([
             'success' => true,
