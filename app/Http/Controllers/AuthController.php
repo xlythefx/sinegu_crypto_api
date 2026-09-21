@@ -27,6 +27,14 @@ class AuthController extends Controller
             // Deliberately NOT exists-validated: invalid referral codes are
             // silently ignored and registration proceeds (affiliate spec §2).
             'referral_code' => ['nullable', 'string', 'max:50'],
+            // The Terms checkbox. `accepted` means it must be present AND true
+            // — a missing field is a refusal, not a default yes. The version
+            // is the "Last updated" date the form showed, so the row records
+            // which text was agreed to, not merely that a box was ticked.
+            'terms' => ['accepted'],
+            'terms_version' => ['nullable', 'string', 'max:32'],
+        ], [
+            'terms.accepted' => 'You must accept the Terms and Conditions to create an account.',
         ]);
 
         $user = DB::transaction(function () use ($validated) {
@@ -36,6 +44,8 @@ class AuthController extends Controller
                 'password' => $validated['password'],
                 // Local dev: skip the email-verification flow for now.
                 'email_verified' => true,
+                'terms_accepted_at' => now(),
+                'terms_version' => $validated['terms_version'] ?? null,
                 // New sign-ups wait in the admin approval queue (accept → active,
                 // reject → suspended). Pending users can log in but are gated.
                 'status' => 'pending',

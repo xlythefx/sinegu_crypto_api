@@ -27,6 +27,8 @@ class UserCredential extends Authenticatable
         'status',
         'type',
         'email_verified',
+        'terms_accepted_at',
+        'terms_version',
         'user_profile',
         'user_banner',
         'is_sandbox',
