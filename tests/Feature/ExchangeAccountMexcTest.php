@@ -29,8 +29,63 @@ class ExchangeAccountMexcTest extends EngineTestCase
         // Connecting / disconnecting / refreshing pings the engine on 127.0.0.1:5010.
         Http::fake();
 
+        // MEXC ships staff-only (config/exchanges.php). These tests are about
+        // the MECHANICS of a MEXC account, so the gate is lifted here and
+        // asserted on its own below — otherwise every case would have to be an
+        // admin and the customer path would go untested.
+        config(['exchanges.staff_only' => []]);
+
         $this->uniId = $this->makeUser();
         Sanctum::actingAs(UserCredential::query()->find($this->uniId));
+    }
+
+    public function test_a_customer_cannot_connect_a_staff_only_venue(): void
+    {
+        config(['exchanges.staff_only' => ['mexc']]);
+
+        $this->postJson('/api/exchange/mexc', $this->payload())
+            ->assertStatus(403)
+            ->assertJsonPath('error_code', 'EXCHANGE_RESTRICTED');
+
+        $this->assertDatabaseCount('mexc_accounts', 0);
+    }
+
+    public function test_the_gate_is_per_venue_and_leaves_binance_alone(): void
+    {
+        config(['exchanges.staff_only' => ['mexc']]);
+
+        $this->postJson('/api/exchange/binance', $this->payload(['name' => 'Binance Main']))
+            ->assertStatus(201);
+    }
+
+    public function test_staff_may_connect_a_restricted_venue(): void
+    {
+        config(['exchanges.staff_only' => ['mexc']]);
+
+        // The admin portal's own roles — the gate reads EnsureAdmin::ROLES
+        // rather than spelling the list a second time.
+        foreach (['admin', 'master', 'developer'] as $role) {
+            $staff = $this->makeUser(['type' => $role]);
+            Sanctum::actingAs(UserCredential::query()->find($staff));
+
+            $this->postJson('/api/exchange/mexc', $this->payload(['name' => "MEXC {$role}"]))
+                ->assertStatus(201)
+                ->assertJsonPath('account.exchange', 'mexc');
+        }
+
+        $this->assertDatabaseCount('mexc_accounts', 3);
+    }
+
+    public function test_a_restricted_venue_can_still_be_renamed_and_disconnected(): void
+    {
+        // Connected while the venue was open; closing it must not trap the keys.
+        $this->postJson('/api/exchange/mexc', $this->payload())->assertStatus(201);
+        $id = (int) DB::table('mexc_accounts')->value('id');
+
+        config(['exchanges.staff_only' => ['mexc']]);
+
+        $this->putJson("/api/exchange/mexc/accounts/{$id}", ['name' => 'Renamed'])->assertOk();
+        $this->deleteJson("/api/exchange/mexc/accounts/{$id}")->assertOk();
     }
 
     private function payload(array $overrides = []): array

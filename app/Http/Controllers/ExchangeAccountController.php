@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Http\Middleware\EnsureAdmin;
 use App\Models\ExchangeAccount;
 use App\Services\Discord\DiscordRoleSync;
 use App\Services\EngineCache;
@@ -86,6 +87,14 @@ class ExchangeAccountController extends Controller
         $schema = ExchangeSchema::for($exchange);
         $label = $schema->brokerLabel;
         $table = $schema->accountsTable;
+
+        // A venue that works in the engine but is not yet offered to customers
+        // (config/exchanges.php). Connecting only: an account already on a
+        // restricted venue keeps trading and can still be renamed or
+        // disconnected — closing a venue must not trap someone's keys in it.
+        if ($restricted = $this->guardStaffOnlyExchange($exchange, $request->user(), $label)) {
+            return $restricted;
+        }
 
         // Only approved accounts may connect an exchange — the engine trades
         // every non-suspended account, so pending users must not slip a key in.
@@ -378,6 +387,36 @@ class ExchangeAccountController extends Controller
             'error_code' => 'EXCHANGE_NOT_SUPPORTED',
             'message' => ucfirst($exchange).' is coming soon.',
         ], 400);
+    }
+
+    /**
+     * Null when this user may CONNECT this venue; a 403 otherwise.
+     *
+     * The roles are EnsureAdmin's, not a second list — whoever may open the
+     * admin portal is who may connect a venue that is not on sale yet, and one
+     * list cannot drift from itself.
+     *
+     * The message says "not open yet" rather than "staff only": to a customer
+     * that is the true and complete answer, and it matches the "Coming soon"
+     * the connect wizard shows them for the same venue.
+     */
+    private function guardStaffOnlyExchange(string $exchange, $user, string $label): ?JsonResponse
+    {
+        $restricted = (array) config('exchanges.staff_only', []);
+
+        if (! in_array($exchange, $restricted, true)) {
+            return null;
+        }
+
+        if ($user && in_array($user->type, EnsureAdmin::ROLES, true)) {
+            return null;
+        }
+
+        return response()->json([
+            'success' => false,
+            'error_code' => 'EXCHANGE_RESTRICTED',
+            'message' => "{$label} is not open for connections yet. Connect Binance for now — we will announce {$label} when it opens.",
+        ], 403);
     }
 
     /**
