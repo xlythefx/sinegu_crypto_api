@@ -188,7 +188,7 @@ class PublicStatsController extends Controller
             $trades = $trades->concat(
                 DB::table($schema->pastPositions)
                     ->whereIn('api_key', $apiKeys)
-                    ->get(['realized_pnl', 'closed_at', 'symbol'])
+                    ->get(['realized_pnl', 'closed_at', 'symbol', 'increments_closed'])
             );
             $transactions = $transactions->concat(
                 DB::table($schema->transactions)
@@ -221,25 +221,30 @@ class PublicStatsController extends Controller
         // `services.track_record.timezone`. Timestamps are stored in UTC, so a
         // trade closed at 20:00 UTC belongs to the NEXT Manila day.
         //
-        // A "trade" is a ROW — one close order — not the increments it took
-        // off. Between 2026-09-17 and 2026-09-20 this summed `increments_closed`
-        // instead, so a 2-increment stack closed in one order published as
-        // "2 trades closed"; the owner counts a close as one trade, and that
-        // is what the reference bot's recap (one row, one trade) prints. The
-        // column stays: the close message still says `Increments Closed (n/cap)`.
+        // A "trade" is an entry-sized INCREMENT, not a row (settled 2026-09-23,
+        // after three days the other way). A row is one close ORDER, and
+        // Binance merges a stacked position into one: two entries announced as
+        // `Increment (1/3)` and `(2/3)` come back as a single row carrying
+        // `increments_closed = 2`, which the recap then reported as "1 trade"
+        // while the channel had announced two. The owner counts what was
+        // opened, so the count follows `Increments Closed (n/cap)` on the close
+        // message. NULL = not recorded (history, poller rows) and counts as one;
+        // it is never backfilled from `position_amt`, because the divisor was
+        // that account's scaled entry size at close time and is not recoverable.
         $timezone = $this->timezone();
         $pnlByDay = [];
         $tradesByDay = [];
         $pnlBySymbol = [];     // [day][symbol] => realized P&L
-        $tradesBySymbol = [];  // [day][symbol] => close orders
+        $tradesBySymbol = [];  // [day][symbol] => closed increments
         foreach ($trades as $trade) {
             $day = $this->localDay($trade->closed_at, $timezone);
             $symbol = (string) $trade->symbol;
             $pnl = (float) $trade->realized_pnl;
+            $increments = max(1, (int) $trade->increments_closed);
             $pnlByDay[$day] = ($pnlByDay[$day] ?? 0) + $pnl;
-            $tradesByDay[$day] = ($tradesByDay[$day] ?? 0) + 1;
+            $tradesByDay[$day] = ($tradesByDay[$day] ?? 0) + $increments;
             $pnlBySymbol[$day][$symbol] = ($pnlBySymbol[$day][$symbol] ?? 0) + $pnl;
-            $tradesBySymbol[$day][$symbol] = ($tradesBySymbol[$day][$symbol] ?? 0) + 1;
+            $tradesBySymbol[$day][$symbol] = ($tradesBySymbol[$day][$symbol] ?? 0) + $increments;
         }
 
         $flowByDay = [];
