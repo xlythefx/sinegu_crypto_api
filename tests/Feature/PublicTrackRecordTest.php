@@ -52,6 +52,29 @@ class PublicTrackRecordTest extends EngineTestCase
             'entry_price' => 100000,
             'exit_price' => 101000,
             'realized_pnl' => $pnl,
+            // Fee KNOWN and already taken out, so the capital walk has nothing
+            // to correct and every expectation below is the plain arithmetic.
+            // `makeGrossTrade` is the opposite case.
+            'exchange_fee' => 0.0,
+            'side' => 'BUY',
+            'closed_at' => $closedAt,
+        ]);
+    }
+
+    /** A pre-cutoff row: P&L stored GROSS, `exchange_fee` NULL. */
+    private function makeGrossTrade(
+        string $uniId, string $closedAt, float $pnl, float $quantity, float $exitPrice,
+    ): void {
+        DB::table('binance_pastpositions')->insert([
+            'uni_id' => $uniId,
+            'api_key' => self::KEY,
+            'symbol' => 'BTCUSDT',
+            'position_side' => 'LONG',
+            'position_amt' => $quantity,
+            'entry_price' => $exitPrice,
+            'exit_price' => $exitPrice,
+            'realized_pnl' => $pnl,
+            'exchange_fee' => null,
             'side' => 'BUY',
             'closed_at' => $closedAt,
         ]);
@@ -209,6 +232,41 @@ class PublicTrackRecordTest extends EngineTestCase
                 ['symbol' => 'BTCUSDT', 'pct' => 1.0, 'trades' => 1]],
             $body['series'][0]['assets'],
         );
+    }
+
+    /**
+     * A gross row's commission never came out of `realized_pnl` (the 09-11
+     * decision), but the exchange did take it — so the CAPITAL the next day is
+     * measured against must still pay it. Without this the walk compounds
+     * money the account never had: on the live master it stood 1,103 above the
+     * balance Binance reported, which made every published daily ~9% too small
+     * and impossible to reconcile with the close the channel had announced.
+     */
+    public function test_a_gross_rows_commission_still_leaves_the_capital(): void
+    {
+        $uniId = $this->makeMaster(['initial_deposit' => 1000]);
+        // 1 unit at 100,000 = 100,000 notional -> 100.00 round trip at 0.05%/side.
+        $this->makeGrossTrade($uniId, '2026-01-02 10:00:00', 100, 1.0, 100000);
+        $this->makeGrossTrade($uniId, '2026-01-03 10:00:00', 100, 1.0, 100000);
+
+        $series = $this->getJson('/api/public/track-record')->assertOk()->json('series');
+
+        $this->assertEquals(10.0, $series[0]['pct']);          // 100 on 1000
+        // Day two's capital is 1000 + 100 - 100 of fee, not 1100.
+        $this->assertEquals(10.0, $series[1]['pct']);
+    }
+
+    /** A row whose fee is known and stored is already net — never charged twice. */
+    public function test_a_net_rows_fee_is_not_taken_off_the_capital_again(): void
+    {
+        $uniId = $this->makeMaster(['initial_deposit' => 1000]);
+        $this->makeTrade($uniId, '2026-01-02 10:00:00', 100);   // exchange_fee = 0.0
+        $this->makeTrade($uniId, '2026-01-03 10:00:00', 110);
+
+        $series = $this->getJson('/api/public/track-record')->assertOk()->json('series');
+
+        $this->assertEquals(10.0, $series[0]['pct']);
+        $this->assertEquals(10.0, $series[1]['pct']);           // 110 on 1100
     }
 
     public function test_a_mid_history_deposit_does_not_rewrite_earlier_days(): void

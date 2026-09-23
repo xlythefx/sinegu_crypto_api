@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\UserCredential;
 use App\Services\Exchanges\ExchangeSchema;
+use App\Services\Pnl\TradingFee;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -185,11 +186,16 @@ class PublicStatsController extends Controller
             $contributing[] = $name;
             $apiKeys = $accounts->pluck('api_key')->all();
             $openingCapital += (float) $accounts->sum(fn ($a) => (float) $a->initial_deposit);
-            $trades = $trades->concat(
-                DB::table($schema->pastPositions)
-                    ->whereIn('api_key', $apiKeys)
-                    ->get(['realized_pnl', 'closed_at', 'symbol', 'increments_closed'])
-            );
+            $rows = DB::table($schema->pastPositions)
+                ->whereIn('api_key', $apiKeys)
+                ->get([
+                    'realized_pnl', 'closed_at', 'symbol', 'increments_closed',
+                    // For the capital walk's fee correction below — the venue
+                    // decides the taker rate, so each row carries its own.
+                    'exchange_fee', 'exit_price', 'position_amt',
+                ]);
+            $rows->each(fn ($row) => $row->exchange = $name);
+            $trades = $trades->concat($rows);
             $transactions = $transactions->concat(
                 DB::table($schema->transactions)
                     ->whereIn('api_key', $apiKeys)
@@ -236,6 +242,7 @@ class PublicStatsController extends Controller
         $tradesByDay = [];
         $pnlBySymbol = [];     // [day][symbol] => realized P&L
         $tradesBySymbol = [];  // [day][symbol] => closed increments
+        $unchargedFeeByDay = [];  // [day] => commission the walk must still pay
         foreach ($trades as $trade) {
             $day = $this->localDay($trade->closed_at, $timezone);
             $symbol = (string) $trade->symbol;
@@ -245,6 +252,25 @@ class PublicStatsController extends Controller
             $tradesByDay[$day] = ($tradesByDay[$day] ?? 0) + $increments;
             $pnlBySymbol[$day][$symbol] = ($pnlBySymbol[$day][$symbol] ?? 0) + $pnl;
             $tradesBySymbol[$day][$symbol] = ($tradesBySymbol[$day][$symbol] ?? 0) + $increments;
+
+            // A GROSS row (`exchange_fee IS NULL`) had its commission taken by
+            // the exchange but never taken out of `realized_pnl` — deliberately,
+            // since the 09-11 decision froze pre-cutoff figures. The DENOMINATOR
+            // below must not inherit that fiction: left uncorrected the walk
+            // compounds money the account never had, and on the live master it
+            // had drifted 1,103 above the real balance (13,559 walked against
+            // 12,456 reported) — making every published daily ~9% too small and
+            // unable to reconcile with the close the channel announced.
+            // Estimated exactly as TradingFee::estimate does, at the row's own
+            // venue rate. It never touches `realized_pnl`, only the capital.
+            if ($trade->exchange_fee === null) {
+                $uncharged = TradingFee::estimate(
+                    (float) $trade->position_amt,
+                    $trade->exit_price === null ? null : (float) $trade->exit_price,
+                    (string) $trade->exchange,
+                );
+                $unchargedFeeByDay[$day] = ($unchargedFeeByDay[$day] ?? 0) + ($uncharged ?? 0.0);
+            }
         }
 
         $flowByDay = [];
@@ -317,7 +343,9 @@ class PublicStatsController extends Controller
                 ];
             }
 
-            $capital += $pnl ?? 0.0;
+            // Gross rows' commission comes off the CAPITAL even though it was
+            // left in their published P&L — see $unchargedFeeByDay above.
+            $capital += ($pnl ?? 0.0) - ($unchargedFeeByDay[$day] ?? 0.0);
         }
 
         if (! $series) {  // trades exist but no capital was ever recorded
