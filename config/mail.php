@@ -115,4 +115,29 @@ return [
         'name' => env('MAIL_FROM_NAME', env('APP_NAME', 'Laravel')),
     ],
 
+    /*
+    |--------------------------------------------------------------------------
+    | Pixel Alpha
+    |--------------------------------------------------------------------------
+    */
+
+    /*
+     * Where the "a new registration is waiting for approval" notice goes — the
+     * desk that works the approval queue, not a customer. It lives in .env
+     * because it is a PERSON's inbox: both repos are public on GitHub, and an
+     * address committed here is an address scraped here.
+     *
+     * Empty means nobody is told, and the notice is then SKIPPED (and logged)
+     * rather than thrown at the default sender — a notice mailed to the from:
+     * address just loops back into the support mailbox.
+     */
+    'admin_address' => env('MAIL_ADMIN_ADDRESS'),
+
+    /*
+     * The site an email links back into (the dashboard, the approval queue).
+     * Deliberately not APP_URL: that is the API's own base, and on WAMP it is
+     * http://localhost — a link a customer cannot open.
+     */
+    'site_url' => env('MAIL_SITE_URL', 'https://pixel-alpha.com'),
+
 ];

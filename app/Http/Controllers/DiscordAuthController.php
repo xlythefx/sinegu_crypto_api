@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\UserCredential;
 use App\Services\Discord\DiscordGateway;
 use App\Services\Discord\DiscordRoleSync;
+use App\Services\Notifications\AccountMail;
 use App\Services\ReferralService;
 use Illuminate\Database\QueryException;
 use Illuminate\Http\JsonResponse;
@@ -54,6 +55,7 @@ class DiscordAuthController extends Controller
         private DiscordGateway $discord,
         private DiscordRoleSync $roles,
         private ReferralService $referrals,
+        private AccountMail $mail,
     ) {}
 
     /**
@@ -284,6 +286,11 @@ class DiscordAuthController extends Controller
             // The unique index on discord_id (or email) won the race.
             return $this->discordTaken();
         }
+
+        // Same queue, same notice as register() — a Discord signup lands in the
+        // approval queue exactly like a password one, so the desk hears about
+        // both or it silently works only half the sign-ups.
+        $this->mail->registrationPending($user, AccountMail::VIA_DISCORD);
 
         return $this->loggedIn($user, $profile['access_token'], 'Account created', 201);
     }

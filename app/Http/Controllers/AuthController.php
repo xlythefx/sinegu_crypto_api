@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\UserCredential;
+use App\Services\Notifications\AccountMail;
 use App\Services\ReferralService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -11,8 +12,10 @@ use Illuminate\Support\Facades\Hash;
 
 class AuthController extends Controller
 {
-    public function __construct(private ReferralService $referrals)
-    {
+    public function __construct(
+        private ReferralService $referrals,
+        private AccountMail $mail,
+    ) {
     }
 
     /**
@@ -55,6 +58,11 @@ class AuthController extends Controller
 
             return $user;
         });
+
+        // The admin desk is the only thing standing between this row and a
+        // working account, so it is told immediately — after COMMIT, and
+        // best-effort: a mail failure must not undo a registration.
+        $this->mail->registrationPending($user, AccountMail::VIA_PASSWORD);
 
         $token = $user->createToken('spa')->plainTextToken;
 

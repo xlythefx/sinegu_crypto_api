@@ -6,6 +6,7 @@ use App\Models\BinanceAccount;
 use App\Models\UserCredential;
 use App\Services\Discord\DiscordRoleSync;
 use App\Services\Exchanges\ExchangeSchema;
+use App\Services\Notifications\AccountMail;
 use App\Services\Pnl\TradingFee;
 use App\Services\UserStatsService;
 use Illuminate\Database\QueryException;
@@ -24,6 +25,7 @@ class AdminController extends Controller
     public function __construct(
         private UserStatsService $stats,
         private DiscordRoleSync $discordRoles,
+        private AccountMail $mail,
     ) {}
 
     /**
@@ -543,6 +545,13 @@ class AdminController extends Controller
         // Approval is what earns the Discord "Member" role; best-effort, after
         // the row is saved, so a Discord outage can never fail an approval.
         $this->discordRoles->syncUser($user);
+
+        // Approval is also the only moment the user learns the wait is over —
+        // nothing in the app tells them, and they may not be looking at it.
+        // A rejection deliberately sends nothing.
+        if ($status === 'active') {
+            $this->mail->approved($user);
+        }
 
         return response()->json([
             'success' => true,
