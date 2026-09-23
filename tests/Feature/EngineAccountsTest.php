@@ -50,6 +50,28 @@ class EngineAccountsTest extends EngineTestCase
         $this->assertArrayHasKey('currency_type', $account);
     }
 
+    /**
+     * The engine needs to know WHOSE figures the public channel publishes: the
+     * track record is the master's alone, so a close percentage blended across
+     * every filled account could never reconcile with the daily recap built
+     * from it. The flag is the owner's role, never the account's name.
+     */
+    public function test_payload_marks_the_master_account(): void
+    {
+        $master = $this->makeUser(['type' => 'master']);
+        $trader = $this->makeUser();
+        $this->makeAccount($master, ['name' => 'not-called-master']);
+        $this->makeAccount($trader, ['name' => 'master']);
+
+        $accounts = $this->getJson('/api/engine/binance/accounts', $this->engineHeaders())
+            ->assertOk()
+            ->json('accounts');
+
+        $byUni = collect($accounts)->keyBy('uni_id');
+        $this->assertTrue($byUni[$master]['is_master']);
+        $this->assertFalse($byUni[$trader]['is_master']);
+    }
+
     /** Insert a DEPOSIT/WITHDRAWAL row against an account's api_key. */
     private function transaction(int $accountId, string $type, float $amount): void
     {

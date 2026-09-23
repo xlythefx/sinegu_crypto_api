@@ -63,6 +63,13 @@ class EngineController extends Controller
                 "{$t}.demo",
                 "{$t}.enabled",
                 "{$t}.key_status",
+                // Which row the PUBLIC channel speaks for. The published track
+                // record is the master's alone (PublicStatsController scopes to
+                // `type = 'master'`), so a close percentage blended across every
+                // filled account could never reconcile with the daily recap.
+                // Aliased: `type` would collide with nothing today, but the
+                // account tables are the ones that grow columns.
+                'user_credentials.type as owner_type',
             ]);
 
         $netFlow = $this->netTransferFlow($accounts->pluck('api_key')->all(), $schema->transactions);
@@ -93,6 +100,8 @@ class EngineController extends Controller
                     'enabled' => (bool) $a->enabled,
                     // Skip in the fan-out, keep polling — see the docblock.
                     'key_blocked' => $a->keyIsBlocked(),
+                    // The account the public channel reports on; see the select.
+                    'is_master' => $a->owner_type === 'master',
                 ];
             })->values(),
         ]);
