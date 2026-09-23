@@ -171,5 +171,34 @@ class AnalyticsPeriodReturnTest extends EngineTestCase
     public function test_no_trades_and_no_flows_is_an_empty_series(): void
     {
         $this->assertSame([], $this->analytics()['daily_capital']);
+        $this->assertSame([], $this->analytics()['daily_flows']);
+    }
+
+    /* ============ daily_flows — the capital chart's input ============ */
+
+    public function test_flows_are_signed_and_netted_per_day(): void
+    {
+        $this->flow('2026-08-01 09:00:00', 10000);
+        // Two transfers on one day net to one step on the chart.
+        $this->flow('2026-08-15 09:00:00', 2000, 'WITHDRAWAL');
+        $this->flow('2026-08-15 14:00:00', 500);
+
+        $flows = $this->analytics()['daily_flows'];
+
+        $this->assertEquals(10000, $flows['2026-08-01']);
+        $this->assertEquals(-1500, $flows['2026-08-15']);
+        // Only days that moved money appear — the chart steps, it does not
+        // draw a point per calendar day.
+        $this->assertSame(['2026-08-01', '2026-08-15'], array_keys($flows));
+    }
+
+    public function test_flows_ignore_the_date_and_chip_filters(): void
+    {
+        $this->seedAugust();
+
+        $this->assertEquals(
+            $this->analytics()['daily_flows'],
+            $this->analytics(['from' => '2026-09-01', 'to' => '2026-09-30'])['daily_flows'],
+        );
     }
 }

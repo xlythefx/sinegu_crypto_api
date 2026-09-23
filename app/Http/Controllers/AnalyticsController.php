@@ -138,10 +138,11 @@ class AnalyticsController extends Controller
         $dailyPnlNet = $byDay->map(fn ($rows) => round((float) $rows->sum('pnl_net'), 2));
 
         // Capital the account traded on, per day — the denominator of the
-        // card's period return. Built from EVERY trade and flow, never $past:
-        // the chips and the date range narrow what is MEASURED, not the money
-        // that was at work behind it.
-        $dailyCapital = $this->dailyCapital($everyTrade, $transactions, $accounts);
+        // card's period return — and the transfers that moved it. Both are
+        // built from EVERY trade and flow, never $past: the chips and the date
+        // range narrow what is MEASURED, not the money that was at work.
+        $flowByDay = $this->flowsByDay($transactions);
+        $dailyCapital = $this->dailyCapital($everyTrade, $flowByDay, $accounts);
 
         $tradingDays = $dailyPnl->count();
         $avgDailyPnl = $tradingDays > 0 ? round($totalRealized / $tradingDays, 2) : null;
@@ -371,6 +372,7 @@ class AnalyticsController extends Controller
                 'daily_pnl' => $dailyPnl,
                 'daily_pnl_net' => $dailyPnlNet,
                 'daily_capital' => $dailyCapital,
+                'daily_flows' => $flowByDay,
                 'day_of_week' => $dayOfWeek,
                 'monthly' => $monthly,
                 'by_symbol' => $bySymbol,
@@ -380,6 +382,30 @@ class AnalyticsController extends Controller
                 'risk' => $risk,
             ],
         ]);
+    }
+
+    /**
+     * Net transfer per day, signed — a deposit positive, a withdrawal
+     * negative, both netted when they land on the same day. Only days that
+     * actually moved money appear, ascending.
+     *
+     * It is the capital chart's whole input, and the flow half of the walk
+     * below. One map, because a day's transfers must mean the same thing to
+     * the chart a customer reads and to the denominator it is measured on.
+     *
+     * @return array<string, float>
+     */
+    private function flowsByDay(Collection $transactions): array
+    {
+        $flowByDay = [];
+        foreach ($transactions as $tx) {
+            $day = Carbon::parse($tx->created_at)->toDateString();
+            $delta = (float) $tx->amount * ($tx->type === 'WITHDRAWAL' ? -1 : 1);
+            $flowByDay[$day] = round(($flowByDay[$day] ?? 0.0) + $delta, 2);
+        }
+        ksort($flowByDay);
+
+        return $flowByDay;
     }
 
     /**
@@ -419,7 +445,7 @@ class AnalyticsController extends Controller
      */
     private function dailyCapital(
         Collection $trades,
-        Collection $transactions,
+        array $flowByDay,
         Collection $accounts,
     ): array {
         $pnlByDay = [];
@@ -439,13 +465,6 @@ class AnalyticsController extends Controller
                 );
                 $unchargedFeeByDay[$day] = ($unchargedFeeByDay[$day] ?? 0.0) + ($uncharged ?? 0.0);
             }
-        }
-
-        $flowByDay = [];
-        foreach ($transactions as $tx) {
-            $day = Carbon::parse($tx->created_at)->toDateString();
-            $delta = (float) $tx->amount * ($tx->type === 'WITHDRAWAL' ? -1 : 1);
-            $flowByDay[$day] = ($flowByDay[$day] ?? 0.0) + $delta;
         }
 
         $days = array_unique(array_merge(array_keys($pnlByDay), array_keys($flowByDay)));
