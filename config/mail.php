@@ -123,13 +123,16 @@ return [
 
     /*
      * Where the "a new registration is waiting for approval" notice goes — the
-     * desk that works the approval queue, not a customer. It lives in .env
-     * because it is a PERSON's inbox: both repos are public on GitHub, and an
-     * address committed here is an address scraped here.
+     * desk that works the approval queue. It is support@pixel-alpha.com, the
+     * same mailbox everything else is sent FROM (decided 2026-09-23): a contact
+     * must outlive whoever holds it, which is the same rule that keeps a
+     * personal Telegram off the contact page.
+     *
+     * Still read from .env rather than hardcoded, so moving the desk is one key
+     * and a sync — no code change, no deploy of the app itself.
      *
      * Empty means nobody is told, and the notice is then SKIPPED (and logged)
-     * rather than thrown at the default sender — a notice mailed to the from:
-     * address just loops back into the support mailbox.
+     * rather than thrown at whatever the default sender happens to be.
      */
     'admin_address' => env('MAIL_ADMIN_ADDRESS'),
 
