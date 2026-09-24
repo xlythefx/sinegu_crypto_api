@@ -341,6 +341,30 @@ class AnalyticsFiltersTest extends EngineTestCase
         $this->assertSame(['Binance', 'Bybit', 'MEXC'], array_column($all['by_exchange'], 'exchange'));
     }
 
+    /**
+     * Narrowing to a venue the user never connected is a legitimate page of
+     * zeros — indistinguishable from "this venue made nothing" unless the
+     * payload says how many accounts are in scope. Without it the filter reads
+     * as broken.
+     */
+    public function test_by_exchange_reports_how_many_accounts_are_in_scope(): void
+    {
+        $this->seedTrades();
+
+        $bybit = $this->analytics(['exchange' => 'bybit']);
+        $this->assertSame(['Bybit'], array_column($bybit['by_exchange'], 'exchange'));
+        $this->assertSame(0, $bybit['by_exchange'][0]['accounts']);
+        $this->assertEquals(0, $bybit['by_exchange'][0]['balance']);
+
+        $binance = $this->analytics(['exchange' => 'binance']);
+        $this->assertGreaterThan(0, $binance['by_exchange'][0]['accounts']);
+
+        $all = $this->analytics();
+        $counts = array_column($all['by_exchange'], 'accounts', 'exchange');
+        $this->assertGreaterThan(0, $counts['Binance']);
+        $this->assertSame(0, $counts['Bybit']);
+    }
+
     public function test_binance_exchange_matches_all(): void
     {
         $this->seedTrades();

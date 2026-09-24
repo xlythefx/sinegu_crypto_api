@@ -207,8 +207,13 @@ class AnalyticsController extends Controller
         $bySymbol = array_slice($bySymbol, 0, 12);
 
         // ---- Per-exchange: one entry per venue in scope ----------------
+        // `accounts` is what lets the page tell "this venue made nothing" from
+        // "you have no account on this venue". Without it both render as a
+        // wall of zeros, and narrowing to a venue you never connected reads as
+        // the filter being broken.
         $byExchange = array_map(fn (string $ex) => [
             'exchange' => ExchangeSchema::for($ex)->brokerLabel,
+            'accounts' => $accounts->where('exchange', $ex)->count(),
             'balance' => round((float) $accounts->where('exchange', $ex)->sum('balance'), 2),
             'unrealized' => round((float) $accounts->where('exchange', $ex)->sum('unrealized_pnl'), 2),
         ], UserStatsService::exchanges($exchange));
