@@ -103,6 +103,30 @@ return [
         'public_ip' => env('ENGINE_PUBLIC_IP', '2.24.139.176'),
     ],
 
+    // The landing page's quote strip (PublicMarketController). Binance's own
+    // public market data for the USDⓈ-M perpetuals the product trades — nothing
+    // of ours, so the percentages-only rule that governs the track record does
+    // not apply here.
+    //
+    // `symbols`         — what the strip shows and in what order. A config
+    //     change, not a frontend deploy. Each one costs weight 1 per cache
+    //     window; the no-symbol form of the same endpoint costs 40, so it is
+    //     never used.
+    // `funding_symbol`  — the ONE pair whose funding rate the strip prints.
+    //     Independent of the list: it is the traded pair, not a quote.
+    'market' => [
+        'symbols' => array_values(array_filter(array_map(
+            fn ($s) => strtoupper(trim($s)),
+            explode(',', (string) env('PUBLIC_MARKET_SYMBOLS', 'BTCUSDT,ETHUSDT,LTCUSDT')),
+        ))),
+        'funding_symbol' => strtoupper(trim((string) env('PUBLIC_MARKET_FUNDING_SYMBOL', 'LTCUSDT'))),
+        'base_url' => env('PUBLIC_MARKET_BASE_URL', 'https://fapi.binance.com'),
+        'timeout' => (int) env('PUBLIC_MARKET_TIMEOUT', 4),
+        'connect_timeout' => (int) env('PUBLIC_MARKET_CONNECT_TIMEOUT', 3),
+        // WAMP ships no CA bundle; the TRON one is the same file.
+        'ca_bundle' => env('PUBLIC_MARKET_CACERT', env('TRON_CACERT')),
+    ],
+
     'track_record' => [
         // The calendar the PUBLISHED track record buckets its days in. Rows are
         // stored in UTC; this decides where "a day" starts and ends for the

@@ -26,6 +26,7 @@ use App\Http\Controllers\PaymentController;
 use App\Http\Controllers\PasswordResetController;
 use App\Http\Controllers\PayoutMethodController;
 use App\Http\Controllers\ProfileController;
+use App\Http\Controllers\PublicMarketController;
 use App\Http\Controllers\PublicStatsController;
 use App\Http\Controllers\ReferralController;
 use App\Http\Controllers\SandboxController;
@@ -47,6 +48,11 @@ Route::prefix('public')->middleware('throttle:60,1')->group(function () {
     // one message per exchange. Unknown names 404 (no query, nothing to leak).
     Route::get('/track-record/{exchange}', [PublicStatsController::class, 'trackRecordForExchange'])
         ->whereIn('exchange', \App\Services\Exchanges\ExchangeSchema::supported());
+    // The landing page's quote strip. Binance's own prices, proxied and cached
+    // 30s — nothing of ours, so the privacy rule above has nothing to bite on.
+    // Takes no input at all: the symbols are config, so the cache is one key
+    // and a visitor cannot make us fetch anything we did not choose to fetch.
+    Route::get('/market-ticker', [PublicMarketController::class, 'ticker']);
 });
 
 // Per-IP limits on the four unauthenticated writes. An account here holds
