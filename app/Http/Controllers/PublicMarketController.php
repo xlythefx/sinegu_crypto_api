@@ -30,9 +30,10 @@ use Illuminate\Support\Facades\Log;
  *   `updated_at` is how the client can tell how old it is.
  *
  * Weight: one `ticker/24hr` per symbol plus one `premiumIndex`, all weight 1,
- * roughly 8/min at a 30s cache against the 2400/min per-IP ceiling this box
- * shares with the engine's pollers — where past-positions alone is ~95%. The
- * no-symbol forms of the same two endpoints cost 40 and 10, and are never used.
+ * so ~22/min for ten symbols at a 30s cache — against the 2400/min per-IP
+ * ceiling this box shares with the engine's pollers, where past-positions alone
+ * is ~95%. The no-symbol form of `ticker/24hr` costs 40 whatever the strip
+ * carries, so per-symbol stays the cheaper read well past {@see MAX_SYMBOLS}.
  */
 class PublicMarketController extends Controller
 {
@@ -47,7 +48,7 @@ class PublicMarketController extends Controller
     private const LAST_GOOD_KEY = 'public.market-ticker.last-good';
 
     /** Most symbols one strip may carry — the config is ours, but so is the weight. */
-    private const MAX_SYMBOLS = 8;
+    private const MAX_SYMBOLS = 16;
 
     /**
      * Always 200. `available: false` with an empty `quotes` list means every

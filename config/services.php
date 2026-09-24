@@ -117,7 +117,12 @@ return [
     'market' => [
         'symbols' => array_values(array_filter(array_map(
             fn ($s) => strtoupper(trim($s)),
-            explode(',', (string) env('PUBLIC_MARKET_SYMBOLS', 'BTCUSDT,ETHUSDT,LTCUSDT')),
+            explode(',', (string) env(
+                'PUBLIC_MARKET_SYMBOLS',
+                // The ten most-traded USDⓈ-M perps, LTC last so the funding
+                // item lands beside its own quote.
+                'BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,BNBUSDT,DOGEUSDT,ADAUSDT,AVAXUSDT,LINKUSDT,LTCUSDT',
+            )),
         ))),
         'funding_symbol' => strtoupper(trim((string) env('PUBLIC_MARKET_FUNDING_SYMBOL', 'LTCUSDT'))),
         'base_url' => env('PUBLIC_MARKET_BASE_URL', 'https://fapi.binance.com'),
