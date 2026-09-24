@@ -34,14 +34,18 @@ class ExchangeAccountController extends Controller
     private const BALANCE_REFRESH_COOLDOWN = 60;
 
     /**
-     * Exchanges with a futures TESTNET the engine can route a demo account to.
-     * Binance: testnet.binancefuture.com (separate keys). MEXC:
+     * Exchanges with a non-live futures environment the engine can route a demo
+     * account to. Binance: testnet.binancefuture.com (separate keys). MEXC:
      * futures.testnet.mexc.com — same login and same API keys as live, but the
      * key must carry NO IP binding (the testnet sits behind a CDN and refuses
-     * IP-bound keys). A venue without one would refuse `demo` here, because a
-     * demo row on it could only be a live account wearing the wrong badge.
+     * IP-bound keys). Bybit: Demo Trading at api-demo.bybit.com — the ordinary
+     * bybit.com login, but keys minted in the Demo Trading UI, which are NOT
+     * interchangeable with live keys in either direction. (Deliberately NOT
+     * testnet.bybit.com, which is a separate site with its own registration.)
+     * A venue without one would refuse `demo` here, because a demo row on it
+     * could only be a live account wearing the wrong badge.
      */
-    private const HAS_TESTNET = ['binance' => true, 'mexc' => true];
+    private const HAS_TESTNET = ['binance' => true, 'bybit' => true, 'mexc' => true];
 
     public function __construct(
         private EngineCache $engineCache,

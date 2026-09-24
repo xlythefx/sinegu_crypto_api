@@ -392,8 +392,10 @@ class BlockedApiKeyTest extends PaymentTestCase
         $this->assertSame('ok', \App\Models\MexcAccount::find($mexcId)->key_status);
         $this->assertSame('ok', BinanceAccount::find($binanceId)->key_status);
 
+        // The address is (exchange, id): the same id on a venue that has no
+        // such row is a 404, not somebody else's account rechecked by mistake.
         $this->withHeaders($admin)
             ->postJson("/api/admin/engine/key-issues/bybit/{$mexcId}/recheck")
-            ->assertStatus(400);
+            ->assertStatus(404);
     }
 }

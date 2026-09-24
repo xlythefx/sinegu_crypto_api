@@ -98,13 +98,13 @@ class DashboardExchangeFilterTest extends EngineTestCase
         $s = $this->summary();
 
         $this->assertSame('all', $s['exchange']);
-        $this->assertSame(['binance', 'mexc'], $s['exchanges']);
+        $this->assertSame(['binance', 'bybit', 'mexc'], $s['exchanges']);
         $this->assertSame(2, $s['accounts']);
         $this->assertEquals(1515, $s['equity']);            // 1000+10 + 500+5
         $this->assertEquals(47, $s['realized_pnl']);         // 40 + 7
         $this->assertEquals(150, $s['net_deposits']);        // 100 + 50
         $this->assertEquals(1650, $s['pct_base']);           // 1500 initial + 150
-        $this->assertSame(['Binance', 'MEXC'], array_column($s['commissions']['rows'], 'exchange'));
+        $this->assertSame(['Binance', 'Bybit', 'MEXC'], array_column($s['commissions']['rows'], 'exchange'));
         $this->assertSame(['BTCUSDT', 'ETHUSDT'], collect($s['by_asset'])->pluck('id')->sort()->values()->all());
     }
 
@@ -141,14 +141,16 @@ class DashboardExchangeFilterTest extends EngineTestCase
         $this->assertSame([], $s['by_asset']);
     }
 
-    public function test_the_filter_is_case_insensitive_and_bybit_is_refused(): void
+    public function test_the_filter_is_case_insensitive_and_an_unwired_venue_is_refused(): void
     {
         $this->assertSame('mexc', $this->summary('?exchange=MEXC')['exchange']);
-        $this->getJson('/api/dashboard/summary?exchange=bybit')
+        // Bybit has tables as of 2026-09-24 — it filters like any other venue.
+        $this->assertSame('bybit', $this->summary('?exchange=bybit')['exchange']);
+        $this->getJson('/api/dashboard/summary?exchange=kraken')
             ->assertStatus(400)
             ->assertJsonPath('error', 'EXCHANGE_NOT_SUPPORTED');
         $this->getJson('/api/dashboard/daily-pnl?exchange=kraken')->assertStatus(400);
-        $this->getJson('/api/binance/positions?exchange=bybit')->assertStatus(400);
+        $this->getJson('/api/binance/positions?exchange=kraken')->assertStatus(400);
     }
 
     /* ============ the other dashboard reads ============ */

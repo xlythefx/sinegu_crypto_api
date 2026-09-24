@@ -106,17 +106,61 @@ class EngineFeesTest extends EngineTestCase
         $this->assertSame(0, DB::table('exchange_fee_receipts')->count());
     }
 
-    public function test_exchange_comes_from_the_route_never_the_payload(): void
+    /**
+     * Bybit identifies a fill by `execId`, a UUID — the reason `ref` is a
+     * string column. A numeric ref from Binance must still work unchanged, and
+     * the two must not collide with each other.
+     */
+    public function test_a_uuid_ref_is_stored_verbatim_beside_numeric_ones(): void
+    {
+        $uuid = '8c48b6ba-a6a5-5ba9-a3f3-0f9e4f0e8f1a';
+
+        $this->postJson('/api/engine/bybit/fees', ['rows' => [
+            $this->fillRow(1, 100, 'BUY', 10, 0.25, 1000, 0.0, ['ref' => $uuid]),
+        ]], $this->engineHeaders())->assertOk();
+
+        $this->postJson('/api/engine/binance/fees', ['rows' => [
+            $this->fillRow(1, 100, 'BUY', 10, 0.25, 1000),
+        ]], $this->engineHeaders())->assertOk();
+
+        $this->assertSame($uuid, DB::table('exchange_fee_receipts')->where('exchange', 'bybit')->value('ref'));
+        $this->assertSame('1', (string) DB::table('exchange_fee_receipts')->where('exchange', 'binance')->value('ref'));
+
+        // Re-sending the same UUID is a no-op — the unique key still holds.
+        $this->postJson('/api/engine/bybit/fees', ['rows' => [
+            $this->fillRow(1, 100, 'BUY', 10, 0.25, 1000, 0.0, ['ref' => $uuid]),
+        ]], $this->engineHeaders())->assertOk();
+
+        $this->assertSame(2, DB::table('exchange_fee_receipts')->count());
+    }
+
+    /** A ref longer than the column is refused, not silently truncated. */
+    public function test_an_overlong_ref_is_refused(): void
     {
         $this->postJson('/api/engine/bybit/fees', ['rows' => [
-            $this->fillRow(1, 100, 'BUY', 10, 0.25, 1000),
-        ]], $this->engineHeaders())->assertStatus(400)->assertJson(['error_code' => 'EXCHANGE_NOT_SUPPORTED']);
+            $this->fillRow(1, 100, 'BUY', 10, 0.25, 1000, 0.0, ['ref' => str_repeat('a', 65)]),
+        ]], $this->engineHeaders())->assertStatus(422);
 
+        $this->assertSame(0, DB::table('exchange_fee_receipts')->count());
+    }
+
+    public function test_exchange_comes_from_the_route_never_the_payload(): void
+    {
+        // A payload that names a DIFFERENT venue than the route is ignored —
+        // the route wins. Asserted in both directions now that bybit is wired,
+        // which is stronger than the old "bybit is unsupported" half.
         $this->postJson('/api/engine/binance/fees', ['rows' => [
             $this->fillRow(1, 100, 'BUY', 10, 0.25, 1000, 0.0, ['exchange' => 'bybit']),
         ]], $this->engineHeaders())->assertOk();
 
-        $this->assertSame('binance', DB::table('exchange_fee_receipts')->value('exchange'));
+        $this->postJson('/api/engine/bybit/fees', ['rows' => [
+            $this->fillRow(2, 100, 'BUY', 10, 0.25, 1000, 0.0, ['exchange' => 'binance']),
+        ]], $this->engineHeaders())->assertOk();
+
+        $this->assertSame(
+            ['binance', 'bybit'],
+            DB::table('exchange_fee_receipts')->orderBy('ref')->pluck('exchange')->all()
+        );
     }
 
     public function test_it_requires_the_engine_secret(): void

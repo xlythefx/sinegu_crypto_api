@@ -48,6 +48,17 @@ return [
         'taker_fee_rate' => (float) env('BINANCE_TAKER_FEE_RATE', 0.0005),
     ],
 
+    // Same figure for Bybit USDT perpetuals (category=linear): standard TAKER
+    // commission 0.055% per side at VIP 0 — the highest of the three, so a
+    // Bybit estimate that silently fell back to Binance's 0.05% would understate
+    // every fee. Like the others this is only the estimate; the receipts ledger
+    // replaces it with the actual charge (FeeRebase) once the close's
+    // executions are attributed. Must stay equal to the engine's
+    // hooks.TAKER_FEE_RATES['bybit'], which the Telegram exit percentage uses.
+    'bybit' => [
+        'taker_fee_rate' => (float) env('BYBIT_TAKER_FEE_RATE', 0.00055),
+    ],
+
     // Same figure for MEXC USDT-M futures: standard TAKER commission 0.02% per
     // side. Many MEXC pairs run 0-fee promotions, so this estimate can overstate
     // the fee on those — the receipts ledger replaces it with the actual charge
@@ -78,7 +89,8 @@ return [
             // .env files keep working until they're renamed.
             'binance' => env('BINANCE_ENGINE_WEBHOOK_SECRET', env('ENGINE_WEBHOOK_SECRET')),
             // Same engine process serves every venue's webhook path, so the
-            // token is the same unless MEXC is ever split into its own engine.
+            // token is the same unless a venue is ever split into its own engine.
+            'bybit' => env('BYBIT_ENGINE_WEBHOOK_SECRET', env('BINANCE_ENGINE_WEBHOOK_SECRET', env('ENGINE_WEBHOOK_SECRET'))),
             'mexc' => env('MEXC_ENGINE_WEBHOOK_SECRET', env('BINANCE_ENGINE_WEBHOOK_SECRET', env('ENGINE_WEBHOOK_SECRET'))),
         ],
         'targets' => [

@@ -272,7 +272,7 @@ class AdminApiKeyTest extends EngineTestCase
         $this->assertSame('MEXCKE…ABCD', $keys["mexc:{$mexc}"]['api_key_hint']);
         $this->assertSame('binance', $keys["binance:{$binance}"]['exchange']);
         $this->assertSame(2, $response->json('counts.connected'));
-        $this->assertSame(['binance', 'mexc'], $response->json('exchanges'));
+        $this->assertSame(['binance', 'bybit', 'mexc'], $response->json('exchanges'));
 
         $body = $response->getContent();
         $this->assertStringNotContainsString('MEXCKEY0123456789ABCD', $body);
@@ -399,13 +399,15 @@ class AdminApiKeyTest extends EngineTestCase
             ->assertStatus(422);
     }
 
-    public function test_an_unwired_exchange_answers_400_and_an_unknown_one_404(): void
+    public function test_a_wired_exchange_is_addressable_and_an_unknown_one_404s(): void
     {
         $admin = $this->admin();
 
+        // Bybit is wired now, so its route reaches the controller: id 1 does not
+        // exist, which is a 404 FROM THE LOOKUP, not from the route.
         $this->putJson('/api/admin/api-keys/bybit/1', ['name' => 'x'], $this->headersFor($admin))
-            ->assertStatus(400)
-            ->assertJsonPath('error_code', 'EXCHANGE_NOT_SUPPORTED');
+            ->assertStatus(404);
+        // A name with no tables behind it never reaches a controller at all.
         $this->deleteJson('/api/admin/api-keys/kraken/1', [], $this->headersFor($admin))
             ->assertStatus(404);
     }

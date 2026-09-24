@@ -509,13 +509,27 @@ class EngineSyncController extends Controller
             return $guard;
         }
 
+        // `ref` is the exchange's own id for the charge, and its TYPE differs by
+        // venue: Binance's fill id and MEXC's deal id arrive as JSON numbers,
+        // Bybit's execId as a UUID string. Normalise to a string before
+        // validating so one rule covers all three and the column (widened to
+        // VARCHAR on 2026-09-24) always receives the same shape.
+        $request->merge([
+            'rows' => array_map(
+                fn ($row) => is_array($row) && isset($row['ref']) && is_scalar($row['ref'])
+                    ? ['ref' => (string) $row['ref']] + $row
+                    : $row,
+                (array) $request->input('rows', [])
+            ),
+        ]);
+
         $data = $request->validate([
             'rows' => ['required', 'array', 'max:2000'],
             'rows.*.api_key' => ['required', 'string', 'max:128'],
             'rows.*.uni_id' => ['required', 'string', 'max:36'],
             'rows.*.symbol' => ['required', 'string', 'max:32'],
             'rows.*.kind' => ['required', 'in:fill,funding'],
-            'rows.*.ref' => ['required', 'integer'],
+            'rows.*.ref' => ['required', 'string', 'max:64'],
             'rows.*.order_id' => ['nullable', 'integer'],
             'rows.*.side' => ['nullable', 'string', 'max:8'],
             'rows.*.position_side' => ['nullable', 'string', 'max:16'],

@@ -67,7 +67,9 @@ class AdminManualTradeTest extends EngineTestCase
 
     public function test_unsupported_exchange_is_rejected(): void
     {
-        $this->getJson('/api/admin/manual-trade/targets?exchange=bybit', $this->admin())
+        // All three venues have a webhook path as of 2026-09-24, so only a name
+        // the engine has never heard of is refused here.
+        $this->getJson('/api/admin/manual-trade/targets?exchange=kraken', $this->admin())
             ->assertStatus(400)
             ->assertJson(['error_code' => 'EXCHANGE_NOT_SUPPORTED']);
     }

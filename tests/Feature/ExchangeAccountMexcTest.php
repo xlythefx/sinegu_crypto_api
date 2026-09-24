@@ -220,13 +220,47 @@ class ExchangeAccountMexcTest extends EngineTestCase
         $this->assertSame(300.0, (float) $row->initial_deposit);
     }
 
-    public function test_bybit_is_still_coming_soon_and_unknown_exchanges_are_404(): void
+    public function test_bybit_is_wired_but_staff_only_and_unknown_exchanges_are_404(): void
     {
-        $this->postJson('/api/exchange/bybit', $this->payload())
-            ->assertStatus(400)
-            ->assertJsonPath('error_code', 'EXCHANGE_NOT_SUPPORTED');
+        // Bybit landed with its tables on 2026-09-24, so it is no longer
+        // EXCHANGE_NOT_SUPPORTED — it is EXCHANGE_RESTRICTED, which is a
+        // different refusal: the venue works, this user may not open one.
+        config(['exchanges.staff_only' => ['mexc', 'bybit']]);
+
+        $this->postJson('/api/exchange/bybit', $this->payload(['name' => 'Bybit Main']))
+            ->assertStatus(403)
+            ->assertJsonPath('error_code', 'EXCHANGE_RESTRICTED');
+        $this->assertDatabaseCount('bybit_accounts', 0);
+
+        // A name with no tables behind it is still a 404 from the route itself,
+        // never a query — that is the rule this case has always guarded.
         $this->postJson('/api/exchange/kraken', $this->payload())->assertStatus(404);
-        $this->putJson('/api/exchange/bybit/accounts/1', ['name' => 'x'])->assertStatus(400);
+    }
+
+    public function test_staff_may_connect_bybit_while_it_is_restricted(): void
+    {
+        config(['exchanges.staff_only' => ['mexc', 'bybit']]);
+
+        $staff = $this->makeUser(['type' => 'admin']);
+        Sanctum::actingAs(UserCredential::query()->find($staff));
+
+        $this->postJson('/api/exchange/bybit', $this->payload(['name' => 'Bybit Staff']))
+            ->assertStatus(201)
+            ->assertJsonPath('account.exchange', 'bybit');
+
+        $this->assertDatabaseCount('bybit_accounts', 1);
+    }
+
+    public function test_bybit_accepts_a_demo_account_because_it_has_demo_trading(): void
+    {
+        // Bybit Demo Trading (api-demo.bybit.com) is a real non-live venue, so
+        // `demo` must NOT be refused with DEMO_NOT_AVAILABLE.
+        config(['exchanges.staff_only' => []]);
+
+        $this->postJson('/api/exchange/bybit', $this->payload(['name' => 'Bybit Demo', 'demo' => true]))
+            ->assertStatus(201);
+
+        $this->assertSame(1, (int) DB::table('bybit_accounts')->value('demo'));
     }
 
     public function test_has_exchange_account_counts_any_venue(): void

@@ -581,7 +581,19 @@ class PublicTrackRecordTest extends EngineTestCase
 
     public function test_unknown_exchange_is_a_404_not_a_query(): void
     {
-        $this->getJson('/api/public/track-record/bybit')->assertNotFound();
+        // Bybit became a real slice on 2026-09-24, so the name that proves the
+        // rule has to be one with no tables behind it.
+        $this->getJson('/api/public/track-record/kraken')->assertNotFound();
+    }
+
+    /**
+     * A wired venue the master has no account on is `available: false` — an
+     * ANSWER, not a 404, and never invented numbers. Same state MEXC is in.
+     */
+    public function test_a_wired_venue_with_no_master_account_is_unavailable(): void
+    {
+        $this->getJson('/api/public/track-record/bybit')->assertOk()
+            ->assertJson(['available' => false]);
     }
 
     public function test_other_users_trades_are_not_counted(): void

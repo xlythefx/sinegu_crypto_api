@@ -6,6 +6,7 @@ use App\Services\Exchanges\ExchangeSchema;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Validation\Rule;
 
 /**
  * Admin manual-trade console — the browser-side replacement for the engine's
@@ -22,10 +23,12 @@ class AdminManualTradeController extends Controller
     /**
      * One engine, one webhook path PER VENUE — the path decides which
      * exchange's accounts the signal trades (trading-flask hooks.WEBHOOK_PATHS).
-     * Bybit lands here with its tables.
+     * Must stay in step with that dict AND with the deploy script's
+     * ENGINE_WEBHOOK_PATHS, which is what nginx actually proxies.
      */
     private const WEBHOOK_PATHS = [
         'binance' => '/binance_abcd_webhook',
+        'bybit' => '/bybit_abcd_webhook',
         'mexc' => '/mexc_abcd_webhook',
     ];
 
@@ -175,7 +178,10 @@ class AdminManualTradeController extends Controller
     public function send(Request $request): JsonResponse
     {
         $data = $request->validate([
-            'exchange' => ['required', 'string', 'in:binance'],
+            // Every venue this engine has a webhook path for — NOT a second
+            // hardcoded list. Until 2026-09-24 this said `in:binance`, so
+            // targets()/engineStatus() offered MEXC while send() refused it.
+            'exchange' => ['required', 'string', Rule::in(array_keys(self::WEBHOOK_PATHS))],
             'target' => ['required', 'string', 'in:local,prod'],
             'action' => ['required', 'string', 'in:BUY,SELL,EXIT_LONG,EXIT_SHORT'],
             'symbol' => ['required', 'string', 'max:20'],

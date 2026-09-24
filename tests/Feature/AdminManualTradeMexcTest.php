@@ -49,7 +49,13 @@ class AdminManualTradeMexcTest extends EngineTestCase
         $binance = $this->getJson('/api/admin/manual-trade/targets?exchange=binance', $headers)->assertOk()->json('targets');
         $this->assertSame(['Alice'], array_column($binance, 'display_name'));
 
+        // Bybit has a webhook path of its own as of 2026-09-24, so it answers
+        // with its (currently empty) target list rather than refusing.
         $this->getJson('/api/admin/manual-trade/targets?exchange=bybit', $headers)
+            ->assertOk()
+            ->assertJsonPath('targets', []);
+
+        $this->getJson('/api/admin/manual-trade/targets?exchange=kraken', $headers)
             ->assertStatus(400)
             ->assertJson(['error_code' => 'EXCHANGE_NOT_SUPPORTED']);
     }

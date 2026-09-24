@@ -302,9 +302,13 @@ class AnalyticsFiltersTest extends EngineTestCase
 
     public function test_a_venue_without_tables_is_refused(): void
     {
-        $this->getJson('/api/analytics?exchange=bybit')
+        // Bybit gained its tables on 2026-09-24, so the refusal now needs a
+        // name that really has none.
+        $this->getJson('/api/analytics?exchange=kraken')
             ->assertStatus(400)
             ->assertJsonPath('error', 'EXCHANGE_NOT_SUPPORTED');
+
+        $this->getJson('/api/analytics?exchange=bybit')->assertOk();
     }
 
     public function test_mexc_trades_are_read_from_the_mexc_tables(): void
@@ -334,7 +338,7 @@ class AnalyticsFiltersTest extends EngineTestCase
         // "All" pools both venues: Binance's +140 plus MEXC's +7.
         $all = $this->analytics();
         $this->assertEquals(147, $all['total_realized']);
-        $this->assertSame(['Binance', 'MEXC'], array_column($all['by_exchange'], 'exchange'));
+        $this->assertSame(['Binance', 'Bybit', 'MEXC'], array_column($all['by_exchange'], 'exchange'));
     }
 
     public function test_binance_exchange_matches_all(): void

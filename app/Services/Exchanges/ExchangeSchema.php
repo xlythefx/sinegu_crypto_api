@@ -3,6 +3,7 @@
 namespace App\Services\Exchanges;
 
 use App\Models\BinanceAccount;
+use App\Models\BybitAccount;
 use App\Models\ExchangeAccount;
 use App\Models\MexcAccount;
 use Illuminate\Database\Eloquent\Builder;
@@ -18,9 +19,11 @@ use InvalidArgumentException;
  * once and never carry a `binance_` literal.
  *
  * `supported()` is also the gate GuardsEngineExchange applies: a name in the
- * route's whereIn but absent here (bybit, today) answers 400
- * EXCHANGE_NOT_SUPPORTED. Adding an exchange is one REGISTRY entry plus its
- * migrations — nothing in the controllers changes.
+ * route's whereIn but absent here answers 400 EXCHANGE_NOT_SUPPORTED. Adding
+ * an exchange is one REGISTRY entry plus its migrations — nothing in the
+ * controllers changes. All three venues are registered as of 2026-09-24;
+ * whether a venue may be CONNECTED is a separate question, answered by
+ * config('exchanges.staff_only').
  */
 final class ExchangeSchema
 {
@@ -40,6 +43,15 @@ final class ExchangeSchema
             'broker' => 'Binance',
             'fee_config' => 'services.binance.taker_fee_rate',
             'fee_default' => 0.0005,
+        ],
+        'bybit' => [
+            'account' => BybitAccount::class,
+            'positions' => 'bybit_positions',
+            'past_positions' => 'bybit_pastpositions',
+            'transactions' => 'bybit_transactions',
+            'broker' => 'Bybit',
+            'fee_config' => 'services.bybit.taker_fee_rate',
+            'fee_default' => 0.00055,
         ],
         'mexc' => [
             'account' => MexcAccount::class,

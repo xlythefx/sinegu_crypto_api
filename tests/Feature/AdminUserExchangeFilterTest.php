@@ -137,12 +137,16 @@ class AdminUserExchangeFilterTest extends EngineTestCase
         $this->assertEquals(1100, $b['hwm']);
     }
 
-    public function test_the_filter_is_case_insensitive_and_bybit_is_refused(): void
+    public function test_the_filter_is_case_insensitive_and_an_unwired_venue_is_refused(): void
     {
         $this->assertSame('binance', $this->summary('?exchange=Binance')['exchange']);
 
+        // Bybit is wired as of 2026-09-24, so it is accepted like any other
+        // venue; the refusal this case guards is for a name with no tables.
+        $this->assertSame('bybit', $this->summary('?exchange=bybit')['exchange']);
+
         foreach (['summary', 'daily-pnl', 'positions', 'invoices'] as $read) {
-            $this->getJson("/api/admin/users/{$this->uniId}/{$read}?exchange=bybit")
+            $this->getJson("/api/admin/users/{$this->uniId}/{$read}?exchange=kraken")
                 ->assertStatus(400)
                 ->assertJsonPath('error', 'EXCHANGE_NOT_SUPPORTED');
         }
