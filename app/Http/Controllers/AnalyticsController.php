@@ -142,7 +142,8 @@ class AnalyticsController extends Controller
         // built from EVERY trade and flow, never $past: the chips and the date
         // range narrow what is MEASURED, not the money that was at work.
         $flowByDay = $this->flowsByDay($transactions);
-        $dailyCapital = $this->dailyCapital($everyTrade, $flowByDay, $accounts);
+        ['start' => $dailyCapital, 'end' => $dailyBalance] = $this->capitalWalk($everyTrade, $flowByDay, $accounts);
+        $initialDeposit = (float) $accounts->sum('initial_deposit');
 
         $tradingDays = $dailyPnl->count();
         $avgDailyPnl = $tradingDays > 0 ? round($totalRealized / $tradingDays, 2) : null;
@@ -377,7 +378,12 @@ class AnalyticsController extends Controller
                 'daily_pnl' => $dailyPnl,
                 'daily_pnl_net' => $dailyPnlNet,
                 'daily_capital' => $dailyCapital,
+                'daily_balance' => $dailyBalance,
                 'daily_flows' => $flowByDay,
+                // Capital the account held before any transfer we have on
+                // record — the walk's seed. NOT `baseline`, which is net flows
+                // alone and leaves this out.
+                'initial_deposit' => round($initialDeposit, 2),
                 'day_of_week' => $dayOfWeek,
                 'monthly' => $monthly,
                 'by_symbol' => $bySymbol,
@@ -446,9 +452,16 @@ class AnalyticsController extends Controller
      * track record's Asia/Manila days, so the two use the same method on
      * slightly different boundaries and will not tie out to the decimal.
      *
-     * @return array<string, float>
+     * `end` is the same walk read one step later — the balance the day CLOSED
+     * on, after its transfers and its P&L. It is what the Date Range card
+     * prints as the balance on its end date: the all-time net flow plus P&L to
+     * date (what it printed before) counted every transfer made AFTER that
+     * date and left out `initial_deposit`, so a range ending in August showed
+     * September's deposits.
+     *
+     * @return array{start: array<string, float>, end: array<string, float>}
      */
-    private function dailyCapital(
+    private function capitalWalk(
         Collection $trades,
         array $flowByDay,
         Collection $accounts,
@@ -476,17 +489,19 @@ class AnalyticsController extends Controller
         sort($days);
 
         $capital = (float) $accounts->sum('initial_deposit');
-        $out = [];
+        $start = [];
+        $end = [];
         foreach ($days as $day) {
             $capital += $flowByDay[$day] ?? 0.0;
             // Recorded even when non-positive: the card's `capital > 0` guard
             // is what drops such a day out of the chain, and a missing key
             // would instead read as "no data for this day".
-            $out[$day] = round($capital, 2);
+            $start[$day] = round($capital, 2);
             $capital += ($pnlByDay[$day] ?? 0.0) - ($unchargedFeeByDay[$day] ?? 0.0);
+            $end[$day] = round($capital, 2);
         }
 
-        return $out;
+        return ['start' => $start, 'end' => $end];
     }
 
     /* ================= Filter-input parsing ============================

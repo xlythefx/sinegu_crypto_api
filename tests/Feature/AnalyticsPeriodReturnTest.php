@@ -168,8 +168,45 @@ class AnalyticsPeriodReturnTest extends EngineTestCase
         $this->assertEquals(10499.89, $capital['2026-08-20']);
     }
 
+    /* ======= daily_balance — what the Date Range card's end date held ======= */
+
+    public function test_balance_on_a_date_ignores_transfers_made_after_it(): void
+    {
+        $this->seedAugust();
+        $this->flow('2026-08-15 09:00:00', 2000, 'WITHDRAWAL');
+        // A September deposit and withdrawal must not appear in any August
+        // balance — the card used to add every transfer ever made.
+        $this->flow('2026-09-05 09:00:00', 50000);
+        $this->flow('2026-09-06 09:00:00', 7000, 'WITHDRAWAL');
+
+        $balance = $this->analytics()['daily_balance'];
+
+        $this->assertEquals(10000, $balance['2026-08-01']);
+        $this->assertEquals(10500, $balance['2026-08-10']);   // + that day's trade
+        $this->assertEquals(8500, $balance['2026-08-15']);    // − the withdrawal
+        $this->assertEquals(9000, $balance['2026-08-20']);    // + the second trade
+        $this->assertEquals(59000, $balance['2026-09-05']);
+        $this->assertEquals(52000, $balance['2026-09-06']);
+    }
+
+    public function test_balance_is_seeded_from_initial_deposit(): void
+    {
+        DB::table('binance_accounts')->where('api_key', self::KEY)->update(['initial_deposit' => 1000]);
+        $this->seedAugust();
+
+        $a = $this->analytics();
+
+        // Money that was there before any transfer we recorded is still money.
+        $this->assertEquals(1000, $a['initial_deposit']);
+        $this->assertEquals(11000, $a['daily_balance']['2026-08-01']);
+        $this->assertEquals(12000, $a['daily_balance']['2026-08-20']);
+        // …and it is not in `baseline`, which stays net flows alone.
+        $this->assertEquals(10000, $a['baseline']);
+    }
+
     public function test_no_trades_and_no_flows_is_an_empty_series(): void
     {
+        $this->assertSame([], $this->analytics()['daily_balance']);
         $this->assertSame([], $this->analytics()['daily_capital']);
         $this->assertSame([], $this->analytics()['daily_flows']);
     }
