@@ -32,10 +32,32 @@ class InvoiceService
     }
 
     /**
+     * Why this account must never be invoiced, or null when it may be.
+     *
+     * The MASTER account is the house's own trading (2026-09-25, owner's
+     * decision): it publishes the track record, it pays nobody a fee. Checked
+     * here, in the one place invoices are made, so the admin screen today and
+     * the monthly scheduler later cannot disagree about it. Invoice-scenario
+     * scratch accounts (`SBXINV-`) are exempt — the runner may be pointed at
+     * any user, the master included, and never bills anyone real.
+     */
+    public static function notInvoiceableReason(BinanceAccount $account): ?string
+    {
+        if (str_starts_with((string) $account->api_key, 'SBXINV-')) {
+            return null;
+        }
+        $type = DB::table('user_credentials')->where('uni_id', $account->uni_id)->value('type');
+
+        return $type === 'master' ? 'The master account is never invoiced.' : null;
+    }
+
+    /**
      * Compute and upsert one invoice for an account + month. Idempotent per
      * (exchange, account, month): regenerating updates the existing row.
      *
      * @param  array{realized: float, unrealized: float}  $rates  fee percentages (e.g. 20, 6)
+     *
+     * @throws \DomainException for an account that is never invoiced
      */
     public function generateForAccount(
         BinanceAccount $account,
@@ -43,6 +65,10 @@ class InvoiceService
         array $rates,
         string $exchange = 'binance'
     ): Invoice {
+        if ($reason = self::notInvoiceableReason($account)) {
+            throw new \DomainException($reason);
+        }
+
         // '!Y-m', never 'Y-m': without the '!' PHP fills the missing day from
         // TODAY, so parsing '2026-06' on the 31st overflows to 2026-07-01 and
         // the invoice would bill the wrong month's trades.

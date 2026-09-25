@@ -139,6 +139,18 @@ class AdminInvoiceController extends Controller
             ], 422);
         }
 
+        // The master is never billed (InvoiceService::notInvoiceableReason).
+        // Said out loud rather than silently skipped, so an admin who picked
+        // the master sees why nothing was made.
+        $accounts = $accounts->reject(fn ($a) => InvoiceService::notInvoiceableReason($a) !== null)->values();
+        if ($accounts->isEmpty()) {
+            return response()->json([
+                'success' => false,
+                'error_code' => 'NOT_INVOICEABLE',
+                'message' => 'The master account is never invoiced.',
+            ], 422);
+        }
+
         $created = [];
         foreach ($accounts as $account) {
             $cred = DB::table('user_credentials')->where('uni_id', $account->uni_id)->first();
