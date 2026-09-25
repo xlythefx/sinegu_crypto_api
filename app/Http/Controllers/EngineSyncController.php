@@ -5,10 +5,12 @@ namespace App\Http\Controllers;
 use App\Http\Controllers\Concerns\GuardsEngineExchange;
 use App\Models\ExchangeAccount;
 use App\Services\EngineCache;
+use App\Services\Exchanges\TransferLedger;
 use App\Services\Pnl\FeeRebase;
 use App\Services\Pnl\TradingFee;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 
 /**
@@ -326,7 +328,7 @@ class EngineSyncController extends Controller
 
     /**
      * POST /api/engine/{exchange}/balances — poller balance refresh.
-     * initial_deposit is only set when the account has none yet (null/0).
+     * initial_deposit is only set when the account has none yet (null).
      */
     public function updateBalances(string $exchange, Request $request): JsonResponse
     {
@@ -355,8 +357,14 @@ class EngineSyncController extends Controller
             if (array_key_exists('unrealized_pnl', $row) && $row['unrealized_pnl'] !== null) {
                 $account->unrealized_pnl = $row['unrealized_pnl'];
             }
+            // Only an UNSET figure is filled. 0 is a real answer — the ledger
+            // says "every dollar here arrived by a transfer we store" — and
+            // treating it as unset let the next poll overwrite it with the
+            // whole wallet, which counts every stored transfer twice.
+            // (Binance no longer sends this at all: its start comes from the
+            // ledger, see ledger() below. MEXC/Bybit still send the snapshot.)
             if (
-                ! ((float) $account->initial_deposit > 0)
+                $account->initial_deposit === null
                 && isset($row['initial_deposit']) && (float) $row['initial_deposit'] > 0
             ) {
                 $account->initial_deposit = $row['initial_deposit'];
@@ -475,12 +483,64 @@ class EngineSyncController extends Controller
             'currency' => $row['currency'] ?? 'USDT',
             'transaction_time' => $row['transaction_time'] ?? null,
             'info' => $row['info'] ?? null,
-            'created_at' => now(),
+            // When the money MOVED, not when the poller noticed: every reader
+            // buckets flows by created_at, and the poll lands minutes to hours
+            // later — enough to put a late-evening deposit on the next day.
+            'created_at' => ! empty($row['transaction_time'])
+                ? Carbon::createFromTimestampMs((int) $row['transaction_time'], 'UTC')
+                : now(),
         ], $data['rows']);
 
         $inserted = DB::table($this->schema($exchange)->transactions)->insertOrIgnore($rows);
 
         return response()->json(['success' => true, 'inserted' => $inserted]);
+    }
+
+    /**
+     * POST /api/engine/{exchange}/ledger — a NEW account's exchange ledger,
+     * sent by the engine's first balance poll of an account whose
+     * `initial_deposit` is unset. Stores its transfers and sets the figure to
+     * what the account held before them ({@see TransferLedger}).
+     *
+     * Fills an unset figure ONLY; an existing one is corrected by an admin
+     * from Admin → API Keys, where the before → after is shown first. A ledger
+     * that does not reconcile is refused and the figure stays unset — the
+     * deposit gate fails closed on an unknown deposit, which is the safe side.
+     */
+    public function ledger(string $exchange, Request $request, TransferLedger $ledger, EngineCache $engineCache): JsonResponse
+    {
+        if ($guard = $this->guardExchange($exchange)) {
+            return $guard;
+        }
+
+        $data = $request->validate([
+            'api_key' => ['required', 'string', 'max:128'],
+            'ledger' => ['required', 'array'],
+            'ledger.opening_balance' => ['required', 'numeric'],
+            'ledger.transfers' => ['present', 'array'],
+            'ledger.transfers.*.type' => ['required', 'string', 'in:DEPOSIT,WITHDRAWAL'],
+            'ledger.transfers.*.amount' => ['required', 'numeric'],
+            'ledger.transfers.*.tran_id' => ['required', 'integer'],
+            'ledger.transfers.*.transaction_time' => ['required', 'integer'],
+            'ledger.transfers.*.currency' => ['nullable', 'string', 'max:16'],
+            'ledger.transfers.*.info' => ['nullable', 'string', 'max:64'],
+        ]);
+
+        $account = $this->schema($exchange)->accountQuery()->where('api_key', $data['api_key'])->first();
+        if (! $account) {
+            return response()->json(['success' => false, 'error' => 'ACCOUNT_NOT_FOUND'], 404);
+        }
+
+        // The full payload, not just the validated keys: plan() also reads
+        // ledger_start / truncated / non_usdt_rows / other_wallets.
+        $result = $ledger->seedNew($account, $exchange, (array) $request->input('ledger'));
+
+        if ($result['applied']) {
+            // total_deposit changed, and the deposit gate reads it.
+            $engineCache->refreshAccounts();
+        }
+
+        return response()->json(['success' => true, ...$result]);
     }
 
     /**

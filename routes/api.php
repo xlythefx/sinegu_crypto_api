@@ -273,6 +273,9 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::post('/api-keys/bulk-delete', [AdminApiKeyController::class, 'bulkDestroy']);
         Route::prefix('api-keys/{exchange}')->whereIn('exchange', ['binance', 'bybit', 'mexc'])->group(function () {
             Route::put('/{id}', [AdminApiKeyController::class, 'update'])->whereNumber('id');
+            // Transfer history from the exchange's own ledger: preview, then apply.
+            Route::get('/{id}/ledger', [AdminApiKeyController::class, 'ledger'])->whereNumber('id');
+            Route::post('/{id}/ledger', [AdminApiKeyController::class, 'applyLedger'])->whereNumber('id');
             Route::delete('/{id}/purge', [AdminApiKeyController::class, 'purge'])->whereNumber('id');
             Route::delete('/{id}', [AdminApiKeyController::class, 'destroy'])->whereNumber('id');
         });
@@ -380,5 +383,6 @@ Route::prefix('engine/{exchange}')
         Route::post('/balances', [EngineSyncController::class, 'updateBalances']);
         Route::post('/key-status', [EngineSyncController::class, 'keyStatus']);
         Route::post('/transactions', [EngineSyncController::class, 'insertTransactions']);
+        Route::post('/ledger', [EngineSyncController::class, 'ledger']);
         Route::post('/fees', [EngineSyncController::class, 'insertFees']);
     });

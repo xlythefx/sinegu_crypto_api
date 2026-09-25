@@ -7,6 +7,7 @@ use App\Models\ExchangeAccount;
 use App\Services\Discord\DiscordRoleSync;
 use App\Services\EngineCache;
 use App\Services\Exchanges\ExchangeSchema;
+use App\Services\Exchanges\TransferLedger;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -150,6 +151,115 @@ class AdminApiKeyController extends Controller
             'message' => 'API key updated.',
             'key' => $this->rowFor($schema, $account->id),
         ]);
+    }
+
+    /**
+     * GET /api/admin/api-keys/{exchange}/{id}/ledger
+     *
+     * Preview: every transfer the exchange still reports for this account,
+     * which of them we already store, and what `initial_deposit` and the
+     * total deposit would become ({@see TransferLedger}). Writes nothing — but
+     * it is the one read on this screen that spends exchange calls (a
+     * weight-30 call per 1000 ledger rows), made by the engine, which holds
+     * the key and is allow-listed at the exchange.
+     */
+    public function ledger(string $exchange, int $id, TransferLedger $ledger): JsonResponse
+    {
+        $resolved = $this->ledgerPlan($exchange, $id, $ledger);
+        if ($resolved instanceof JsonResponse) {
+            return $resolved;
+        }
+
+        return response()->json(['success' => true, 'plan' => TransferLedger::public($resolved['plan'])]);
+    }
+
+    /**
+     * POST /api/admin/api-keys/{exchange}/{id}/ledger
+     * Body: {expected_initial: number, expected_missing: string[]}
+     *
+     * Apply. The ledger is READ AGAIN rather than trusting the preview, and
+     * the write goes ahead only when it still matches what the admin
+     * confirmed — a transfer landing in between must be seen before it is
+     * stored, not after (same rule as bulk delete: act on exactly what was
+     * on screen).
+     */
+    public function applyLedger(Request $request, string $exchange, int $id, TransferLedger $ledger): JsonResponse
+    {
+        $expected = $request->validate([
+            'expected_initial' => ['required', 'numeric'],
+            'expected_missing' => ['present', 'array'],
+            'expected_missing.*' => ['string'],
+        ]);
+
+        $resolved = $this->ledgerPlan($exchange, $id, $ledger);
+        if ($resolved instanceof JsonResponse) {
+            return $resolved;
+        }
+        ['plan' => $plan, 'account' => $account] = $resolved;
+
+        if ($plan['problems'] !== []) {
+            return response()->json([
+                'success' => false,
+                'error' => 'LEDGER_PROBLEMS',
+                'message' => implode(' ', $plan['problems']),
+                'plan' => TransferLedger::public($plan),
+            ], 422);
+        }
+
+        $missingNow = array_column(array_filter($plan['transfers'], fn ($t) => ! $t['stored']), 'tran_id');
+        $sameMissing = collect($missingNow)->sort()->values()->all()
+            === collect($expected['expected_missing'])->map(fn ($v) => (string) $v)->sort()->values()->all();
+        if (! $sameMissing || abs($plan['initial_deposit']['after'] - (float) $expected['expected_initial']) >= 0.01) {
+            return response()->json([
+                'success' => false,
+                'error' => 'LEDGER_CHANGED',
+                'message' => 'The exchange history changed since the preview. Review it again before applying.',
+                'plan' => TransferLedger::public($plan),
+            ], 409);
+        }
+
+        $inserted = $ledger->apply($account, $plan);
+        // total_deposit (the deposit gate's input) just changed.
+        $this->engineCache->refreshAccounts();
+
+        return response()->json([
+            'success' => true,
+            'message' => $inserted > 0
+                ? "Stored {$inserted} transfer(s) and set the starting balance."
+                : 'Starting balance updated.',
+            'inserted' => $inserted,
+            'key' => $this->rowFor($this->schema($exchange), $account->id),
+        ]);
+    }
+
+    /**
+     * The account + its freshly read plan, or the response explaining why
+     * there is none.
+     *
+     * @return array{plan: array<string, mixed>, account: ExchangeAccount}|JsonResponse
+     */
+    private function ledgerPlan(string $exchange, int $id, TransferLedger $ledger): array|JsonResponse
+    {
+        if ($unsupported = $this->guardExchange($exchange)) {
+            return $unsupported;
+        }
+        $account = $this->find($this->schema($exchange), $id);
+        if (! $account) {
+            return $this->notFound();
+        }
+        if ($account->trashed()) {
+            return response()->json([
+                'success' => false,
+                'message' => 'That account is disconnected; the engine no longer holds its key.',
+            ], 422);
+        }
+
+        $read = $this->engineCache->ledger($account->api_key);
+        if ($read['ledger'] === null) {
+            return response()->json(['success' => false, 'error' => 'LEDGER_UNAVAILABLE', 'message' => $read['error']], 502);
+        }
+
+        return ['plan' => $ledger->plan($account, $exchange, $read['ledger']), 'account' => $account];
     }
 
     /**

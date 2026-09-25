@@ -64,6 +64,46 @@ class EngineCache
         return $this->ping('refresh-balances', ['api_keys' => array_values($apiKeys)], $timeout);
     }
 
+    /**
+     * One account's full exchange ledger, read by the engine — the only
+     * process holding the key and allow-listed at the exchange. Unlike the
+     * pings above this RETURNS data, and a failure is reported rather than
+     * swallowed: it backs an admin preview someone is waiting on.
+     *
+     * Slow by nature (one weight-30 call per 1000 ledger rows; the master's
+     * ~11k rows took 12 pages), hence the long timeout.
+     *
+     * @return array{ledger: ?array<string, mixed>, exchange: ?string, error: ?string}
+     */
+    public function ledger(string $apiKey, int $timeout = 90): array
+    {
+        $base = rtrim((string) config('services.engine.targets.local', 'http://127.0.0.1:5010'), '/');
+        $secret = (string) (config('services.engine.webhook_secrets.binance') ?? '');
+        if ($secret === '') {
+            return ['ledger' => null, 'exchange' => null, 'error' => 'The trading engine is not configured on this server.'];
+        }
+
+        try {
+            $response = Http::withHeaders(['X-Admin-Secret' => $secret])
+                ->timeout($timeout)
+                ->post("{$base}/admin/ledger", ['api_key' => $apiKey]);
+        } catch (\Throwable $e) {
+            Log::warning('Engine ledger read failed.', ['exception' => $e->getMessage()]);
+
+            return ['ledger' => null, 'exchange' => null, 'error' => 'The trading engine did not answer.'];
+        }
+
+        if (! $response->successful() || ! is_array($response->json('ledger'))) {
+            return [
+                'ledger' => null,
+                'exchange' => null,
+                'error' => (string) ($response->json('message') ?? $response->json('error') ?? 'The engine could not read the ledger.'),
+            ];
+        }
+
+        return ['ledger' => $response->json('ledger'), 'exchange' => $response->json('exchange'), 'error' => null];
+    }
+
     /** @return array{refreshed: list<string>, error: ?string} */
     public function refreshAll(): array
     {
