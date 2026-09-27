@@ -24,7 +24,108 @@ class PublicMarketTickerTest extends TestCase
             'services.market.symbols' => ['BTCUSDT', 'ETHUSDT', 'LTCUSDT'],
             'services.market.funding_symbol' => 'LTCUSDT',
             'services.market.base_url' => 'https://fapi.binance.com',
+            'services.market.order_book.symbol' => 'BTCUSDT',
+            'services.market.order_book.label' => 'BTC-PERP',
+            'services.market.order_book.limit' => 100,
+            'services.market.order_book.ttl' => 5,
         ]);
+    }
+
+    private function fakeBook(): void
+    {
+        Http::fake([
+            '*depth*' => Http::response([
+                'E' => 1790265600000,  // 2026-09-24T16:00:00Z
+                'bids' => [['84266.50', '7.614'], ['84266.40', '0.041']],
+                'asks' => [['84266.60', '5.961'], ['84266.70', '1.075']],
+            ]),
+            '*ticker/24hr*' => Http::response([
+                'lastPrice' => '84266.60',
+                'priceChangePercent' => '1.240',
+                'quoteVolume' => '2942435187.61',
+            ]),
+        ]);
+    }
+
+    public function test_the_order_book_publishes_raw_levels_and_the_24h_line(): void
+    {
+        $this->fakeBook();
+
+        $this->getJson('/api/public/order-book')
+            ->assertOk()
+            ->assertJsonPath('available', true)
+            ->assertJsonPath('label', 'BTC-PERP')
+            // Levels come through as numbers, ready to bucket on the client.
+            ->assertJsonPath('bids.0', [84266.50, 7.614])
+            ->assertJsonPath('asks.0', [84266.60, 5.961])
+            ->assertJsonPath('price', 84266.60)
+            ->assertJsonPath('change_pct', 1.24)
+            ->assertJsonPath('quote_volume', 2942435187.61)
+            // The EXCHANGE's stamp, which is what the live dot answers to.
+            ->assertJsonPath('book_at', '2026-09-24T16:00:00Z');
+    }
+
+    /**
+     * The book is the part of the card that moves; a failed 24h read must not
+     * take it down. Those fields go null and the ladder still draws.
+     */
+    public function test_a_failed_24h_read_still_leaves_a_drawable_book(): void
+    {
+        Http::fake([
+            '*depth*' => Http::response([
+                'bids' => [['84266.50', '7.614']],
+                'asks' => [['84266.60', '5.961']],
+            ]),
+            '*ticker/24hr*' => Http::response([], 500),
+        ]);
+
+        $this->getJson('/api/public/order-book')
+            ->assertOk()
+            ->assertJsonPath('available', true)
+            ->assertJsonCount(1, 'bids')
+            ->assertJsonPath('price', null)
+            ->assertJsonPath('quote_volume', null)
+            ->assertJsonPath('book_at', null);
+    }
+
+    /** A one-sided or unreadable book is unavailable, never an empty ladder. */
+    public function test_an_unreadable_book_reports_unavailable(): void
+    {
+        Http::fake(['*' => Http::response([], 500)]);
+
+        $this->getJson('/api/public/order-book')
+            ->assertOk()
+            ->assertJsonPath('available', false)
+            ->assertJsonCount(0, 'bids')
+            ->assertJsonCount(0, 'asks');
+    }
+
+    public function test_a_failed_book_fetch_falls_back_to_the_last_good_one(): void
+    {
+        $this->fakeBook();
+        $good = $this->getJson('/api/public/order-book')->json();
+
+        Cache::forget('public.order-book');
+        Http::fake(fn () => throw new ConnectionException('upstream down'));
+
+        $this->getJson('/api/public/order-book')
+            ->assertOk()
+            ->assertJsonPath('available', true)
+            ->assertJsonPath('bids.0', [84266.50, 7.614])
+            ->assertJsonPath('updated_at', $good['updated_at']);
+    }
+
+    /** The book's cache is what bounds its weight, so it is worth pinning. */
+    public function test_the_book_reads_depth_once_per_cache_window(): void
+    {
+        $this->fakeBook();
+
+        $this->getJson('/api/public/order-book')->assertOk();
+        $this->getJson('/api/public/order-book')->assertOk();
+        $this->getJson('/api/public/order-book')->assertOk();
+
+        // One depth + one 24h read, for three page views.
+        Http::assertSentCount(2);
     }
 
     /** A 24hr ticker body with only the two fields the controller reads. */

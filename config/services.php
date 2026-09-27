@@ -125,6 +125,17 @@ return [
             )),
         ))),
         'funding_symbol' => strtoupper(trim((string) env('PUBLIC_MARKET_FUNDING_SYMBOL', 'LTCUSDT'))),
+        // The landing hero's live order book. `limit` is what Binance charges
+        // depth by (100 → weight 5); `ttl` is the whole cost knob — at 5s it is
+        // ~60 weight/min, forever and regardless of traffic, since it is our IP
+        // that reads and not the visitor's.
+        'order_book' => [
+            'symbol' => env('PUBLIC_ORDER_BOOK_SYMBOL', 'BTCUSDT'),
+            'label' => env('PUBLIC_ORDER_BOOK_LABEL', 'BTC-PERP'),
+            'limit' => (int) env('PUBLIC_ORDER_BOOK_LIMIT', 100),
+            'ttl' => (int) env('PUBLIC_ORDER_BOOK_TTL', 5),
+        ],
+
         'base_url' => env('PUBLIC_MARKET_BASE_URL', 'https://fapi.binance.com'),
         'timeout' => (int) env('PUBLIC_MARKET_TIMEOUT', 4),
         'connect_timeout' => (int) env('PUBLIC_MARKET_CONNECT_TIMEOUT', 3),

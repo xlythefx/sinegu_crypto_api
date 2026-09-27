@@ -53,6 +53,9 @@ Route::prefix('public')->middleware('throttle:60,1')->group(function () {
     // Takes no input at all: the symbols are config, so the cache is one key
     // and a visitor cannot make us fetch anything we did not choose to fetch.
     Route::get('/market-ticker', [PublicMarketController::class, 'ticker']);
+    // The hero's live order book — same proxy, a much shorter cache, because a
+    // book that refreshes on the strip's 30s is a picture of a book.
+    Route::get('/order-book', [PublicMarketController::class, 'orderBook']);
 });
 
 // Per-IP limits on the four unauthenticated writes. An account here holds
