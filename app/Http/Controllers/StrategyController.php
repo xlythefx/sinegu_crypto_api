@@ -3,9 +3,10 @@
 namespace App\Http\Controllers;
 
 use App\Models\Strategy;
+use App\Services\Admin\AdminInsights;
+use App\Services\Exchanges\ExchangeSchema;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\DB;
 
 /**
  * Admin strategy overview (auth:sanctum + admin middleware).
@@ -22,19 +23,26 @@ class StrategyController extends Controller
      * `exchange_fee` rides along so the client-side strategy math
      * (lib/strategyStats.ts) can draw the curve BEFORE fees — the strategy's
      * own result — and still show what landed on hover.
+     *
+     * Every exchange's table, real money only (no demo, sandbox or SBXINV-
+     * rows). `?scope=master` is the master account alone — the strategy's
+     * true result; `customers` is every customer pooled; `all` (default) is
+     * both. `?exchange=` narrows to one venue.
      */
-    public function index(): JsonResponse
+    public function index(Request $request, AdminInsights $insights): JsonResponse
     {
-        $trades = DB::table('binance_pastpositions')
-            ->whereNotNull('strategy')
-            ->where('strategy', '!=', '')
-            ->orderBy('closed_at')
-            ->get(['strategy', 'symbol', 'realized_pnl', 'exchange_fee', 'closed_at']);
+        $scope = in_array($request->query('scope'), ['master', 'customers'], true)
+            ? $request->query('scope') : 'all';
+        $exchange = $request->query('exchange');
+        $exchange = is_string($exchange) && ExchangeSchema::isSupported($exchange) ? $exchange : null;
+
+        $trades = $insights->strategyTrades($scope, $exchange);
 
         $enabled = Strategy::all()->pluck('enabled', 'strategy_key');
 
         return response()->json([
             'success' => true,
+            'scope' => $scope,
             'enabled' => $enabled,
             'trades' => $trades,
         ]);

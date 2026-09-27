@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\UserCredential;
 use App\Services\Exchanges\ExchangeSchema;
 use App\Services\Pnl\TradingFee;
 use App\Services\UserStatsService;
@@ -34,8 +35,31 @@ class AnalyticsController extends Controller
      */
     public function index(Request $request): JsonResponse
     {
-        $uniId = $request->user()->uni_id;
+        return $this->respond($request, $request->user()->uni_id);
+    }
 
+    /**
+     * GET /api/admin/users/{uniId}/analytics — the same payload for any user,
+     * behind the admin middleware. The admin dashboard's Master Account tab
+     * reads the master's analytics through it, so the owner sees exactly the
+     * page the master would see under their own login, never a second
+     * computation of the same figures.
+     */
+    public function forUser(Request $request, string $uniId): JsonResponse
+    {
+        if (! UserCredential::where('uni_id', $uniId)->exists()) {
+            return response()->json([
+                'success' => false,
+                'error' => 'USER_NOT_FOUND',
+                'message' => 'User not found.',
+            ], 404);
+        }
+
+        return $this->respond($request, $uniId);
+    }
+
+    private function respond(Request $request, string $uniId): JsonResponse
+    {
         $exchange = UserStatsService::normalizeExchange($request->query('exchange'));
         if ($exchange === null) {
             return response()->json([

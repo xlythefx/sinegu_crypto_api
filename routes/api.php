@@ -4,6 +4,7 @@ use App\Http\Controllers\AdminApiKeyController;
 use App\Http\Controllers\AdminController;
 use App\Http\Controllers\AdminDatabaseController;
 use App\Http\Controllers\AdminEngineController;
+use App\Http\Controllers\AdminInsightsController;
 use App\Http\Controllers\AdminInvoiceController;
 use App\Http\Controllers\AdminMaintenanceController;
 use App\Http\Controllers\AdminManualTradeController;
@@ -198,6 +199,14 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/users/{uniId}/daily-pnl', [AdminUserController::class, 'dailyPnl']);
         Route::get('/users/{uniId}/positions', [AdminUserController::class, 'positions']);
         Route::get('/users/{uniId}/invoices', [AdminUserController::class, 'invoices']);
+        Route::get('/users/{uniId}/analytics', [AnalyticsController::class, 'forUser']);
+
+        // Admin dashboard tabs — read-only aggregates, cached a minute.
+        Route::get('/insights/overview', [AdminInsightsController::class, 'overview']);
+        Route::get('/insights/customers', [AdminInsightsController::class, 'customers']);
+        Route::get('/insights/money', [AdminInsightsController::class, 'money']);
+        Route::get('/insights/system', [AdminInsightsController::class, 'system']);
+        Route::get('/insights/strategies', [AdminInsightsController::class, 'strategies']);
         Route::put('/users/{uniId}', [AdminUserController::class, 'update']);
 
         Route::get('/strategies', [StrategyController::class, 'index']);

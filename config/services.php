@@ -84,6 +84,9 @@ return [
         'service' => env('ENGINE_SERVICE', 'sinegualerts-engine'),
         // null = auto-detect (Linux only); tests override to fake availability.
         'systemd' => env('ENGINE_SYSTEMD'),
+        // The engine's deposit gate (BINANCE_ABCD_MIN_DEPOSIT in trading-flask);
+        // mirrored here only so the admin customer funnel can say who passes it.
+        'min_deposit' => (float) env('ENGINE_MIN_DEPOSIT', 1000),
         'webhook_secrets' => [
             // Legacy ENGINE_WEBHOOK_SECRET stays as a fallback so already-deployed
             // .env files keep working until they're renamed.
