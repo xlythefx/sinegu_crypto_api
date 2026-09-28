@@ -61,10 +61,24 @@ class AdminInsightsController extends Controller
         );
     }
 
+    /**
+     * The payload is cached as PLAIN ARRAYS, never as the Collections and
+     * Carbons AdminInsights builds. `cache.serializable_classes` is false, so
+     * an object read back from the cache is a `__PHP_Incomplete_Class` — which
+     * JSON-encodes as an object, not a list. Only the request that computed
+     * the entry was right; every hit for the next minute sent
+     * `blocked_keys: {…}` and the Overview tab crashed on `.slice`
+     * (2026-09-28). Round-tripping through JSON here yields exactly what the
+     * response would have carried.
+     */
     private function answer(string $name, callable $compute): JsonResponse
     {
         return response()->json(
-            ['success' => true] + Cache::remember(self::CACHE_PREFIX.$name, self::TTL, $compute)
+            ['success' => true] + Cache::remember(
+                self::CACHE_PREFIX.$name,
+                self::TTL,
+                fn () => json_decode(json_encode($compute()), true),
+            )
         );
     }
 

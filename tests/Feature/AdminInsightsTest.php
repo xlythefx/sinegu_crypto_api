@@ -69,6 +69,40 @@ class AdminInsightsTest extends EngineTestCase
             ->assertOk()->assertJsonStructure(['reliability', 'compare']);
     }
 
+    /**
+     * The suite's `array` store never serializes, so it hid the bug: on a
+     * store that does (prod uses `database`), with `serializable_classes`
+     * false, a cached Collection came back as an incomplete class and every
+     * cache HIT served its lists as JSON objects.
+     */
+    public function test_a_cache_hit_serves_the_same_lists_as_the_miss(): void
+    {
+        config(['cache.default' => 'file', 'cache.serializable_classes' => false]);
+        $admin = $this->makeUser(['type' => 'admin']);
+        $customer = $this->makeUser(['name' => 'Blocked Bob']);
+        $this->makeAccount($customer, ['key_status' => 'blocked', 'key_blocked_at' => now()->subDay()]);
+        $headers = $this->headersFor($admin);
+        $keys = ['overview', 'customers', 'money', 'system', 'strategies:all::'];
+        $forget = fn () => array_map(
+            fn ($k) => \Illuminate\Support\Facades\Cache::forget(\App\Http\Controllers\AdminInsightsController::CACHE_PREFIX.$k),
+            $keys,
+        );
+
+        $forget();
+        try {
+            foreach (['overview', 'customers', 'money', 'system', 'strategies'] as $tab) {
+                $miss = $this->getJson("/api/admin/insights/{$tab}", $headers)->assertOk()->getContent();
+                $hit = $this->getJson("/api/admin/insights/{$tab}", $headers)->assertOk()->getContent();
+                $this->assertSame($miss, $hit, "{$tab}: a cache hit must serve what the miss served");
+            }
+            $overview = json_decode($this->getJson('/api/admin/insights/overview', $headers)->getContent(), true);
+            $this->assertTrue(array_is_list($overview['attention']['blocked_keys']));
+            $this->assertSame('Blocked Bob', $overview['attention']['blocked_keys'][0]['owner']);
+        } finally {
+            $forget();
+        }
+    }
+
     public function test_customer_funnel_ignores_staff_demo_and_sandbox_and_counts_every_venue(): void
     {
         $admin = $this->makeUser(['type' => 'admin']);
