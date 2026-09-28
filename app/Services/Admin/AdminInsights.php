@@ -10,6 +10,7 @@ use App\Models\UserCredential;
 use App\Services\Exchanges\ExchangeSchema;
 use App\Services\Payments\PaymentEnvironment;
 use App\Services\Payments\TronGateway;
+use App\Services\UserStatsService;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
@@ -34,7 +35,13 @@ class AdminInsights
     /** Invoice-scenario scratch accounts (SandboxInvoiceController) — never business. */
     public const SANDBOX_KEY_PREFIX = 'SBXINV-';
 
-    public function __construct(private PaymentEnvironment $env) {}
+    /** The Overview's Platform view: whose money it pools. */
+    public const PLATFORM_SCOPES = ['all', 'customers', 'master'];
+
+    public function __construct(
+        private PaymentEnvironment $env,
+        private UserStatsService $stats,
+    ) {}
 
     // ------------------------------------------------------------------
     // Overview
@@ -105,6 +112,122 @@ class AdminInsights
                     ->sum(fn ($i) => (float) ($i->paid_amount ?? $i->total_fee)), 2),
             ],
         ];
+    }
+
+    // ------------------------------------------------------------------
+    // Platform (Overview → Platform): every real account pooled
+    // ------------------------------------------------------------------
+
+    /**
+     * The whole platform as ONE portfolio: money under management, realized
+     * P&L over a few windows and today's activity, for customers, the master,
+     * or both.
+     *
+     * LIVE accounts only (`deleted_at IS NULL`), unlike the master's track
+     * record: this pairs P&L with capital, and a disconnected account's
+     * capital is no longer on record, so its trades beside today's capital
+     * would describe two different sets of money — the same rule
+     * UserStatsService::displayAccounts() applies to every per-user screen.
+     * P&L is AFTER fees as the headline, `gross` + `fees` beside it.
+     */
+    public function platform(string $scope): array
+    {
+        $now = Carbon::now('UTC');
+        $today = $now->copy()->startOfDay();
+        $accounts = $this->scopedAccounts($scope);
+        $trades = UserStatsService::withFeeBasis(
+            $this->platformTrades($accounts, ['uni_id', 'realized_pnl', 'exchange_fee', 'closed_at'])
+        );
+
+        $window = function (?Carbon $since) use ($trades): array {
+            $rows = $since === null ? $trades
+                : $trades->filter(fn ($t) => Carbon::parse($t->closed_at)->gte($since));
+
+            return [
+                'net' => round((float) $rows->sum('pnl_net'), 2),
+                'gross' => round((float) $rows->sum('pnl_gross'), 2),
+                'fees' => round((float) $rows->sum('pnl_fee'), 2),
+                'trades' => $rows->count(),
+            ];
+        };
+
+        $customerIds = UserCredential::where('type', 'user')->pluck('uni_id')->flip();
+        $isCustomer = fn ($a) => isset($customerIds[$a->uni_id]);
+        $customers = $accounts->filter($isCustomer);
+        $master = $accounts->reject($isCustomer);
+        $flows30 = $this->flowsSince($accounts, $now->copy()->subDays(30));
+        $balance = (float) $accounts->sum('balance');
+        $unrealized = (float) $accounts->sum('unrealized_pnl');
+        $scored = $trades->whereNotNull('pnl_net');
+
+        return [
+            'scope' => $scope,
+            'under_management' => [
+                // Same keys as money()['under_management'], so one card renders both.
+                'customers' => round((float) $customers->sum('balance'), 2),
+                'customer_accounts' => $customers->count(),
+                'master' => round((float) $master->sum('balance'), 2),
+                'deposits_30d' => round($flows30['deposits'], 2),
+                'withdrawals_30d' => round($flows30['withdrawals'], 2),
+                'balance' => round($balance, 2),
+                'unrealized' => round($unrealized, 2),
+                'equity' => round($balance + $unrealized, 2),
+                'by_exchange' => $accounts->groupBy('exchange')->map(fn ($accs, $ex) => [
+                    'exchange' => $ex,
+                    'accounts' => $accs->count(),
+                    'balance' => round((float) $accs->sum('balance'), 2),
+                ])->sortByDesc('balance')->values(),
+            ],
+            'pnl' => [
+                'today' => $window($today),
+                'd7' => $window($today->copy()->subDays(7)),
+                'month' => $window($today->copy()->startOfMonth()),
+                'all' => $window(null),
+            ],
+            'win_rate' => $scored->isEmpty() ? null
+                : round($scored->where('pnl_net', '>', 0)->count() / $scored->count() * 100, 1),
+            'accounts_live' => $accounts->count(),
+            'owners' => $accounts->pluck('uni_id')->unique()->count(),
+            'traders_today' => $trades
+                ->filter(fn ($t) => Carbon::parse($t->closed_at)->gte($today))
+                ->pluck('uni_id')->unique()->count(),
+        ];
+    }
+
+    /**
+     * The platform's P&L calendar — the same days map as every per-user
+     * calendar (UserStatsService::calendarDays), over the pooled accounts:
+     * each day's `pct` is the pooled P&L over the pooled capital that day
+     * started with, and every trade names its owner.
+     */
+    public function platformDailyPnl(string $scope): array
+    {
+        $accounts = $this->scopedAccounts($scope);
+        $trades = $this->platformTrades($accounts, UserStatsService::DAY_TRADE_COLUMNS);
+        $names = UserCredential::whereIn('uni_id', $accounts->pluck('uni_id')->unique())
+            ->pluck('name', 'uni_id')->all();
+
+        return $this->stats->calendarDays($accounts, $trades, $names);
+    }
+
+    /** Live real-money accounts of the scope: customers, the master, or both. */
+    private function scopedAccounts(string $scope): Collection
+    {
+        $accounts = match ($scope) {
+            'customers' => $this->customerAccounts(),
+            'master' => $this->masterAccounts(),
+            default => $this->customerAccounts()->concat($this->masterAccounts()),
+        };
+
+        return $accounts->whereNull('deleted_at')->values();
+    }
+
+    /** Closed trades of $accounts, sandbox-flagged rows dropped like pastRows(). */
+    private function platformTrades(Collection $accounts, array $columns): Collection
+    {
+        return $this->stats->pastPositions($accounts, [...$columns, 'is_sandbox'])
+            ->filter(fn ($t) => (int) $t->is_sandbox === 0)
+            ->values();
     }
 
     // ------------------------------------------------------------------
@@ -525,7 +648,7 @@ class AdminInsights
                 DB::table(ExchangeSchema::for($ex)->accountsTable)
                     ->where('is_sandbox', 0)
                     ->where('api_key', 'not like', self::SANDBOX_KEY_PREFIX.'%')
-                    ->get(['id', 'uni_id', 'api_key', 'name', 'balance', 'initial_deposit', 'demo',
+                    ->get(['id', 'uni_id', 'api_key', 'name', 'balance', 'unrealized_pnl', 'initial_deposit', 'demo',
                         'enabled', 'key_status', 'key_blocked_at', 'deleted_at', 'created_at'])
                     ->each(fn ($a) => $a->exchange = $ex)
             );

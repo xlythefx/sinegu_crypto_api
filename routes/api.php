@@ -203,6 +203,8 @@ Route::middleware('auth:sanctum')->group(function () {
 
         // Admin dashboard tabs — read-only aggregates, cached a minute.
         Route::get('/insights/overview', [AdminInsightsController::class, 'overview']);
+        Route::get('/insights/platform', [AdminInsightsController::class, 'platform']);
+        Route::get('/insights/platform/daily-pnl', [AdminInsightsController::class, 'platformDailyPnl']);
         Route::get('/insights/customers', [AdminInsightsController::class, 'customers']);
         Route::get('/insights/money', [AdminInsightsController::class, 'money']);
         Route::get('/insights/system', [AdminInsightsController::class, 'system']);

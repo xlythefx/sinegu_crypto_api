@@ -615,26 +615,40 @@ class UserStatsService
         ];
     }
 
+    /** The columns every P&L calendar reads off a closed trade. */
+    public const DAY_TRADE_COLUMNS = [
+        // `id` and `exit_price` are what let an admin correct a row straight
+        // from the calendar's day popup (PUT/DELETE /admin/past-positions/{id});
+        // the write itself is still gated by the admin middleware, this only
+        // names the row. Each trade also says which exchange table that id
+        // lives in, because ids repeat across the per-exchange tables.
+        'id', 'uni_id', 'symbol', 'position_side', 'position_amt', 'realized_pnl',
+        'exchange_fee', 'fee_source', 'exit_price', 'side', 'strategy', 'closed_at',
+    ];
+
     /**
      * Closed-trade P&L grouped by calendar day, each day carrying its
-     * individual trades — the days map behind every P&L calendar
-     * (user dashboard, admin dashboard and admin user detail).
+     * individual trades — the days map behind every per-user P&L calendar
+     * (user dashboard, admin master card and admin user detail).
      */
     public function dailyPnlDays(string $uniId, ?string $exchange = null): array
     {
         $accounts = $this->displayAccounts($uniId, $exchange);
-        $past = self::withFeeBasis(
-            $this->pastPositions($accounts, [
-                // `id` and `exit_price` are what let an admin correct a row
-                // straight from the calendar's day popup (PUT/DELETE
-                // /admin/past-positions/{id}); the write itself is still gated
-                // by the admin middleware, this only names the row. Each trade
-                // also says which exchange table that id lives in, because ids
-                // repeat across the per-exchange tables.
-                'id', 'symbol', 'position_side', 'position_amt', 'realized_pnl',
-                'exchange_fee', 'fee_source', 'exit_price', 'side', 'strategy', 'closed_at',
-            ])->sortByDesc('closed_at')->values()
-        );
+
+        return $this->calendarDays($accounts, $this->pastPositions($accounts, self::DAY_TRADE_COLUMNS));
+    }
+
+    /**
+     * The calendar days map for ANY set of accounts and their closed trades —
+     * one user's (dailyPnlDays) or the whole platform's (the admin Overview).
+     * $names, when given (uni_id => name), stamps each trade with its owner,
+     * which a calendar pooling several users needs and a per-user one does not.
+     *
+     * @param  array<string, string>|null  $names
+     */
+    public function calendarDays(Collection $accounts, Collection $trades, ?array $names = null): array
+    {
+        $past = self::withFeeBasis($trades->sortByDesc('closed_at')->values());
 
         // The balance each day STARTED with — after that day's transfers,
         // before its trades — so a cell's percentage is that day's P&L over
@@ -688,7 +702,10 @@ class UserStatsService
                     'side' => $t->side,
                     'strategy' => $t->strategy,
                     'closed_at' => $t->closed_at,
-                ])->values(),
+                ] + ($names === null ? [] : [
+                    'uni_id' => $t->uni_id,
+                    'name' => $names[$t->uni_id] ?? $t->uni_id,
+                ]))->values(),
             ];
         }
 

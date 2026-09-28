@@ -44,6 +44,31 @@ class AdminInsightsController extends Controller
         return $this->answer('system', fn () => $this->insights->system());
     }
 
+    /** ?scope=all|customers|master — the Overview's Platform view. */
+    public function platform(Request $request): JsonResponse
+    {
+        $scope = $this->scope($request);
+        if ($scope === null) {
+            return response()->json(['success' => false, 'error' => 'SCOPE_NOT_SUPPORTED'], 400);
+        }
+
+        return $this->answer('platform:'.$scope, fn () => $this->insights->platform($scope));
+    }
+
+    /** ?scope= — the pooled P&L calendar, `days` shaped like /admin/daily-pnl. */
+    public function platformDailyPnl(Request $request): JsonResponse
+    {
+        $scope = $this->scope($request);
+        if ($scope === null) {
+            return response()->json(['success' => false, 'error' => 'SCOPE_NOT_SUPPORTED'], 400);
+        }
+
+        return $this->answer(
+            'platform-days:'.$scope,
+            fn () => ['days' => $this->insights->platformDailyPnl($scope)],
+        );
+    }
+
     /** ?exchange=&from=YYYY-MM-DD&to=YYYY-MM-DD */
     public function strategies(Request $request): JsonResponse
     {
@@ -80,6 +105,17 @@ class AdminInsightsController extends Controller
                 fn () => json_decode(json_encode($compute()), true),
             )
         );
+    }
+
+    /** Missing means all; anything unknown is null (answered 400). */
+    private function scope(Request $request): ?string
+    {
+        $raw = $request->query('scope');
+        if ($raw === null || $raw === '') {
+            return 'all';
+        }
+
+        return is_string($raw) && in_array($raw, AdminInsights::PLATFORM_SCOPES, true) ? $raw : null;
     }
 
     private function date(mixed $raw): ?string
