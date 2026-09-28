@@ -14,6 +14,7 @@ use Illuminate\Database\QueryException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 
 /**
@@ -549,6 +550,11 @@ class AdminController extends Controller
         }
 
         $user->forceFill(['status' => $status])->save();
+
+        // The Overview's pending strip is approved FROM the dashboard, so a
+        // resolved sign-up must not linger there for the cache's minute.
+        Cache::forget(AdminInsightsController::CACHE_PREFIX.'overview');
+        Cache::forget(AdminInsightsController::CACHE_PREFIX.'customers');
 
         // Approval is what earns the Discord "Member" role; best-effort, after
         // the row is saved, so a Discord outage can never fail an approval.

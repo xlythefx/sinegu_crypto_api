@@ -103,6 +103,32 @@ class AdminInsightsTest extends EngineTestCase
         }
     }
 
+    /**
+     * Sign-ups are approved FROM the Overview (its "waiting for approval"
+     * card), so resolving one must drop the cached answer — otherwise the
+     * approved user sits on the strip for up to a minute and gets clicked twice.
+     */
+    public function test_approving_or_rejecting_a_sign_up_clears_it_from_the_cached_overview(): void
+    {
+        $admin = $this->makeUser(['type' => 'admin']);
+        $first = $this->makeUser(['status' => 'pending', 'name' => 'Pending Pam']);
+        $second = $this->makeUser(['status' => 'pending', 'name' => 'Pending Pete']);
+        $headers = $this->headersFor($admin);
+
+        $this->getJson('/api/admin/insights/overview', $headers)
+            ->assertOk()->assertJsonPath('attention.pending_users_count', 2);
+
+        $this->postJson("/api/admin/users/{$first}/accept", [], $headers)->assertOk();
+        $this->getJson('/api/admin/insights/overview', $headers)
+            ->assertOk()
+            ->assertJsonPath('attention.pending_users_count', 1)
+            ->assertJsonPath('attention.pending_users.0.name', 'Pending Pete');
+
+        $this->postJson("/api/admin/users/{$second}/reject", [], $headers)->assertOk();
+        $this->getJson('/api/admin/insights/overview', $headers)
+            ->assertOk()->assertJsonPath('attention.pending_users_count', 0);
+    }
+
     public function test_customer_funnel_ignores_staff_demo_and_sandbox_and_counts_every_venue(): void
     {
         $admin = $this->makeUser(['type' => 'admin']);
