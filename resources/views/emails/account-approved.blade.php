@@ -35,8 +35,9 @@
       </td>
       <td valign="top" style="padding:0 0 16px;font-size:14px;line-height:1.7;color:#374151;">
         <strong style="color:#111827;">Connect your exchange.</strong>
-        Binance and MEXC are live today. Create <strong>trade-only</strong> API keys — enable futures
-        trading, and never enable withdrawals.
+        Binance is live today; Bybit and MEXC are coming soon. Create <strong>trade-only</strong> API keys —
+        enable futures trading, and never enable withdrawals.
+        <a href="{{ $guideUrl }}" style="color:#b8862a;text-decoration:none;font-weight:600;">Step-by-step Binance guide →</a>
       </td>
     </tr>
     <tr>

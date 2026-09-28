@@ -133,6 +133,11 @@ return [
      *
      * Empty means nobody is told, and the notice is then SKIPPED (and logged)
      * rather than thrown at whatever the default sender happens to be.
+     *
+     * A COMMA-SEPARATED LIST (2026-09-28): every team notice — sign-ups,
+     * exchange connections, invoices issued / unpaid / paid — goes to each
+     * address. support@ first, then any teammate who asked to be told
+     * (AccountMail::teamRecipients()).
      */
     'admin_address' => env('MAIL_ADMIN_ADDRESS'),
 

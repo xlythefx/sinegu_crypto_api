@@ -31,6 +31,7 @@ use App\Http\Controllers\PublicMarketController;
 use App\Http\Controllers\PublicStatsController;
 use App\Http\Controllers\ReferralController;
 use App\Http\Controllers\SandboxController;
+use App\Http\Controllers\SandboxEmailController;
 use App\Http\Controllers\SandboxInvoiceController;
 use App\Http\Controllers\StrategyController;
 use App\Http\Controllers\StripeWebhookController;
@@ -332,6 +333,11 @@ Route::middleware('auth:sanctum')->group(function () {
         // path, not a flag, so the global wipe can never be a typo away.
         Route::delete('/sandbox/invoices', [SandboxInvoiceController::class, 'clearInvoices']);
         Route::delete('/sandbox/users/{uniId}/scenario-account', [SandboxInvoiceController::class, 'clearScenarioData']);
+
+        // Email templates: every email rendered with sample data, and preview
+        // copies mailed to a reviewer. Throttled — each call can send a dozen.
+        Route::get('/sandbox/emails', [SandboxEmailController::class, 'index']);
+        Route::post('/sandbox/emails/send', [SandboxEmailController::class, 'send'])->middleware('throttle:10,1');
 
         // phpMyAdmin-style DB console. The {table} constraint is load-bearing:
         // it makes a dotted cross-schema reference (`napai_db.users`) unroutable

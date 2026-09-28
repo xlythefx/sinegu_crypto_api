@@ -2,11 +2,8 @@
 
 namespace App\Console\Commands;
 
-use App\Mail\AccountApproved;
-use App\Mail\NewRegistrationNotice;
-use App\Mail\PasswordResetCode;
+use App\Services\Notifications\EmailCatalogue;
 use Illuminate\Console\Command;
-use Illuminate\Mail\Mailable;
 
 /**
  * Render every Pixel Alpha email to a static HTML file you can open in a
@@ -52,55 +49,21 @@ class MailPreview extends Command
     }
 
     /**
-     * One entry per email, with the sample data a reviewer needs to judge the
-     * layout: a long-ish name, a real-shaped uni_id, a six-digit code.
+     * One entry per email — the same catalogue Admin → Sandbox → Email
+     * Templates renders, so the two can never list different emails.
      *
      * @return list<array{slug:string,title:string,to:string,subject:string,html:string,note:string}>
      */
     private function samples(): array
     {
-        return [
-            $this->render(
-                'new-registration',
-                'New registration → admin',
-                (string) (config('mail.admin_address') ?: 'the admin address (MAIL_ADMIN_ADDRESS — not set)'),
-                'Sent the moment someone registers, by password or by Discord.',
-                new NewRegistrationNotice(
-                    name: 'Jonathan Meyer',
-                    email: 'jonathan.meyer@example.com',
-                    uniId: '9f3c1a7e-4b28-4d16-9f5a-2c8e0d71b3aa',
-                    via: 'Email + password',
-                    registeredAt: now()->format('d M Y, H:i').' UTC',
-                ),
-            ),
-            $this->render(
-                'account-approved',
-                'Account approved → user',
-                'the trader who was approved',
-                'Sent when an admin accepts a pending registration. A rejection sends nothing.',
-                new AccountApproved(name: 'Jonathan'),
-            ),
-            $this->render(
-                'password-reset-code',
-                'Password reset → user',
-                'whoever asked to reset their password',
-                'Already live. Shown here because it shares the same frame.',
-                new PasswordResetCode('Jonathan', '408217', 15),
-            ),
-        ];
-    }
-
-    /** @return array{slug:string,title:string,to:string,subject:string,html:string,note:string} */
-    private function render(string $slug, string $title, string $to, string $note, Mailable $mailable): array
-    {
-        return [
-            'slug' => $slug,
-            'title' => $title,
-            'to' => $to,
-            'note' => $note,
-            'subject' => (string) $mailable->envelope()->subject,
-            'html' => $mailable->render(),
-        ];
+        return array_map(fn (array $e) => [
+            'slug' => $e['slug'],
+            'title' => $e['title'].($e['live'] ? '' : ' (draft)'),
+            'to' => $e['to'],
+            'note' => trim($e['trigger'].' '.$e['note']),
+            'subject' => (string) $e['mail']->envelope()->subject,
+            'html' => $e['mail']->render(),
+        ], EmailCatalogue::all());
     }
 
     /**

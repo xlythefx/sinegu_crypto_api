@@ -2,11 +2,8 @@
 
 namespace App\Mail;
 
-use Illuminate\Bus\Queueable;
-use Illuminate\Mail\Mailable;
 use Illuminate\Mail\Mailables\Content;
 use Illuminate\Mail\Mailables\Envelope;
-use Illuminate\Queue\SerializesModels;
 
 /**
  * "Somebody registered and is waiting for approval" — to the admin desk, never
@@ -17,10 +14,8 @@ use Illuminate\Queue\SerializesModels;
  * template that can only be rendered from a real DB row cannot be reviewed
  * before it is sent.
  */
-class NewRegistrationNotice extends Mailable
+class NewRegistrationNotice extends PixelMail
 {
-    use Queueable, SerializesModels;
-
     public function __construct(
         public string $name,
         public string $email,
@@ -34,7 +29,7 @@ class NewRegistrationNotice extends Mailable
 
     public function envelope(): Envelope
     {
-        return new Envelope(subject: 'New Pixel Alpha registration — '.$this->name);
+        return new Envelope(subject: $this->subjectLine('New Pixel Alpha registration — '.$this->name));
     }
 
     public function content(): Content

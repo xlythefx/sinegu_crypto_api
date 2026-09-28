@@ -35,9 +35,9 @@ class AccountMail
      */
     public function registrationPending(UserCredential $user, string $via): void
     {
-        $to = trim((string) config('mail.admin_address'));
+        $to = self::teamRecipients();
 
-        if ($to === '') {
+        if ($to === []) {
             Log::warning('AccountMail: no mail.admin_address configured — registration notice skipped.', [
                 'uni_id' => $user->uni_id,
             ]);
@@ -56,6 +56,23 @@ class AccountMail
                 registeredAt: ($user->created_at ?? now())->format('d M Y, H:i').' UTC',
             )
         ));
+    }
+
+    /**
+     * Who receives team notices: MAIL_ADMIN_ADDRESS, a comma-separated list
+     * (support@ plus whoever else on the team asked to be told). Anything that
+     * is not a valid address is dropped rather than failing every send.
+     *
+     * @return list<string>
+     */
+    public static function teamRecipients(): array
+    {
+        $list = array_map('trim', explode(',', (string) config('mail.admin_address')));
+
+        return array_values(array_unique(array_filter(
+            $list,
+            fn (string $a) => filter_var($a, FILTER_VALIDATE_EMAIL) !== false,
+        )));
     }
 
     /** Tell the user their account was approved. Nothing is sent on rejection. */

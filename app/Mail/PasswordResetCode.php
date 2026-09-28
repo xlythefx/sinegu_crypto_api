@@ -2,21 +2,16 @@
 
 namespace App\Mail;
 
-use Illuminate\Bus\Queueable;
-use Illuminate\Mail\Mailable;
 use Illuminate\Mail\Mailables\Content;
 use Illuminate\Mail\Mailables\Envelope;
-use Illuminate\Queue\SerializesModels;
 
 /**
  * The six-digit password reset code. Sent synchronously — the user is
  * staring at the "check your email" screen, and a queued mail on a box with
  * no queue worker is a mail that never arrives.
  */
-class PasswordResetCode extends Mailable
+class PasswordResetCode extends PixelMail
 {
-    use Queueable, SerializesModels;
-
     public function __construct(
         public string $name,
         public string $code,
@@ -26,7 +21,7 @@ class PasswordResetCode extends Mailable
 
     public function envelope(): Envelope
     {
-        return new Envelope(subject: 'Your Pixel Alpha password reset code');
+        return new Envelope(subject: $this->subjectLine('Your Pixel Alpha password reset code'));
     }
 
     public function content(): Content

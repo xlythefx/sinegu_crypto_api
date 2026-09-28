@@ -66,6 +66,18 @@ class AccountMailTest extends EngineTestCase
         Mail::assertNotSent(AccountApproved::class);
     }
 
+    public function test_the_notice_goes_to_every_address_on_the_team_list(): void
+    {
+        // support@ plus a teammate; a junk entry is dropped, not fatal.
+        config(['mail.admin_address' => 'desk@pixel-alpha.test, partner@example.test ,not-an-address']);
+
+        $this->register()->assertStatus(201);
+
+        Mail::assertSent(NewRegistrationNotice::class, fn (NewRegistrationNotice $mail) => $mail->hasTo('desk@pixel-alpha.test')
+            && $mail->hasTo('partner@example.test')
+            && ! $mail->hasTo('not-an-address'));
+    }
+
     public function test_registration_still_succeeds_when_no_admin_address_is_configured(): void
     {
         config(['mail.admin_address' => null]);
