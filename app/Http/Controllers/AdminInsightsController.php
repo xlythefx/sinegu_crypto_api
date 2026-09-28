@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Http\Middleware\EnsureStaff;
 use App\Services\Admin\AdminInsights;
 use App\Services\Exchanges\ExchangeSchema;
 use Illuminate\Http\JsonResponse;
@@ -24,9 +25,36 @@ class AdminInsightsController extends Controller
 
     public function __construct(private AdminInsights $insights) {}
 
-    public function overview(): JsonResponse
+    /**
+     * Keys of the Overview a read-only collaborator never receives: invoice
+     * and payment figures (billing), the blocked-key list (account / key
+     * details) and the accounts paused for an overdue invoice.
+     */
+    public const LIMITED_HIDDEN_OVERVIEW_KEYS = [
+        'attention' => [
+            'blocked_keys', 'blocked_keys_count', 'overdue_invoices', 'unpaid_invoices',
+            'unmatched_transfers', 'paused_for_payment',
+        ],
+        'headline' => ['collected_this_month'],
+    ];
+
+    public function overview(Request $request): JsonResponse
     {
-        return $this->answer('overview', fn () => $this->insights->overview());
+        $response = $this->answer('overview', fn () => $this->insights->overview());
+
+        // One cache entry for everyone; the redaction is applied per request.
+        if (! EnsureStaff::isLimited($request)) {
+            return $response;
+        }
+
+        $data = $response->getData(true);
+        foreach (self::LIMITED_HIDDEN_OVERVIEW_KEYS as $section => $keys) {
+            if (isset($data[$section]) && is_array($data[$section])) {
+                $data[$section] = array_diff_key($data[$section], array_flip($keys));
+            }
+        }
+
+        return response()->json($data);
     }
 
     public function customers(): JsonResponse

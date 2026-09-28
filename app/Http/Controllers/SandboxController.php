@@ -9,6 +9,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
+use Illuminate\Validation\Rule;
 
 /**
  * Admin "sandbox" testing endpoints (auth:sanctum + admin middleware).
@@ -70,7 +71,7 @@ class SandboxController extends Controller
             'email' => ['nullable', 'email', 'unique:user_credentials,email'],
             'password' => ['nullable', 'string', 'min:6'],
             'status' => ['nullable', 'in:pending,active,suspended'],
-            'type' => ['nullable', 'in:user,admin,master,developer'],
+            'type' => ['nullable', Rule::in(AdminUserController::ROLES)],
         ]);
 
         $email = $validated['email'] ?? null;

@@ -175,6 +175,29 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::post('/set-main', [PayoutMethodController::class, 'setMain']);
     });
 
+    // Staff reads — the ONLY admin endpoints a read-only `collaborator` may
+    // reach (EnsureStaff = EnsureAdmin::ROLES + collaborator): the dashboard
+    // Overview, User Management (list + detail) and Strategies. GETs only;
+    // every write and every other read stays in the `admin` group below, so a
+    // route added there is closed to collaborators by default. The shared
+    // controllers redact fee settings and account / key details for them
+    // (EnsureStaff::isLimited). Each URI here must NOT also be registered in
+    // the admin group — a later identical route would silently replace it.
+    Route::prefix('admin')->middleware('staff')->group(function () {
+        Route::get('/insights/overview', [AdminInsightsController::class, 'overview']);
+        Route::get('/insights/platform', [AdminInsightsController::class, 'platform']);
+        Route::get('/insights/platform/daily-pnl', [AdminInsightsController::class, 'platformDailyPnl']);
+
+        Route::get('/users', [AdminController::class, 'users']);
+        Route::get('/users/{uniId}', [AdminUserController::class, 'show']);
+        Route::get('/users/{uniId}/summary', [AdminUserController::class, 'summary']);
+        Route::get('/users/{uniId}/daily-pnl', [AdminUserController::class, 'dailyPnl']);
+        Route::get('/users/{uniId}/analytics', [AnalyticsController::class, 'forUser']);
+
+        // The Strategies list AND the strategy detail page both read only this.
+        Route::get('/strategies', [StrategyController::class, 'index']);
+    });
+
     Route::prefix('admin')->middleware('admin')->group(function () {
         // Admin → To be Done: the owner's done-state per item slug. The items
         // themselves ship with the frontend, so the slug is shape-checked only.
@@ -190,28 +213,23 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::put('/past-positions/{id}', [AdminController::class, 'updatePastPosition']);
         Route::delete('/positions/{id}', [AdminController::class, 'deletePosition']);
         Route::delete('/past-positions/{id}', [AdminController::class, 'deletePastPosition']);
-        Route::get('/users', [AdminController::class, 'users']);
+        // GET /users, /users/{uniId}{,/summary,/daily-pnl,/analytics} live in
+        // the staff group above.
         Route::post('/users', [AdminUserController::class, 'store']);
         Route::post('/users/{uniId}/accept', [AdminController::class, 'acceptUser']);
         Route::post('/users/{uniId}/reject', [AdminController::class, 'rejectUser']);
-        Route::get('/users/{uniId}', [AdminUserController::class, 'show']);
-        Route::get('/users/{uniId}/summary', [AdminUserController::class, 'summary']);
-        Route::get('/users/{uniId}/daily-pnl', [AdminUserController::class, 'dailyPnl']);
         Route::get('/users/{uniId}/positions', [AdminUserController::class, 'positions']);
         Route::get('/users/{uniId}/invoices', [AdminUserController::class, 'invoices']);
-        Route::get('/users/{uniId}/analytics', [AnalyticsController::class, 'forUser']);
 
         // Admin dashboard tabs — read-only aggregates, cached a minute.
-        Route::get('/insights/overview', [AdminInsightsController::class, 'overview']);
-        Route::get('/insights/platform', [AdminInsightsController::class, 'platform']);
-        Route::get('/insights/platform/daily-pnl', [AdminInsightsController::class, 'platformDailyPnl']);
+        // overview / platform / platform/daily-pnl are in the staff group.
         Route::get('/insights/customers', [AdminInsightsController::class, 'customers']);
         Route::get('/insights/money', [AdminInsightsController::class, 'money']);
         Route::get('/insights/system', [AdminInsightsController::class, 'system']);
         Route::get('/insights/strategies', [AdminInsightsController::class, 'strategies']);
         Route::put('/users/{uniId}', [AdminUserController::class, 'update']);
 
-        Route::get('/strategies', [StrategyController::class, 'index']);
+        // GET /strategies is in the staff group; the toggle is admin-only.
         Route::put('/strategies/{key}', [StrategyController::class, 'setEnabled']);
 
         Route::get('/assets', [AssetController::class, 'index']);

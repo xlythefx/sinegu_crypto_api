@@ -15,6 +15,7 @@ return Application::configure(basePath: dirname(__DIR__))
     ->withMiddleware(function (Middleware $middleware): void {
         $middleware->alias([
             'admin' => \App\Http\Middleware\EnsureAdmin::class,
+            'staff' => \App\Http\Middleware\EnsureStaff::class,
             'developer' => \App\Http\Middleware\EnsureDeveloper::class,
             'engine' => \App\Http\Middleware\VerifyEngineSecret::class,
             'stripe.webhook' => \App\Http\Middleware\VerifyStripeSignature::class,

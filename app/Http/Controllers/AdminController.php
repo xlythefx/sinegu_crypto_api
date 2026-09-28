@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Http\Middleware\EnsureStaff;
 use App\Models\BinanceAccount;
 use App\Models\UserCredential;
 use App\Services\Discord\DiscordRoleSync;
@@ -442,8 +443,12 @@ class AdminController extends Controller
      * Every user_credentials row (master / admin / user) with their exchange
      * accounts — feeds the User Management page.
      */
-    public function users(): JsonResponse
+    public function users(Request $request): JsonResponse
     {
+        // A read-only collaborator gets the list without fee settings and
+        // without the masked API key on each account.
+        $limited = EnsureStaff::isLimited($request);
+
         // Pending first (the approval queue), then newest. CASE rather than
         // MySQL's FIELD() so the same query runs on the SQLite test database.
         $users = UserCredential::orderByRaw("CASE WHEN status = 'pending' THEN 0 ELSE 1 END")
@@ -483,12 +488,15 @@ class AdminController extends Controller
             ->sortByDesc(fn (array $a) => (string) $a['created_at'])
             ->groupBy('uni_id')
             ->map(fn ($rows) => $rows
-                ->map(fn (array $a) => array_diff_key($a, ['uni_id' => 1, 'created_at' => 1]))
+                ->map(fn (array $a) => array_diff_key(
+                    $a,
+                    ['uni_id' => 1, 'created_at' => 1] + ($limited ? ['api_key' => 1] : []),
+                ))
                 ->values());
 
         return response()->json([
             'success' => true,
-            'users' => $users->map(fn ($u) => [
+            'users' => $users->map(fn ($u) => array_diff_key([
                 'uni_id' => $u->uni_id,
                 'name' => $u->name,
                 'email' => $u->email,
@@ -499,7 +507,7 @@ class AdminController extends Controller
                 'created_at' => $u->created_at?->toISOString(),
                 'last_activity' => $u->last_activity?->toISOString(),
                 'accounts' => $accounts->get($u->uni_id, collect())->values(),
-            ])->values(),
+            ], $limited ? ['realized_percentage' => 1, 'unrealized_percentage' => 1] : []))->values(),
         ]);
     }
 

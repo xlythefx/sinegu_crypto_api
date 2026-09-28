@@ -2,6 +2,8 @@
 
 namespace App\Http\Controllers;
 
+use App\Http\Middleware\EnsureAdmin;
+use App\Http\Middleware\EnsureStaff;
 use App\Models\Invoice;
 use App\Models\ReferralTracking;
 use App\Models\UserCredential;
@@ -29,6 +31,21 @@ use Illuminate\Validation\Rule;
  */
 class AdminUserController extends Controller
 {
+    /** Every value `user_credentials.type` may hold — what an admin may assign. */
+    public const ROLES = ['user', ...EnsureAdmin::ROLES, EnsureStaff::COLLABORATOR];
+
+    /**
+     * Keys a read-only collaborator never receives from show() / store() /
+     * update()'s profile block: the negotiated fee settings and the referral
+     * count (affiliate business). The account list is dropped separately.
+     */
+    public const LIMITED_HIDDEN_PROFILE_KEYS = [
+        'realized_percentage', 'unrealized_percentage', 'affiliate_percentage', 'referrals_count',
+    ];
+
+    /** Billing-derived summary keys a collaborator never receives. */
+    public const LIMITED_HIDDEN_SUMMARY_KEYS = ['hwm', 'commissions'];
+
     public function __construct(
         private UserStatsService $stats,
         private InvoiceService $invoices,
@@ -61,11 +78,24 @@ class AdminUserController extends Controller
      * Profile block + every exchange account (incl. demo / disabled /
      * disconnected) with per-account realized P&L and high-water mark.
      */
-    public function show(string $uniId): JsonResponse
+    public function show(Request $request, string $uniId): JsonResponse
     {
         $user = UserCredential::find($uniId);
         if (! $user) {
             return $this->userNotFound();
+        }
+
+        // A collaborator sees the profile only: no fee settings, no referral
+        // count, and no account list at all (names, masked keys, balances,
+        // deposits, HWM are account details they are not cleared for).
+        if (EnsureStaff::isLimited($request)) {
+            return response()->json([
+                'success' => true,
+                'user' => array_diff_key(
+                    $this->userPayload($user),
+                    array_flip(self::LIMITED_HIDDEN_PROFILE_KEYS),
+                ),
+            ]);
         }
 
         $accounts = $this->stats->allAccounts($uniId);
@@ -162,34 +192,42 @@ class AdminUserController extends Controller
 
         $initialDeposit = (float) $accounts->sum('initial_deposit');
 
+        $summary = [
+            'exchange' => $exchange,
+            'accounts' => $accounts->count(),
+            'balance' => round($balance, 2),
+            'unrealized_pnl' => round($unrealized, 2),
+            'realized_pnl' => round($realized, 2),
+            'total_pnl' => round($realized + $unrealized, 2),
+            'equity' => round($equity, 2),
+            'net_deposits' => round($netDeposits, 2),
+            'pct_base' => round($pctBase, 2),
+            'hwm' => round($hwm, 2),
+            'metrics' => [
+                'total_trades' => $tradeCount,
+                'wins' => $wins->count(),
+                'losses' => $losses->count(),
+                'win_rate' => $tradeCount ? round($wins->count() / $tradeCount * 100, 1) : null,
+                'profit_factor' => $grossLoss > 0 ? round($grossWin / $grossLoss, 2) : null,
+                'max_win_streak_days' => $streaks['max_win_streak_days'],
+                'max_loss_streak_days' => $streaks['max_loss_streak_days'],
+            ],
+            'capital_flow' => $flow + [
+                'initial_deposit' => round($initialDeposit, 2),
+                'capital' => round($initialDeposit + $flow['net_flow'], 2),
+            ],
+            'commissions' => $this->stats->commissions($uniId, $exchange),
+        ];
+
+        // The HWM and the commission totals come off the user's invoices,
+        // which a collaborator is not cleared to see.
+        if (EnsureStaff::isLimited($request)) {
+            $summary = array_diff_key($summary, array_flip(self::LIMITED_HIDDEN_SUMMARY_KEYS));
+        }
+
         return response()->json([
             'success' => true,
-            'summary' => [
-                'exchange' => $exchange,
-                'accounts' => $accounts->count(),
-                'balance' => round($balance, 2),
-                'unrealized_pnl' => round($unrealized, 2),
-                'realized_pnl' => round($realized, 2),
-                'total_pnl' => round($realized + $unrealized, 2),
-                'equity' => round($equity, 2),
-                'net_deposits' => round($netDeposits, 2),
-                'pct_base' => round($pctBase, 2),
-                'hwm' => round($hwm, 2),
-                'metrics' => [
-                    'total_trades' => $tradeCount,
-                    'wins' => $wins->count(),
-                    'losses' => $losses->count(),
-                    'win_rate' => $tradeCount ? round($wins->count() / $tradeCount * 100, 1) : null,
-                    'profit_factor' => $grossLoss > 0 ? round($grossWin / $grossLoss, 2) : null,
-                    'max_win_streak_days' => $streaks['max_win_streak_days'],
-                    'max_loss_streak_days' => $streaks['max_loss_streak_days'],
-                ],
-                'capital_flow' => $flow + [
-                    'initial_deposit' => round($initialDeposit, 2),
-                    'capital' => round($initialDeposit + $flow['net_flow'], 2),
-                ],
-                'commissions' => $this->stats->commissions($uniId, $exchange),
-            ],
+            'summary' => $summary,
         ]);
     }
 
@@ -366,7 +404,7 @@ class AdminUserController extends Controller
             'name' => ['required', 'string', 'max:255'],
             'email' => ['required', 'email', 'max:255', 'unique:user_credentials,email'],
             'password' => ['required', 'string', 'min:8'],
-            'type' => ['sometimes', Rule::in(['user', 'admin', 'master', 'developer'])],
+            'type' => ['sometimes', Rule::in(self::ROLES)],
             'status' => ['sometimes', Rule::in(['pending', 'active', 'suspended'])],
             'realized_percentage' => ['sometimes', 'numeric', 'min:0', 'max:100'],
             'unrealized_percentage' => ['sometimes', 'numeric', 'min:0', 'max:100'],
@@ -431,16 +469,19 @@ class AdminUserController extends Controller
             'unrealized_percentage' => ['sometimes', 'numeric', 'min:0', 'max:100'],
             'affiliate_percentage' => ['sometimes', 'numeric', 'min:0', 'max:100'],
             'status' => ['sometimes', Rule::in(['active', 'suspended'])],
-            'type' => ['sometimes', Rule::in(['user', 'admin', 'master', 'developer'])],
+            'type' => ['sometimes', Rule::in(self::ROLES)],
         ]);
 
         if (isset($validated['type']) && $validated['type'] !== $user->type) {
-            // Changing your own role is allowed — dropping yourself to `user`
-            // is not, because it revokes the very access you would need to undo
-            // it, and with one admin left it locks the portal for everyone.
-            if ($request->user()->uni_id === $user->uni_id && $validated['type'] === 'user') {
+            // Changing your own role is allowed — dropping yourself out of the
+            // admin roles is not (to `user`, or to the read-only
+            // `collaborator`), because it revokes the very access you would
+            // need to undo it, and with one admin left it locks the portal for
+            // everyone.
+            if ($request->user()->uni_id === $user->uni_id
+                && ! in_array($validated['type'], EnsureAdmin::ROLES, true)) {
                 return $this->statusRejected(
-                    'You cannot demote yourself to a plain user — you would lose admin access. Ask another admin to do it.'
+                    'You cannot demote yourself out of the admin roles — you would lose admin access. Ask another admin to do it.'
                 );
             }
 
