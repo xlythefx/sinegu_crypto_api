@@ -165,7 +165,11 @@ class AnalyticsController extends Controller
         // built from EVERY trade and flow, never $past: the chips and the date
         // range narrow what is MEASURED, not the money that was at work.
         $flowByDay = UserStatsService::flowsByDay($transactions);
-        ['start' => $dailyCapital, 'end' => $dailyBalance] = UserStatsService::capitalWalk($everyTrade, $flowByDay, $accounts);
+        [
+            'start' => $dailyCapital,
+            'end' => $dailyBalance,
+            'unrecorded_fees' => $dailyUnrecordedFees,
+        ] = UserStatsService::capitalWalk($everyTrade, $flowByDay, $accounts);
         $initialDeposit = (float) $accounts->sum('initial_deposit');
 
         $tradingDays = $dailyPnl->count();
@@ -402,6 +406,10 @@ class AnalyticsController extends Controller
                 'daily_pnl_net' => $dailyPnlNet,
                 'daily_capital' => $dailyCapital,
                 'daily_balance' => $dailyBalance,
+                // Estimated commission on trades closed before fees were
+                // recorded (TradingFee::NET_SINCE), per day — already inside
+                // daily_balance, broken out so it can be shown.
+                'daily_unrecorded_fees' => $dailyUnrecordedFees,
                 'daily_flows' => $flowByDay,
                 // Capital the account held before any transfer we have on
                 // record — the walk's seed. NOT `baseline`, which is net flows

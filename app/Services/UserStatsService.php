@@ -778,7 +778,13 @@ class UserStatsService
      * date and left out `initial_deposit`, so a range ending in August showed
      * September's deposits.
      *
-     * @return array{start: array<string, float>, end: array<string, float>}
+     * `unrecorded_fees` is the per-day commission the walk charged to capital
+     * for gross rows — returned so the Date Range card can print it as its
+     * own line. Without it the card's "trading" figure silently carried the
+     * estimate and disagreed with the realized P&L beside it (−984 against
+     * −157 for August on the master).
+     *
+     * @return array{start: array<string, float>, end: array<string, float>, unrecorded_fees: array<string, float>}
      */
     public static function capitalWalk(
         Collection $trades,
@@ -820,7 +826,15 @@ class UserStatsService
             $end[$day] = round($capital, 2);
         }
 
-        return ['start' => $start, 'end' => $end];
+        $unrecorded = [];
+        foreach ($unchargedFeeByDay as $day => $fee) {
+            if ($fee > 0) {
+                $unrecorded[$day] = round($fee, 2);
+            }
+        }
+        ksort($unrecorded);
+
+        return ['start' => $start, 'end' => $end, 'unrecorded_fees' => $unrecorded];
     }
 
     /**

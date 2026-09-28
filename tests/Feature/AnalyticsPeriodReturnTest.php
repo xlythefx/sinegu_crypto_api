@@ -168,6 +168,21 @@ class AnalyticsPeriodReturnTest extends EngineTestCase
         $this->assertEquals(10499.89, $capital['2026-08-20']);
     }
 
+    public function test_the_estimated_fee_on_gross_rows_is_broken_out_per_day(): void
+    {
+        $this->flow('2026-08-01 09:00:00', 10000);
+        $this->trade('2026-08-10 12:00:00', 500, null);
+        $this->trade('2026-08-20 12:00:00', 500, 0.0);
+
+        $a = $this->analytics();
+
+        // Only the gross row's day carries one: a recorded fee (even 0) is
+        // already in its P&L and must not be counted twice.
+        $this->assertEquals(['2026-08-10' => 0.11], $a['daily_unrecorded_fees']);
+        // And it is the exact gap between the balance and the P&L on that day.
+        $this->assertEquals(10000 + 500 - 0.11, $a['daily_balance']['2026-08-10']);
+    }
+
     /* ======= daily_balance — what the Date Range card's end date held ======= */
 
     public function test_balance_on_a_date_ignores_transfers_made_after_it(): void
