@@ -622,8 +622,9 @@ class UserStatsService
      */
     public function dailyPnlDays(string $uniId, ?string $exchange = null): array
     {
+        $accounts = $this->displayAccounts($uniId, $exchange);
         $past = self::withFeeBasis(
-            $this->pastPositions($this->displayAccounts($uniId, $exchange), [
+            $this->pastPositions($accounts, [
                 // `id` and `exit_price` are what let an admin correct a row
                 // straight from the calendar's day popup (PUT/DELETE
                 // /admin/past-positions/{id}); the write itself is still gated
@@ -635,14 +636,37 @@ class UserStatsService
             ])->sortByDesc('closed_at')->values()
         );
 
+        // The balance each day STARTED with — after that day's transfers,
+        // before its trades — so a cell's percentage is that day's P&L over
+        // the money actually at work that day. Dividing by today's balance
+        // (what the toggle did before) made a deposit rewrite the percentage
+        // of every day already shown. Same walk as Performance Analytics'
+        // `daily_capital`, so the two pages agree on any given day.
+        ['start' => $startBalance] = self::capitalWalk(
+            $past,
+            self::flowsByDay($this->transactions($accounts, ['type', 'amount', 'created_at'])),
+            $accounts,
+        );
+        $pctOf = fn (float $pnl, ?float $base) => $base !== null && $base > 0
+            ? round($pnl / $base * 100, 2)
+            : null;
+
         // The calendar is the one before-fees-era screen that keeps AFTER fees
         // as its headline: a cell is "what landed that day". `total_gross` and
         // `fees` ride along for the hover.
         $days = [];
         foreach ($past->groupBy(fn ($t) => substr((string) $t->closed_at, 0, 10)) as $date => $trades) {
+            $total = round((float) $trades->sum('pnl_net'), 2);
+            $totalGross = round((float) $trades->sum('pnl_gross'), 2);
+            $balance = $startBalance[$date] ?? null;
             $days[$date] = [
-                'total' => round((float) $trades->sum('pnl_net'), 2),
-                'total_gross' => round((float) $trades->sum('pnl_gross'), 2),
+                'total' => $total,
+                'total_gross' => $totalGross,
+                // Null when the walk has no positive capital for the day (an
+                // account with no deposit on record) — never a divide-by-pennies.
+                'start_balance' => $balance,
+                'pct' => $pctOf($total, $balance),
+                'pct_gross' => $pctOf($totalGross, $balance),
                 'fees' => round((float) $trades->sum('pnl_fee'), 2),
                 'wins' => $trades->where('pnl_net', '>', 0)->count(),
                 'losses' => $trades->where('pnl_net', '<', 0)->count(),
@@ -669,6 +693,117 @@ class UserStatsService
         }
 
         return $days;
+    }
+
+    /**
+     * Net transfer per day, signed — a deposit positive, a withdrawal
+     * negative, both netted when they land on the same day. Only days that
+     * actually moved money appear, ascending.
+     *
+     * It is the capital chart's whole input, and the flow half of the walk
+     * below. One map, because a day's transfers must mean the same thing to
+     * the chart a customer reads and to the denominator it is measured on.
+     *
+     * @return array<string, float>
+     */
+    public static function flowsByDay(Collection $transactions): array
+    {
+        $flowByDay = [];
+        foreach ($transactions as $tx) {
+            $day = Carbon::parse($tx->created_at)->toDateString();
+            $delta = (float) $tx->amount * ($tx->type === 'WITHDRAWAL' ? -1 : 1);
+            $flowByDay[$day] = round(($flowByDay[$day] ?? 0.0) + $delta, 2);
+        }
+        ksort($flowByDay);
+
+        return $flowByDay;
+    }
+
+    /**
+     * Capital at the START of every day that carries a trade or a transfer —
+     * after that day's deposits/withdrawals, before its P&L. One entry per
+     * such day, keyed 'YYYY-MM-DD'.
+     *
+     * Shared by Performance Analytics (`daily_capital` / `daily_balance`)
+     * and the P&L calendar (each cell's percentage), so a day reads the same
+     * on both. It exists so the Performance card can report a period return
+     * that a deposit cannot move. Dividing a window's P&L by one all-time baseline
+     * made a September deposit change the percentage August had already
+     * reported; chaining each day's P&L over the capital THAT day started
+     * with cannot, because a flow only changes the days after it.
+     *
+     * The walk is deliberately the one {@see PublicStatsController} publishes,
+     * so the two screens differ in scope and not in method: flows land before
+     * the day's trades, and capital compounds with realized P&L.
+     *
+     * Two details are load-bearing:
+     * - **Seeded from `initial_deposit`**, plus flows — the same capital base
+     *   `BinancePnlSource` bills on. `{exchange}_transactions` holds only
+     *   transfers the poller has SEEN, so an account funded before it was
+     *   connected has none; a walk starting at zero divides day one's P&L by
+     *   the pennies that happened to precede it, which is how the landing page
+     *   once published −980% against a real +46.6%.
+     * - **A gross row's commission comes off the CAPITAL.** Rows before
+     *   `TradingFee::NET_SINCE` keep gross `realized_pnl` by the 2026-09-11
+     *   decision, but the exchange still took the fee, so a walk that
+     *   compounds them accumulates money the account never had (1,103 adrift
+     *   on the live master). Estimated exactly as `TradingFee::estimate` does,
+     *   at the row's own venue rate; `realized_pnl` is never touched.
+     *
+     * Days are UTC, like every other day bucket on this page — NOT the public
+     * track record's Asia/Manila days, so the two use the same method on
+     * slightly different boundaries and will not tie out to the decimal.
+     *
+     * `end` is the same walk read one step later — the balance the day CLOSED
+     * on, after its transfers and its P&L. It is what the Date Range card
+     * prints as the balance on its end date: the all-time net flow plus P&L to
+     * date (what it printed before) counted every transfer made AFTER that
+     * date and left out `initial_deposit`, so a range ending in August showed
+     * September's deposits.
+     *
+     * @return array{start: array<string, float>, end: array<string, float>}
+     */
+    public static function capitalWalk(
+        Collection $trades,
+        array $flowByDay,
+        Collection $accounts,
+    ): array {
+        $pnlByDay = [];
+        $unchargedFeeByDay = [];
+        foreach ($trades as $trade) {
+            if ($trade->pnl_net === null) {
+                continue;
+            }
+            $day = Carbon::parse($trade->closed_at)->toDateString();
+            $pnlByDay[$day] = ($pnlByDay[$day] ?? 0.0) + (float) $trade->pnl_net;
+
+            if ($trade->exchange_fee === null) {
+                $uncharged = TradingFee::estimate(
+                    (float) $trade->position_amt,
+                    $trade->exit_price === null ? null : (float) $trade->exit_price,
+                    (string) $trade->exchange,
+                );
+                $unchargedFeeByDay[$day] = ($unchargedFeeByDay[$day] ?? 0.0) + ($uncharged ?? 0.0);
+            }
+        }
+
+        $days = array_unique(array_merge(array_keys($pnlByDay), array_keys($flowByDay)));
+        sort($days);
+
+        $capital = (float) $accounts->sum('initial_deposit');
+        $start = [];
+        $end = [];
+        foreach ($days as $day) {
+            $capital += $flowByDay[$day] ?? 0.0;
+            // Recorded even when non-positive: the card's `capital > 0` guard
+            // is what drops such a day out of the chain, and a missing key
+            // would instead read as "no data for this day".
+            $start[$day] = round($capital, 2);
+            $capital += ($pnlByDay[$day] ?? 0.0) - ($unchargedFeeByDay[$day] ?? 0.0);
+            $end[$day] = round($capital, 2);
+        }
+
+        return ['start' => $start, 'end' => $end];
     }
 
     /**
