@@ -51,8 +51,4 @@
   </table>
 
   @include('emails.partials.button', ['url' => $guideUrl, 'label' => 'Open the connection guide →'])
-
-  <p style="margin:0 0 20px;font-size:13px;line-height:1.7;color:#6b7280;">
-    Trading is leveraged and carries real risk — only fund an account with money you can afford to lose.
-  </p>
 @endsection

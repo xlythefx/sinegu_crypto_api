@@ -14,7 +14,7 @@
   </h1>
 
   <p style="margin:0 0 20px;font-size:15px;line-height:1.7;color:#374151;">
-    Hi {{ $name }}, the strategies made you new profit on {{ $exchange }} in {{ $period }}.
+    Hi {{ $name }}, the strategies made you new profit in {{ $period }}.
     Our fee is {{ $rate }}% of that profit — nothing on anything else.
   </p>
 
