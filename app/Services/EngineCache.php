@@ -65,6 +65,26 @@ class EngineCache
     }
 
     /**
+     * Sync open positions NOW (the poller does it every 300 s). Null means
+     * every account — Admin → Trading Positions' "Refresh"; a list narrows it
+     * to those keys (one user's refresh). An empty list is not "everything".
+     *
+     * @param  list<string>|null  $apiKeys
+     */
+    public function syncPositions(?array $apiKeys = null, int $timeout = 30): bool
+    {
+        if ($apiKeys === []) {
+            return false;
+        }
+
+        return $this->ping(
+            'refresh-positions',
+            $apiKeys === null ? [] : ['api_keys' => array_values($apiKeys)],
+            $timeout,
+        );
+    }
+
+    /**
      * One account's full exchange ledger, read by the engine — the only
      * process holding the key and allow-listed at the exchange. Unlike the
      * pings above this RETURNS data, and a failure is reported rather than

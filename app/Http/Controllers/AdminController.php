@@ -6,6 +6,7 @@ use App\Http\Middleware\EnsureStaff;
 use App\Models\BinanceAccount;
 use App\Models\UserCredential;
 use App\Services\Discord\DiscordRoleSync;
+use App\Services\EngineCache;
 use App\Services\Exchanges\ExchangeSchema;
 use App\Services\Notifications\AccountMail;
 use App\Services\Pnl\TradingFee;
@@ -111,6 +112,27 @@ class AdminController extends Controller
             'success' => true,
             'days' => $this->stats->dailyPnlDays($master->uni_id),
         ]);
+    }
+
+    /**
+     * POST /api/admin/positions/refresh
+     *
+     * Admin → Trading Positions' "Refresh". The page reads the DB and the
+     * positions poller rewrites it every 300 s, so re-reading alone showed
+     * nothing new. This asks the engine to read every account's open
+     * positions now; the page re-reads once it answers. One exchange read per
+     * account — throttled at the route.
+     */
+    public function refreshPositions(EngineCache $engine): JsonResponse
+    {
+        $reached = $engine->syncPositions(null);
+
+        return response()->json([
+            'success' => $reached,
+            'message' => $reached
+                ? 'Open positions read from the exchanges.'
+                : 'Could not reach the trading engine — showing the last synced positions.',
+        ], $reached ? 200 : 503);
     }
 
     /**

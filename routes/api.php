@@ -210,6 +210,8 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/daily-pnl', [AdminController::class, 'dailyPnl']);
         Route::get('/performance', [AdminController::class, 'performance']);
         Route::get('/positions', [AdminController::class, 'positions']);
+        // Real exchange reads (one per account), so throttled per admin.
+        Route::post('/positions/refresh', [AdminController::class, 'refreshPositions'])->middleware('throttle:6,1');
         Route::put('/positions/{id}', [AdminController::class, 'updatePosition']);
         Route::put('/past-positions/{id}', [AdminController::class, 'updatePastPosition']);
         Route::delete('/positions/{id}', [AdminController::class, 'deletePosition']);
@@ -229,6 +231,8 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/insights/system', [AdminInsightsController::class, 'system']);
         Route::get('/insights/strategies', [AdminInsightsController::class, 'strategies']);
         Route::put('/users/{uniId}', [AdminUserController::class, 'update']);
+        Route::delete('/users/{uniId}', [AdminUserController::class, 'destroy']);
+        Route::post('/users/{uniId}/refresh', [AdminUserController::class, 'refresh'])->middleware('throttle:10,1');
 
         // GET /strategies is in the staff group; the toggle is admin-only.
         Route::put('/strategies/{key}', [StrategyController::class, 'setEnabled']);

@@ -8,11 +8,13 @@ use App\Models\Invoice;
 use App\Models\ReferralTracking;
 use App\Models\UserCredential;
 use App\Services\Discord\DiscordRoleSync;
+use App\Services\EngineCache;
 use App\Services\InvoiceService;
 use App\Services\Exchanges\ExchangeSchema;
 use App\Services\UserStatsService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
 
@@ -136,8 +138,122 @@ class AdminUserController extends Controller
                     'hwm' => round((float) ($hwmByAccount[$a->id] ?? 0), 2),
                     'deleted_at' => $a->deleted_at?->toISOString(),
                 ])->values(),
+                'delete_blockers' => $this->deleteBlockers($user, $request->user()->uni_id),
             ],
         ]);
+    }
+
+    /**
+     * POST /api/admin/users/{uniId}/refresh
+     *
+     * Read this user's connected accounts from their exchanges NOW — balance
+     * and open positions — instead of waiting for the pollers (300 s). Scoped
+     * to the user's keys, so one press costs one exchange read per account.
+     * The page then re-reads its figures from the DB the engine just wrote.
+     */
+    public function refresh(string $uniId, EngineCache $engine): JsonResponse
+    {
+        if (! UserCredential::find($uniId)) {
+            return $this->userNotFound();
+        }
+
+        $keys = $this->stats->allAccounts($uniId)
+            ->whereNull('deleted_at')
+            ->pluck('api_key')->filter()->values()->all();
+
+        if ($keys === []) {
+            return response()->json([
+                'success' => true,
+                'accounts' => 0,
+                'message' => 'No connected exchange account — nothing to read.',
+            ]);
+        }
+
+        $balances = $engine->syncBalances($keys, 30);
+        $positions = $engine->syncPositions($keys, 30);
+        $reached = $balances || $positions;
+
+        return response()->json([
+            'success' => $reached,
+            'accounts' => count($keys),
+            'message' => $reached
+                ? 'Balances and positions read from the exchange.'
+                : 'Could not reach the trading engine — showing the last synced figures.',
+        ], $reached ? 200 : 503);
+    }
+
+    /**
+     * DELETE /api/admin/users/{uniId}
+     *
+     * Permanently remove a SUSPENDED user who has nothing on record — the
+     * rejected sign-up, the test account. Guards are re-evaluated here, never
+     * trusted from the page: a user with invoices, any exchange account
+     * (connected or disconnected — deleting the user would cascade those rows
+     * and orphan their trades and transfers) or referred users is refused,
+     * because each of those is history someone else reads.
+     */
+    public function destroy(Request $request, string $uniId): JsonResponse
+    {
+        $user = UserCredential::find($uniId);
+        if (! $user) {
+            return $this->userNotFound();
+        }
+
+        $blockers = $this->deleteBlockers($user, $request->user()->uni_id);
+        if ($blockers !== []) {
+            return response()->json([
+                'success' => false,
+                'error_code' => 'NOT_DELETABLE',
+                'message' => $blockers[0],
+                'blockers' => $blockers,
+            ], 422);
+        }
+
+        DB::transaction(function () use ($user) {
+            $user->tokens()->delete();
+            $user->delete();
+        });
+
+        Cache::forget(AdminInsightsController::CACHE_PREFIX.'overview');
+        Cache::forget(AdminInsightsController::CACHE_PREFIX.'customers');
+
+        return response()->json(['success' => true, 'message' => 'User deleted.']);
+    }
+
+    /**
+     * Why this user may not be deleted — empty when they may. Shown on the
+     * page before the button is pressed, and checked again by destroy().
+     *
+     * @return list<string>
+     */
+    private function deleteBlockers(UserCredential $user, string $actorUniId): array
+    {
+        if ($user->type === 'master') {
+            return ['The master account cannot be deleted.'];
+        }
+        if ($user->uni_id === $actorUniId) {
+            return ['You cannot delete your own account.'];
+        }
+        if ($user->status !== 'suspended') {
+            return ['Only a suspended account can be deleted.'];
+        }
+
+        $blockers = [];
+        $invoices = Invoice::where('user_id', $user->uni_id)->count();
+        if ($invoices > 0) {
+            $blockers[] = "Has {$invoices} invoice".($invoices === 1 ? '' : 's').' — billing records are kept.';
+        }
+        $accounts = $this->stats->allAccounts($user->uni_id)->count();
+        if ($accounts > 0) {
+            $blockers[] = "Has {$accounts} exchange account".($accounts === 1 ? '' : 's')
+                .' on record (connected or disconnected) — their trade history is kept.';
+        }
+        $referred = ReferralTracking::where('referrer_uni_id', $user->uni_id)->count();
+        if ($referred > 0) {
+            $blockers[] = "Referred {$referred} user".($referred === 1 ? '' : 's').'.';
+        }
+
+        return $blockers;
     }
 
     /**
