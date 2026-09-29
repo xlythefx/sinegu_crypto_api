@@ -2,12 +2,14 @@
 
 namespace App\Services\Admin;
 
+use App\Models\BinanceAccount;
 use App\Models\ExchangeAccount;
 use App\Models\Invoice;
 use App\Models\TradeLog;
 use App\Models\TronTransfer;
 use App\Models\UserCredential;
 use App\Services\Exchanges\ExchangeSchema;
+use App\Services\InvoiceService;
 use App\Services\Payments\PaymentEnvironment;
 use App\Services\Payments\TronGateway;
 use App\Services\UserStatsService;
@@ -41,6 +43,7 @@ class AdminInsights
     public function __construct(
         private PaymentEnvironment $env,
         private UserStatsService $stats,
+        private InvoiceService $invoices,
     ) {}
 
     // ------------------------------------------------------------------
@@ -414,6 +417,74 @@ class AdminInsights
                 'ignored' => TronTransfer::where('status', TronTransfer::STATUS_IGNORED)->count(),
                 'settled' => TronTransfer::where('status', TronTransfer::STATUS_SETTLED)->count(),
             ],
+            'forecast' => $this->forecast($now),
+        ];
+    }
+
+    /**
+     * "Future invoice": what the running month would bill if it closed NOW.
+     *
+     * Every figure comes from InvoiceService::computeForAccount — the same
+     * math `generateForAccount` persists, run without writing — so the
+     * forecast is the invoice the customer would get, not a second estimate
+     * of it. REALIZED fee only (owner, 2026-09-29): the unrealized share
+     * swings with open positions until the month closes. The high-water-mark
+     * gate is still the invoice's own (equity incl. open P&L above the HWM),
+     * because that is what decides whether a fee is charged at all.
+     *
+     * Customers' LIVE, real accounts only. An exchange with no P&L source
+     * yet (MEXC, Bybit) is counted, not guessed at.
+     */
+    private function forecast(Carbon $now): array
+    {
+        $month = $now->format('Y-m');
+        $live = $this->customerAccounts()->whereNull('deleted_at');
+        $billable = $live->filter(fn ($a) => InvoiceService::canInvoice($a->exchange));
+        $users = UserCredential::whereIn('uni_id', $live->pluck('uni_id')->unique())
+            ->get(['uni_id', 'name', 'realized_percentage', 'unrealized_percentage'])
+            ->keyBy('uni_id');
+        $models = BinanceAccount::whereIn('id', $billable->where('exchange', 'binance')->pluck('id'))
+            ->get()->keyBy('id');
+
+        $rows = $billable->map(function ($a) use ($month, $users, $models) {
+            $model = $models[$a->id] ?? null;
+            if (! $model) {
+                return null;
+            }
+            $user = $users[$a->uni_id] ?? null;
+            $rate = (float) ($user?->realized_percentage ?? 20);
+            $inv = $this->invoices->computeForAccount($model, $month, [
+                'realized' => $rate,
+                'unrealized' => (float) ($user?->unrealized_percentage ?? 6),
+            ], $a->exchange);
+            $realized = (float) $inv['realized_pnl'];
+
+            return [
+                'uni_id' => $a->uni_id,
+                'name' => $user?->name ?? $a->uni_id,
+                'account' => $a->name,
+                'exchange' => $a->exchange,
+                'realized_pnl' => round($realized, 2),
+                'rate' => $rate,
+                'hwm' => round((float) $inv['hwm_before'], 2),
+                'equity' => round((float) $inv['equity_end'], 2),
+                'fee' => round((float) $inv['fee_realized'], 2),
+                'status' => $realized <= 0 ? 'no_profit'
+                    : ((float) $inv['equity_end'] > (float) $inv['hwm_before'] ? 'billable' : 'below_hwm'),
+            ];
+        })->filter()->sortByDesc(fn ($r) => [$r['fee'], $r['realized_pnl']])->values();
+
+        return [
+            'month' => $month,
+            'as_of' => $now->toIso8601String(),
+            'total' => round($rows->sum('fee'), 2),
+            'realized_pnl' => round($rows->sum('realized_pnl'), 2),
+            'billable_accounts' => $rows->where('status', 'billable')->count(),
+            'accounts' => $rows->all(),
+            'not_supported' => $live->reject(fn ($a) => InvoiceService::canInvoice($a->exchange))
+                ->countBy('exchange')
+                ->map(fn ($n, $ex) => ['exchange' => $ex, 'accounts' => $n])
+                ->values()->all(),
         ];
     }
 

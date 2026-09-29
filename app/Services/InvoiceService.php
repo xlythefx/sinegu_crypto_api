@@ -69,6 +69,36 @@ class InvoiceService
             throw new \DomainException($reason);
         }
 
+        $attributes = $this->computeForAccount($account, $monthYear, $rates, $exchange);
+
+        $key = ['exchange' => $exchange, 'account_id' => $account->id, 'month_year' => $monthYear];
+        $existing = Invoice::where($key)->first();
+
+        // Regenerating a month refreshes the figures but must never wipe a real
+        // payment — a paid row keeps its status and its provenance.
+        if (! $existing || $existing->status !== 'paid') {
+            $attributes['status'] = $attributes['total_fee'] > 0 ? 'pending' : 'paid';
+        }
+
+        return Invoice::updateOrCreate($key, $attributes);
+    }
+
+    /**
+     * The invoice figures for an account + month, WITHOUT writing anything —
+     * the one place the fee math lives. `generateForAccount` persists it; the
+     * admin Money tab's "Future invoice" forecast (AdminInsights::forecast)
+     * reads it for the running month, so a forecast can never drift from the
+     * invoice the customer is eventually sent.
+     *
+     * @param  array{realized: float, unrealized: float}  $rates
+     * @return array<string, mixed>  the invoice row's attributes (no key, no status)
+     */
+    public function computeForAccount(
+        object $account,
+        string $monthYear,
+        array $rates,
+        string $exchange = 'binance'
+    ): array {
         // '!Y-m', never 'Y-m': without the '!' PHP fills the missing day from
         // TODAY, so parsing '2026-06' on the 31st overflows to 2026-07-01 and
         // the invoice would bill the wrong month's trades.
@@ -106,10 +136,7 @@ class InvoiceService
         $hwmAfter = $chargeable ? max($hwmBefore, $equityEnd) : $hwmBefore;
         $dueDate = $period->copy()->addMonthNoOverflow()->startOfMonth()->addDays(7);
 
-        $key = ['exchange' => $exchange, 'account_id' => $account->id, 'month_year' => $monthYear];
-        $existing = Invoice::where($key)->first();
-
-        $attributes = [
+        return [
             'user_id' => $account->uni_id,
             'api_key' => $account->api_key,
             'equity_start' => $hwmBefore,
@@ -129,14 +156,12 @@ class InvoiceService
             'total_fee' => $totalFee,
             'due_date' => $dueDate->toDateString(),
         ];
+    }
 
-        // Regenerating a month refreshes the figures but must never wipe a real
-        // payment — a paid row keeps its status and its provenance.
-        if (! $existing || $existing->status !== 'paid') {
-            $attributes['status'] = $totalFee > 0 ? 'pending' : 'paid';
-        }
-
-        return Invoice::updateOrCreate($key, $attributes);
+    /** Whether a P&L source exists for this exchange yet — keep in step with sourceFor(). */
+    public static function canInvoice(string $exchange): bool
+    {
+        return $exchange === 'binance';
     }
 
     /**

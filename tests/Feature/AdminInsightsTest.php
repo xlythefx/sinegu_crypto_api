@@ -205,6 +205,51 @@ class AdminInsightsTest extends EngineTestCase
             ->assertJsonPath('totals.outstanding', 40);
     }
 
+    /**
+     * The Money tab's "Future invoice" runs the invoice's own math on the
+     * running month without writing — so it must equal what generating the
+     * invoice would store, and leave the invoices table untouched.
+     */
+    public function test_money_forecast_is_the_realized_fee_the_invoice_would_bill(): void
+    {
+        $admin = $this->makeUser(['type' => 'admin']);
+        $now = ['closed_at' => now()->toDateTimeString()];
+
+        $winner = $this->makeUser(['name' => 'Winner', 'realized_percentage' => 25]);
+        $winnerAcc = $this->makeAccount($winner, ['balance' => 1100, 'initial_deposit' => 1000]);
+        $this->closeTrade('binance', $winnerAcc, ['realized_pnl' => 100] + $now);
+        $winnerDemo = $this->makeAccount($winner, ['demo' => 1]);
+        $this->closeTrade('binance', $winnerDemo, ['realized_pnl' => 999] + $now); // testnet: never billed
+
+        // Profitable month, but equity still under the starting mark: no fee.
+        $under = $this->makeUser(['name' => 'Under']);
+        $underAcc = $this->makeAccount($under, ['balance' => 900, 'initial_deposit' => 1000]);
+        $this->closeTrade('binance', $underAcc, ['realized_pnl' => 50] + $now);
+
+        $master = $this->makeUser(['type' => 'master']);
+        $this->closeTrade('binance', $this->makeAccount($master, ['balance' => 5000]), ['realized_pnl' => 500] + $now);
+
+        $mexc = $this->makeUser();
+        $this->makeAccount($mexc, [], 'mexc'); // no P&L source yet: counted, not guessed
+
+        $f = $this->getJson('/api/admin/insights/money', $this->headersFor($admin))->assertOk()->json('forecast');
+
+        $this->assertSame(0, DB::table('invoices')->count(), 'a forecast never writes an invoice');
+        $this->assertSame(now()->format('Y-m'), $f['month']);
+        $this->assertEquals(25, $f['total']);
+        $this->assertSame(1, $f['billable_accounts']);
+        $this->assertSame(['Winner', 'Under'], array_column($f['accounts'], 'name'));
+        $this->assertSame('billable', $f['accounts'][0]['status']);
+        $this->assertSame('below_hwm', $f['accounts'][1]['status']);
+        $this->assertEquals(0, $f['accounts'][1]['fee']);
+        $this->assertSame([['exchange' => 'mexc', 'accounts' => 1]], $f['not_supported']);
+
+        $invoice = app(\App\Services\InvoiceService::class)->generateForAccount(
+            \App\Models\BinanceAccount::find($winnerAcc), now()->format('Y-m'), ['realized' => 25, 'unrealized' => 6],
+        );
+        $this->assertEquals($f['accounts'][0]['fee'], round((float) $invoice->fee_realized, 2));
+    }
+
     public function test_strategy_scope_separates_master_from_customers_across_venues(): void
     {
         $admin = $this->makeUser(['type' => 'admin']);
