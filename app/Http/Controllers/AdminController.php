@@ -158,7 +158,7 @@ class AdminController extends Controller
             ->orderByDesc('t.closed_at')
             ->get([
                 't.id', 'a.id as account_id', 'a.name as account_name',
-                'a.balance as account_balance', 't.symbol', 't.exit_price',
+                'a.balance as account_balance', 't.symbol', 't.entry_price', 't.exit_price',
                 't.realized_pnl', 't.exchange_fee', 't.fee_source', 't.side', 't.strategy',
                 't.closed_at', 't.position_amt',
             ]);
@@ -184,6 +184,9 @@ class AdminController extends Controller
                 'account_balance' => round((float) ($t->account_balance ?? 0), 2),
                 'symbol' => $t->symbol,
                 'price' => round((float) ($t->exit_price ?? 0), 8),
+                // Null when never recorded (a close row seldom references its
+                // entry order) — shown as "—", never as $0.
+                'entry_price' => $t->entry_price === null ? null : round((float) $t->entry_price, 8),
                 // Net of the exchange's commission (which rides along beside
                 // it) from TradingFee::NET_SINCE on; gross, null fee, before.
                 'realized_pnl' => round((float) ($t->realized_pnl ?? 0), 2),
