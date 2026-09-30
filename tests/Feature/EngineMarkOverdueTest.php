@@ -35,6 +35,23 @@ class EngineMarkOverdueTest extends EngineTestCase
         $this->assertSame(0, (int) DB::table('binance_accounts')->find($accountId)->enabled);
     }
 
+    /**
+     * A sandbox-billed master invoice left unpaid goes overdue, but must never
+     * stop the house trading.
+     */
+    public function test_an_overdue_master_invoice_never_disables_the_master(): void
+    {
+        $master = $this->makeUser(['type' => 'master']);
+        $accountId = $this->makeAccount($master);
+        $apiKey = DB::table('binance_accounts')->find($accountId)->api_key;
+        $invoice = $this->makeInvoice($accountId, $apiKey, $master);
+
+        $this->artisan('engine:mark-overdue')->assertSuccessful();
+
+        $this->assertSame('overdue', $invoice->fresh()->status);
+        $this->assertSame(1, (int) DB::table('binance_accounts')->find($accountId)->enabled);
+    }
+
     public function test_paid_and_not_yet_due_invoices_are_untouched(): void
     {
         $user = $this->makeUser();

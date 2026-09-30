@@ -103,7 +103,10 @@ class AdminInvoiceController extends Controller
             'exchange' => ['nullable', 'in:binance,bybit,mexc'],
             'month_year' => ['required', 'regex:/^\d{4}-\d{2}$/'],
             'invoice_demo' => ['nullable', 'boolean'],
+            // Sent by Admin → Sandbox → Invoice Testing only: lets the master be billed there.
+            'sandbox' => ['nullable', 'boolean'],
         ]);
+        $sandbox = (bool) ($validated['sandbox'] ?? false);
 
         $exchange = $validated['exchange'] ?? 'binance';
         if ($exchange !== 'binance') {
@@ -142,7 +145,7 @@ class AdminInvoiceController extends Controller
         // The master is never billed (InvoiceService::notInvoiceableReason).
         // Said out loud rather than silently skipped, so an admin who picked
         // the master sees why nothing was made.
-        $accounts = $accounts->reject(fn ($a) => InvoiceService::notInvoiceableReason($a) !== null)->values();
+        $accounts = $accounts->reject(fn ($a) => InvoiceService::notInvoiceableReason($a, $sandbox) !== null)->values();
         if ($accounts->isEmpty()) {
             return response()->json([
                 'success' => false,
@@ -158,7 +161,7 @@ class AdminInvoiceController extends Controller
                 'realized' => (float) ($cred->realized_percentage ?? 20),
                 'unrealized' => (float) ($cred->unrealized_percentage ?? 6),
             ];
-            $created[] = $this->invoices->generateForAccount($account, $validated['month_year'], $rates, $exchange);
+            $created[] = $this->invoices->generateForAccount($account, $validated['month_year'], $rates, $exchange, $sandbox);
         }
 
         $collection = Invoice::with('account')
@@ -185,7 +188,10 @@ class AdminInvoiceController extends Controller
             'account_id' => ['required', 'integer', 'exists:binance_accounts,id'],
             'month_year' => ['required', 'regex:/^\d{4}-\d{2}$/'],
             'amount' => ['required', 'numeric', 'min:0.01', 'max:1000000'],
+            // Sent by Admin → Sandbox → Invoice Testing only: lets the master be billed there.
+            'sandbox' => ['nullable', 'boolean'],
         ]);
+        $sandbox = (bool) ($validated['sandbox'] ?? false);
 
         $account = BinanceAccount::find($validated['account_id']);
         if (! $account) {
@@ -198,10 +204,10 @@ class AdminInvoiceController extends Controller
         }
 
         try {
-            $invoice = $this->invoices->generateManual($account, $validated['month_year'], (float) $validated['amount']);
+            $invoice = $this->invoices->generateManual($account, $validated['month_year'], (float) $validated['amount'], 'binance', $sandbox);
         } catch (\DomainException $e) {
             // The service refuses for exactly two reasons; the master is the other one.
-            $alreadyPaid = InvoiceService::notInvoiceableReason($account) === null;
+            $alreadyPaid = InvoiceService::notInvoiceableReason($account, $sandbox) === null;
 
             return response()->json([
                 'success' => false,

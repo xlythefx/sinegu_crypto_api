@@ -6,6 +6,7 @@ use App\Models\BinanceAccount;
 use App\Models\Invoice;
 use App\Services\EngineCache;
 use Illuminate\Console\Command;
+use Illuminate\Support\Facades\DB;
 
 /**
  * The billing gate's "off switch" — the other half of InvoiceService::settle(),
@@ -35,10 +36,20 @@ class EngineMarkOverdue extends Command
             ->whereDate('due_date', '<', today())
             ->get();
 
+        // The MASTER is the house's own trading and publishes the track record.
+        // It is normally never invoiced, but Admin → Sandbox may bill it to
+        // rehearse a real payment — and a rehearsal left unpaid must never stop
+        // the house trading. Its invoice still goes overdue; its account stays on.
+        $masterUniIds = DB::table('user_credentials')->where('type', 'master')->pluck('uni_id')->all();
+
         $disabled = 0;
         foreach ($due as $invoice) {
             $invoice->status = 'overdue';
             $invoice->save();
+
+            if (in_array($invoice->user_id, $masterUniIds, true)) {
+                continue;
+            }
 
             if ($invoice->account_id && $invoice->exchange === 'binance') {
                 $disabled += BinanceAccount::whereKey($invoice->account_id)

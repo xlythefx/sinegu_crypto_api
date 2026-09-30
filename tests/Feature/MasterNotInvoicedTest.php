@@ -51,6 +51,31 @@ class MasterNotInvoicedTest extends EngineTestCase
             ->assertCreated();
     }
 
+    /** Admin → Sandbox → Invoice Testing may bill the master, on explicit opt-in. */
+    public function test_the_sandbox_may_bill_the_master(): void
+    {
+        $master = $this->makeUser(['type' => 'master']);
+        $id = $this->makeAccount($master);
+        $this->admin();
+
+        $this->postJson('/api/admin/invoices/generate', ['account_id' => $id, 'month_year' => '2026-08', 'sandbox' => true])
+            ->assertCreated();
+        $this->postJson('/api/admin/invoices/manual', ['account_id' => $id, 'month_year' => '2026-07', 'amount' => 2, 'sandbox' => true])
+            ->assertCreated()->assertJsonPath('invoices.0.total_fee', 2);
+
+        $this->assertSame(2, DB::table('invoices')->count());
+    }
+
+    /** The bypass is per request — without the flag the master is refused again. */
+    public function test_the_bypass_is_never_the_default(): void
+    {
+        $master = $this->makeUser(['type' => 'master']);
+        $account = BinanceAccount::query()->find($this->makeAccount($master));
+
+        $this->assertNotNull(InvoiceService::notInvoiceableReason($account));
+        $this->assertNull(InvoiceService::notInvoiceableReason($account, true));
+    }
+
     public function test_scenario_scratch_accounts_are_exempt(): void
     {
         $master = $this->makeUser(['type' => 'master']);

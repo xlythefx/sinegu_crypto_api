@@ -40,10 +40,18 @@ class InvoiceService
      * the monthly scheduler later cannot disagree about it. Invoice-scenario
      * scratch accounts (`SBXINV-`) are exempt — the runner may be pointed at
      * any user, the master included, and never bills anyone real.
+     *
+     * `$sandbox` (2026-09-30, owner's request) lifts the master rule for Admin →
+     * Sandbox → Invoice Testing ONLY, so a real payment can be rehearsed on the
+     * house's own account. It is an explicit opt-in per request, never a
+     * default: the monthly run and every other caller still refuse the master.
+     * The other half of making that safe is engine:mark-overdue, which never
+     * disables a master's account — a test invoice left unpaid must not stop
+     * the house trading.
      */
-    public static function notInvoiceableReason(BinanceAccount $account): ?string
+    public static function notInvoiceableReason(BinanceAccount $account, bool $sandbox = false): ?string
     {
-        if (str_starts_with((string) $account->api_key, 'SBXINV-')) {
+        if ($sandbox || str_starts_with((string) $account->api_key, 'SBXINV-')) {
             return null;
         }
         $type = DB::table('user_credentials')->where('uni_id', $account->uni_id)->value('type');
@@ -63,9 +71,10 @@ class InvoiceService
         BinanceAccount $account,
         string $monthYear,
         array $rates,
-        string $exchange = 'binance'
+        string $exchange = 'binance',
+        bool $sandbox = false
     ): Invoice {
-        if ($reason = self::notInvoiceableReason($account)) {
+        if ($reason = self::notInvoiceableReason($account, $sandbox)) {
             throw new \DomainException($reason);
         }
 
@@ -109,9 +118,10 @@ class InvoiceService
         BinanceAccount $account,
         string $monthYear,
         float $amount,
-        string $exchange = 'binance'
+        string $exchange = 'binance',
+        bool $sandbox = false
     ): Invoice {
-        if ($reason = self::notInvoiceableReason($account)) {
+        if ($reason = self::notInvoiceableReason($account, $sandbox)) {
             throw new \DomainException($reason);
         }
 
