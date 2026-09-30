@@ -174,7 +174,12 @@ class StripeGateway
         try {
             $session = $this->client()->checkout->sessions->create($params, [
                 // A double-click reuses one session instead of minting two.
-                'idempotency_key' => "checkout_{$invoiceId}_{$cents}",
+                // The Customer is part of the key because it is part of the
+                // params: Stripe keeps a key for 24h and REFUSES its reuse with
+                // different params, so a Customer recreated after going stale
+                // (or one that failed to create) would otherwise block card
+                // payment on this invoice for a day.
+                'idempotency_key' => "checkout_{$invoiceId}_{$cents}_".($customerId ?? 'none'),
             ]);
         } catch (\Throwable $e) {
             Log::error('Stripe checkout session creation failed.', [
