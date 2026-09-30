@@ -70,6 +70,9 @@ class InvoiceService
         }
 
         $attributes = $this->computeForAccount($account, $monthYear, $rates, $exchange);
+        // Regenerating from P&L replaces a manual fee on an unpaid row, so the
+        // row must stop claiming it was typed by hand.
+        $attributes['fee_source'] = 'pnl';
 
         $key = ['exchange' => $exchange, 'account_id' => $account->id, 'month_year' => $monthYear];
         $existing = Invoice::where($key)->first();
@@ -81,6 +84,55 @@ class InvoiceService
         }
 
         return Invoice::updateOrCreate($key, $attributes);
+    }
+
+    /**
+     * Create (or replace an unpaid) invoice for an account + month whose fee
+     * an admin TYPED rather than one computed from P&L — a one-off charge, or
+     * a real payment test at a chosen amount.
+     *
+     * It is still the month's invoice: the performance figures and the HWM
+     * are computed exactly as generateForAccount would, so next month's
+     * invoice chains from the same watermark either way. Only the fee differs
+     * — total_fee is the typed amount, the realized/unrealized split is zero
+     * (a split that does not add up to the total would be a second, divergent
+     * statement of what is owed), and fee_source says so.
+     *
+     * Due in seven days from TODAY, not from the billing month: a manual
+     * invoice for a past month would otherwise be born overdue, and
+     * engine:mark-overdue would disable the account the same night.
+     *
+     * @throws \DomainException for an account that is never invoiced, or when
+     *                          that month's invoice is already paid
+     */
+    public function generateManual(
+        BinanceAccount $account,
+        string $monthYear,
+        float $amount,
+        string $exchange = 'binance'
+    ): Invoice {
+        if ($reason = self::notInvoiceableReason($account)) {
+            throw new \DomainException($reason);
+        }
+
+        $key = ['exchange' => $exchange, 'account_id' => $account->id, 'month_year' => $monthYear];
+        $existing = Invoice::where($key)->first();
+        // A zero-fee month is stored 'paid' by generateForAccount with nothing
+        // collected, so only a paid row that actually charged something is final.
+        if ($existing && $existing->isPaid() && $existing->feeCents() > 0) {
+            throw new \DomainException('That month\'s invoice for this account is already paid.');
+        }
+
+        $attributes = $this->computeForAccount($account, $monthYear, ['realized' => 0, 'unrealized' => 0], $exchange);
+
+        return Invoice::updateOrCreate($key, array_merge($attributes, [
+            'fee_realized' => 0,
+            'fee_unrealized' => 0,
+            'total_fee' => round($amount, 2),
+            'fee_source' => 'manual',
+            'status' => 'pending',
+            'due_date' => now()->addDays(7)->toDateString(),
+        ]));
     }
 
     /**

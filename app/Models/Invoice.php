@@ -19,7 +19,7 @@ class Invoice extends Model
         'equity_start', 'equity_end', 'realized_pnl', 'unrealized_pnl',
         'deposit_amount', 'adjusted_equity', 'capital_flow', 'performance_equity',
         'hwm_before', 'hwm_after', 'new_realized_profit', 'new_unrealized_profit',
-        'fee_realized', 'fee_unrealized', 'total_fee', 'status', 'due_date',
+        'fee_realized', 'fee_unrealized', 'total_fee', 'fee_source', 'status', 'due_date',
         'paid_at', 'payment_provider', 'payment_reference', 'paid_amount',
     ];
 
@@ -132,6 +132,9 @@ class Invoice extends Model
             // Same cents the payment endpoints charge, so the amount the browser
             // echoes back can never disagree with what we bill.
             'total_fee' => $this->feeCents() / 100,
+            // 'manual' = an admin typed total_fee; the realized/unrealized fee
+            // split is then zero and the screens print one line instead.
+            'fee_source' => $this->fee_source ?? 'pnl',
             'currency' => 'USD',
             'performance_gain' => $performanceGain,
             'current_balance' => round($f($this->equity_end), 2),

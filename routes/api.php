@@ -250,6 +250,7 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/invoices', [AdminInvoiceController::class, 'index']);
         Route::get('/invoices/{id}', [AdminInvoiceController::class, 'show']);
         Route::post('/invoices/generate', [AdminInvoiceController::class, 'generate']);
+        Route::post('/invoices/manual', [AdminInvoiceController::class, 'manual']);
         Route::put('/invoices/{id}', [AdminInvoiceController::class, 'update']);
         Route::delete('/invoices/{id}', [AdminInvoiceController::class, 'destroy']);
 

@@ -172,6 +172,53 @@ class AdminInvoiceController extends Controller
     }
 
     /**
+     * POST /api/admin/invoices/manual
+     * One invoice for ONE account + month at a fee the admin typed
+     * (InvoiceService::generateManual). Replaces that month's unpaid invoice
+     * if there is one; refuses a paid one. Binance only, like generate —
+     * settle() re-enables by binance_accounts id, so an invoice on another
+     * venue's account would re-enable the wrong row.
+     */
+    public function manual(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'account_id' => ['required', 'integer', 'exists:binance_accounts,id'],
+            'month_year' => ['required', 'regex:/^\d{4}-\d{2}$/'],
+            'amount' => ['required', 'numeric', 'min:0.01', 'max:1000000'],
+        ]);
+
+        $account = BinanceAccount::find($validated['account_id']);
+        if (! $account) {
+            // exists: passes a soft-deleted row; a disconnected account is not billed by hand.
+            return response()->json([
+                'success' => false,
+                'error_code' => 'ACCOUNT_DISCONNECTED',
+                'message' => 'That account is disconnected.',
+            ], 422);
+        }
+
+        try {
+            $invoice = $this->invoices->generateManual($account, $validated['month_year'], (float) $validated['amount']);
+        } catch (\DomainException $e) {
+            // The service refuses for exactly two reasons; the master is the other one.
+            $alreadyPaid = InvoiceService::notInvoiceableReason($account) === null;
+
+            return response()->json([
+                'success' => false,
+                'error_code' => $alreadyPaid ? 'INVOICE_ALREADY_PAID' : 'NOT_INVOICEABLE',
+                'message' => $e->getMessage(),
+            ], $alreadyPaid ? 409 : 422);
+        }
+
+        $collection = Invoice::with('account')->whereKey($invoice->id)->get();
+
+        return response()->json([
+            'success' => true,
+            'invoices' => $this->invoices->mapList($collection),
+        ], 201);
+    }
+
+    /**
      * PUT /api/admin/invoices/{id}
      * Edit total_fee and/or status. Setting status → paid runs the single
      * settlement path (idempotent mark-paid + re-enable account).
