@@ -61,6 +61,52 @@ class StripeGateway
     }
 
     /**
+     * Every configured webhook secret, keyed by mode — live first.
+     *
+     * Read straight from config rather than through the resolved mode: the
+     * webhook request has no user, so on the live box it always resolves to
+     * LIVE, yet a developer's test-card checkout is delivered by Stripe's
+     * test-mode endpoint and signed with the TEST secret.
+     *
+     * @return array<string, string>
+     */
+    public function webhookSecretsByMode(): array
+    {
+        return array_filter([
+            'live' => (string) config('payments.stripe.live.webhook_secret', ''),
+            'test' => (string) config('payments.stripe.test.webhook_secret', ''),
+        ], fn (string $s) => $s !== '');
+    }
+
+    /**
+     * Verify a delivery against every configured secret.
+     *
+     * Accepting the test signature on the live box is safe only together with
+     * StripeWebhookController's rule that a TEST-mode event may settle nothing
+     * but a developer's invoice there — the same pairing as Coinsbuy's
+     * sandbox-signed callback. The event's `livemode` is inside the signed
+     * payload, so it cannot be forged by whoever holds only the test secret.
+     *
+     * @throws \Stripe\Exception\SignatureVerificationException
+     * @throws \UnexpectedValueException
+     */
+    public function constructEventAnyMode(string $payload, string $signatureHeader): Event
+    {
+        $last = null;
+        foreach ($this->webhookSecretsByMode() as $secret) {
+            try {
+                return \Stripe\Webhook::constructEvent($payload, $signatureHeader, $secret);
+            } catch (\Stripe\Exception\SignatureVerificationException $e) {
+                $last = $e;
+            }
+        }
+
+        throw $last ?? \Stripe\Exception\SignatureVerificationException::factory(
+            'No Stripe webhook secret is configured.', $payload, $signatureHeader
+        );
+    }
+
+    /**
      * The user's Stripe Customer for the current key mode, created on demand.
      *
      * A PaymentMethod used in a Checkout session WITHOUT a Customer is

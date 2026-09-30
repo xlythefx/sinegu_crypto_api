@@ -4,6 +4,8 @@ namespace App\Http\Controllers;
 
 use App\Models\Invoice;
 use App\Services\InvoiceService;
+use App\Models\UserCredential;
+use App\Services\Payments\PaymentEnvironment;
 use App\Services\Payments\PaymentEventRecorder;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -25,6 +27,7 @@ class StripeWebhookController extends Controller
     public function __construct(
         private InvoiceService $invoices,
         private PaymentEventRecorder $events,
+        private PaymentEnvironment $env,
     ) {}
 
     public function handle(Request $request): JsonResponse
@@ -100,6 +103,31 @@ class StripeWebhookController extends Controller
             ]);
 
             return response()->json(['success' => true, 'already_paid' => true]);
+        }
+
+        // TEST-mode money is not money. The middleware accepts the test
+        // signature on every box (a developer's test-card checkout is signed
+        // with it), so on the LIVE box a test-mode event may settle only an
+        // invoice whose owner is a developer — or anyone holding the test
+        // secret could pay a real customer's invoice with 4242 4242 4242 4242.
+        // `livemode` is part of the signed payload, so it cannot be forged.
+        $livemode = (bool) ($event->livemode ?? false);
+        if (! $livemode && $this->env->isProduction()) {
+            $role = UserCredential::query()->whereKey($invoice->user_id)->value('type');
+            if ($role !== 'developer') {
+                Log::warning('Stripe webhook: test-mode payment for a non-developer invoice on the live box — refused.', [
+                    'invoice_id' => $invoice->id, 'session_id' => $sessionId,
+                ]);
+                $this->events->record([
+                    'provider' => 'stripe', 'event_id' => $eventId, 'external_id' => $sessionId,
+                    'invoice_id' => $invoice->id, 'user_id' => $invoice->user_id,
+                    'account_id' => $invoice->account_id, 'outcome' => 'test_mode_refused',
+                    'provider_status' => $paymentStatus,
+                    'message' => 'Test-mode payment on the live box for a non-developer invoice.',
+                ]);
+
+                return response()->json(['success' => true, 'received' => true]);
+            }
         }
 
         // Re-verify at the gateway boundary: the amount now comes from outside.

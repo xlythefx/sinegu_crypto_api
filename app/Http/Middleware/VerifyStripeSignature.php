@@ -25,7 +25,10 @@ class VerifyStripeSignature
         /** @var StripeGateway $gateway */
         $gateway = app(StripeGateway::class);
 
-        if ($gateway->webhookSecret() === '') {
+        // Any mode: a developer's test-card checkout arrives signed with the
+        // TEST secret even on the live box. What such an event may settle is
+        // decided in the controller, not here.
+        if ($gateway->webhookSecretsByMode() === []) {
             return response()->json([
                 'success' => false,
                 'error_code' => 'STRIPE_WEBHOOK_NOT_CONFIGURED',
@@ -34,7 +37,7 @@ class VerifyStripeSignature
         }
 
         try {
-            $event = $gateway->constructEvent(
+            $event = $gateway->constructEventAnyMode(
                 (string) $request->getContent(),
                 (string) $request->header('Stripe-Signature', '')
             );

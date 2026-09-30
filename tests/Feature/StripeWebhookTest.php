@@ -47,7 +47,10 @@ class StripeWebhookTest extends PaymentTestCase
 
     public function test_unconfigured_secret_fails_closed(): void
     {
-        $this->usePayments('sandbox', ['payments.stripe.test.webhook_secret' => '']);
+        $this->usePayments('sandbox', [
+            'payments.stripe.test.webhook_secret' => '',
+            'payments.stripe.live.webhook_secret' => '',
+        ]);
 
         $this->sendEvent($this->stripeEvent())
             ->assertStatus(503)
@@ -171,6 +174,78 @@ class StripeWebhookTest extends PaymentTestCase
 
         $this->assertSame(1, PaymentEvent::where('outcome', 'paid')->count());
         $this->assertEquals($paidAt, $invoice->fresh()->paid_at);
+    }
+
+    // ---- test-mode vs live-mode events ------------------------------------
+
+    /** Distinct live and test secrets, as on a real box. */
+    private function useSeparateSecrets(string $environment): void
+    {
+        $this->usePayments($environment, [
+            'payments.stripe.live.webhook_secret' => 'whsec_live_only',
+            'payments.stripe.test.webhook_secret' => 'whsec_test_only',
+        ]);
+    }
+
+    private function sendSigned(array $event, string $secret)
+    {
+        return $this->sendEvent($event, $this->stripeSignature(json_encode($event), $secret));
+    }
+
+    /**
+     * A developer's test-card checkout on the live box is signed with the TEST
+     * secret. It used to be verified against the live one only, so it never
+     * settled.
+     */
+    public function test_a_test_mode_event_for_a_developer_settles_on_the_live_box(): void
+    {
+        $this->useSeparateSecrets('production');
+        $developer = $this->makeUser(['type' => 'developer']);
+        $invoice = $this->makeInvoice($this->makeAccount($developer), $developer);
+
+        $event = $this->stripeEvent(['metadata' => ['invoice_id' => (string) $invoice->id]]) + ['livemode' => false];
+        $this->sendSigned($event, 'whsec_test_only')->assertOk();
+
+        $this->assertSame('paid', $invoice->fresh()->status);
+    }
+
+    /** Test cards must never pay a real customer's invoice. */
+    public function test_a_test_mode_event_for_a_trader_is_refused_on_the_live_box(): void
+    {
+        $this->useSeparateSecrets('production');
+        $user = $this->makeUser();
+        $invoice = $this->makeInvoice($this->makeAccount($user), $user);
+
+        $event = $this->stripeEvent(['metadata' => ['invoice_id' => (string) $invoice->id]]) + ['livemode' => false];
+        $this->sendSigned($event, 'whsec_test_only')->assertOk();
+
+        $this->assertSame('pending', $invoice->fresh()->status);
+        $this->assertSame('test_mode_refused', PaymentEvent::first()->outcome);
+    }
+
+    public function test_a_live_event_settles_a_traders_invoice_on_the_live_box(): void
+    {
+        $this->useSeparateSecrets('production');
+        $user = $this->makeUser();
+        $invoice = $this->makeInvoice($this->makeAccount($user), $user);
+
+        $event = $this->stripeEvent(['metadata' => ['invoice_id' => (string) $invoice->id]]) + ['livemode' => true];
+        $this->sendSigned($event, 'whsec_live_only')->assertOk();
+
+        $this->assertSame('paid', $invoice->fresh()->status);
+    }
+
+    /** Off the live box everything is test money, so the owner's role is moot. */
+    public function test_a_test_mode_event_for_a_trader_settles_on_a_dev_box(): void
+    {
+        $this->useSeparateSecrets('sandbox');
+        $user = $this->makeUser();
+        $invoice = $this->makeInvoice($this->makeAccount($user), $user);
+
+        $event = $this->stripeEvent(['metadata' => ['invoice_id' => (string) $invoice->id]]) + ['livemode' => false];
+        $this->sendSigned($event, 'whsec_test_only')->assertOk();
+
+        $this->assertSame('paid', $invoice->fresh()->status);
     }
 
     /** A different event for an already-paid invoice must not rewrite it. */

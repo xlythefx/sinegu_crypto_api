@@ -49,6 +49,7 @@ class PaymentController extends Controller
         'STRIPE_NOT_CONFIGURED' => 'No Stripe secret key is set for this mode.',
         'STRIPE_INSECURE_CALLBACK' => 'Live Stripe keys need an https public API URL — the webhook cannot arrive over plaintext, so cards would be charged against invoices that never settle.',
         'STRIPE_ERROR' => 'The Stripe SDK threw while creating the session — see exception.',
+        'STRIPE_LIVE_UNAVAILABLE' => 'A developer asked for a REAL card charge, but this box does not resolve to live Stripe keys: it is not the production machine, or its callback URL is not https. A trader here would be on test keys too.',
         'AMOUNT_MISMATCH' => 'The client sent an amount that no longer matches the invoice row: the invoice was regenerated while a tab was open.',
         'INVOICE_NOT_FOUND' => 'The invoice exists or not, but it is not this uni_id\'s — lookups are scoped to the caller on purpose.',
         'TRON_NOT_CONFIGURED' => 'This network has no receiving address, no token contract, or no base URL. The diagnostics below say which; set TRON_{NETWORK}_ADDRESS / _USDT_CONTRACT and clear the config cache.',
@@ -80,6 +81,8 @@ class PaymentController extends Controller
         $stripe = $this->env->stripe();
         $coinsbuy = $this->env->coinsbuy();
 
+        $stripeModes = $testAccount ? $this->developerStripeModes() : null;
+
         $stripeReason = null;
         if ($stripe['downgraded']) {
             $stripeReason = 'Card payments run in Stripe test mode until the API is served over HTTPS.';
@@ -93,11 +96,16 @@ class PaymentController extends Controller
             // True when this caller pays with test credentials regardless of the
             // machine (developer accounts). The UI labels the buttons from this.
             'test_account' => $testAccount,
-            'stripe' => [
-                'enabled' => $this->stripe->isConfigured(),
+            'stripe' => array_merge([
+                // A developer can pay in either mode, so the card rail is
+                // there when EITHER is usable; everyone else gets the one mode
+                // this box resolves to.
+                'enabled' => $stripeModes !== null
+                    ? ($stripeModes['test'] || $stripeModes['live'])
+                    : $this->stripe->isConfigured(),
                 'mode' => $stripe['mode'],
                 'reason' => $stripeReason,
-            ],
+            ], $stripeModes !== null ? ['modes' => $stripeModes] : []),
             'coinsbuy' => [
                 'enabled' => $this->coinsbuy->isConfigured(),
                 'mode' => $coinsbuy['mode'],
@@ -151,16 +159,35 @@ class PaymentController extends Controller
 
     /**
      * POST /api/payments/stripe/checkout-session
-     * Body: { invoice_id: int, amount?: float }
+     * Body: { invoice_id: int, amount?: float, mode?: 'test'|'live' }
+     *
+     * `mode` is honoured for `developer` accounts ONLY, and only to choose
+     * between their test-card rehearsal (the default) and a REAL card charge.
+     * It can never force live keys on a box that would not use them for a
+     * trader anyway — "live" simply stops pinning the developer to test keys,
+     * and the machine verdict (production + https) still decides. A trader's
+     * `mode` is ignored: they always pay in whatever mode the box resolves.
      */
     public function stripeCheckout(Request $request): JsonResponse
     {
         $data = $request->validate([
             'invoice_id' => ['required', 'integer'],
             'amount' => ['nullable', 'numeric'],
+            'mode' => ['nullable', 'in:test,live'],
         ]);
 
-        $this->applyRoleOverrides($request);
+        $isDeveloper = $this->applyRoleOverrides($request);
+        if ($isDeveloper && ($data['mode'] ?? null) === 'live') {
+            $this->env->forceSandbox(false);
+            if ($this->stripe->mode() !== 'live') {
+                return $this->fail(
+                    'STRIPE_LIVE_UNAVAILABLE',
+                    'Real card payments are not available on this server.',
+                    422,
+                    ['provider' => 'stripe', 'stripe' => $this->stripeDiagnostics()]
+                );
+            }
+        }
 
         $resolved = $this->resolveInvoice($request, (int) $data['invoice_id'], $data['amount'] ?? null);
         if ($resolved instanceof JsonResponse) {
@@ -640,6 +667,25 @@ class PaymentController extends Controller
         $this->env->forceSandbox($isDeveloper);
 
         return $isDeveloper;
+    }
+
+    /**
+     * Which card modes a developer can pick on THIS box: `test` (their default)
+     * and `live` (a real charge). Each is available only when that mode has a
+     * secret key AND a webhook secret — no webhook, no settlement, no button.
+     * Leaves the environment pinned to test afterwards, as the caller found it.
+     *
+     * @return array{test: bool, live: bool}
+     */
+    private function developerStripeModes(): array
+    {
+        $this->env->forceSandbox(false);
+        $live = $this->stripe->mode() === 'live' && $this->stripe->isConfigured();
+
+        $this->env->forceSandbox(true);
+        $test = $this->stripe->isConfigured();
+
+        return ['test' => $test, 'live' => $live];
     }
 
     /**

@@ -522,6 +522,135 @@ class PaymentCheckoutTest extends PaymentTestCase
             ]);
     }
 
+    /* ---- developer card mode: test card vs real card ---- */
+
+    /** A gateway on the REAL environment that records which mode it was asked in. */
+    private function fakeStripeRecordingMode(array &$captured): void
+    {
+        $this->app->bind(StripeGateway::class, function ($app) use (&$captured) {
+            return new class($app->make(\App\Services\Payments\PaymentEnvironment::class), $captured) extends StripeGateway
+            {
+                public function __construct(\App\Services\Payments\PaymentEnvironment $env, private &$captured)
+                {
+                    parent::__construct($env);
+                }
+
+                public function customerIdFor(string $uniId, ?string $email, ?string $name): ?string
+                {
+                    return 'cus_fake';
+                }
+
+                public function createCheckoutSession($invoice, string $accountName, ?string $customerId): array
+                {
+                    $this->captured['mode'] = $this->mode();
+
+                    return ['id' => 'cs_fake', 'url' => 'https://checkout.stripe.test/cs_fake'];
+                }
+            };
+        });
+    }
+
+    public function test_a_developer_card_payment_defaults_to_test_mode_on_the_live_box(): void
+    {
+        $this->useLiveProduction();
+        $captured = [];
+        $this->fakeStripeRecordingMode($captured);
+
+        $developer = $this->makeUser(['type' => 'developer']);
+        $invoice = $this->makeInvoice($this->makeAccount($developer), $developer);
+
+        $this->withHeaders($this->userHeaders($developer))
+            ->postJson(self::STRIPE_URL, ['invoice_id' => $invoice->id])
+            ->assertOk()
+            ->assertJson(['mode' => 'test']);
+
+        $this->assertSame('test', $captured['mode']);
+    }
+
+    public function test_a_developer_may_choose_a_real_card_charge_on_the_live_box(): void
+    {
+        $this->useLiveProduction();
+        $captured = [];
+        $this->fakeStripeRecordingMode($captured);
+
+        $developer = $this->makeUser(['type' => 'developer']);
+        $invoice = $this->makeInvoice($this->makeAccount($developer), $developer);
+
+        $this->withHeaders($this->userHeaders($developer))
+            ->postJson(self::STRIPE_URL, ['invoice_id' => $invoice->id, 'mode' => 'live'])
+            ->assertOk()
+            ->assertJson(['mode' => 'live']);
+
+        $this->assertSame('live', $captured['mode']);
+    }
+
+    /** "live" stops pinning a developer to test keys; it never forces live keys ON. */
+    public function test_a_developer_cannot_force_a_real_charge_on_a_dev_box(): void
+    {
+        $captured = [];
+        $this->fakeStripeRecordingMode($captured);
+
+        $developer = $this->makeUser(['type' => 'developer']);
+        $invoice = $this->makeInvoice($this->makeAccount($developer), $developer);
+
+        $this->withHeaders($this->userHeaders($developer))
+            ->postJson(self::STRIPE_URL, ['invoice_id' => $invoice->id, 'mode' => 'live'])
+            ->assertStatus(422)
+            ->assertJson(['error_code' => 'STRIPE_LIVE_UNAVAILABLE']);
+
+        $this->assertSame([], $captured);
+    }
+
+    public function test_a_traders_requested_mode_is_ignored(): void
+    {
+        $this->useLiveProduction();
+        $captured = [];
+        $this->fakeStripeRecordingMode($captured);
+
+        $user = $this->makeUser();
+        $invoice = $this->makeInvoice($this->makeAccount($user), $user);
+
+        $this->withHeaders($this->userHeaders($user))
+            ->postJson(self::STRIPE_URL, ['invoice_id' => $invoice->id, 'mode' => 'test'])
+            ->assertOk()
+            ->assertJson(['mode' => 'live']);
+
+        $this->assertSame('live', $captured['mode']);
+    }
+
+    public function test_methods_lists_the_card_modes_a_developer_can_pick(): void
+    {
+        $this->useLiveProduction();
+
+        $developer = $this->makeUser(['type' => 'developer']);
+        $this->withHeaders($this->userHeaders($developer))
+            ->getJson('/api/payments/methods')
+            ->assertOk()
+            ->assertJson(['stripe' => ['enabled' => true, 'modes' => ['test' => true, 'live' => true]]]);
+
+        // No test webhook on the box: the test button goes, the real one stays.
+        $this->useLiveProduction();
+        config(['payments.stripe.test.webhook_secret' => '']);
+        $this->app['auth']->forgetGuards();
+
+        $this->withHeaders($this->userHeaders($developer))
+            ->getJson('/api/payments/methods')
+            ->assertOk()
+            ->assertJson(['stripe' => ['enabled' => true, 'modes' => ['test' => false, 'live' => true]]]);
+    }
+
+    public function test_methods_shows_a_trader_no_card_modes(): void
+    {
+        $this->useLiveProduction();
+
+        $user = $this->makeUser();
+        $response = $this->withHeaders($this->userHeaders($user))
+            ->getJson('/api/payments/methods')
+            ->assertOk();
+
+        $this->assertNull($response->json('stripe.modes'));
+    }
+
     /* ---- developer diagnostics ---- */
 
     /** Coinsbuy answers, but refuses the credentials. */
