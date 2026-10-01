@@ -9,6 +9,7 @@ use App\Http\Controllers\AdminInvoiceController;
 use App\Http\Controllers\AdminMaintenanceController;
 use App\Http\Controllers\AdminManualTradeController;
 use App\Http\Controllers\AdminOpenPositionsController;
+use App\Http\Controllers\EngineInvoiceController;
 use App\Http\Controllers\AdminReferralController;
 use App\Http\Controllers\AdminTodoController;
 use App\Http\Controllers\AdminTradeLogController;
@@ -435,4 +436,7 @@ Route::prefix('engine/{exchange}')
         Route::post('/transactions', [EngineSyncController::class, 'insertTransactions']);
         Route::post('/ledger', [EngineSyncController::class, 'ledger']);
         Route::post('/fees', [EngineSyncController::class, 'insertFees']);
+        // The engine's monthly scheduler (1st, 23:00 Asia/Manila): invoice the
+        // month that just ended. Skips anything already invoiced.
+        Route::post('/invoices/monthly', [EngineInvoiceController::class, 'monthly']);
     });
