@@ -51,8 +51,59 @@ class AdminOpenPositionsController extends Controller
         return response()->json([
             'success' => true,
             'positions' => $positions,
+            // Venues the master holds a connected account on: the page compares
+            // each user against the master per venue, and on a venue with no
+            // master account there is nothing to compare against — that is
+            // "no reference", not "every user is out of sync".
+            'master_exchanges' => $this->masterExchanges(),
+            'accounts' => $this->tradedAccounts(),
             'refresh' => $this->refreshState(),
         ]);
+    }
+
+    /**
+     * Every account the engine trades (enabled, connected, not a sandbox,
+     * owner not suspended), master excluded — so a user who holds NOTHING
+     * while the master is in a trade still shows up as out of sync. A
+     * positions list alone can never show an absence.
+     *
+     * @return list<array<string, mixed>>
+     */
+    private function tradedAccounts(): array
+    {
+        return collect(ExchangeSchema::supported())->flatMap(function (string $exchange) {
+            $t = ExchangeSchema::for($exchange)->accountsTable;
+
+            return ExchangeSchema::for($exchange)->accountQuery()
+                ->join('user_credentials as u', 'u.uni_id', '=', "{$t}.uni_id")
+                ->where("{$t}.enabled", 1)
+                ->where("{$t}.is_sandbox", 0)
+                ->where('u.status', '!=', 'suspended')
+                ->where('u.type', '!=', 'master')
+                ->get(["{$t}.uni_id", "{$t}.name as account_name", "{$t}.demo", 'u.name as owner_name'])
+                ->map(fn ($a) => [
+                    'exchange' => $exchange,
+                    'uni_id' => $a->uni_id,
+                    'owner_name' => $a->owner_name ?: 'Unknown user',
+                    'account_name' => $a->account_name,
+                    'demo' => (bool) $a->demo,
+                ]);
+        })->values()->all();
+    }
+
+    /** @return list<string> */
+    private function masterExchanges(): array
+    {
+        $masters = DB::table('user_credentials')->where('type', 'master')->pluck('uni_id');
+        if ($masters->isEmpty()) {
+            return [];
+        }
+
+        return collect(ExchangeSchema::supported())
+            ->filter(fn (string $exchange) => ExchangeSchema::for($exchange)->accountQuery()
+                ->whereIn('uni_id', $masters)->where('is_sandbox', 0)->exists())
+            ->values()
+            ->all();
     }
 
     /**

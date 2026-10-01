@@ -75,6 +75,33 @@ class AdminOpenPositionsTest extends EngineTestCase
         $rows->each(fn ($r) => $this->assertArrayNotHasKey('api_key', $r));
     }
 
+    public function test_names_the_venues_the_master_has_an_account_on(): void
+    {
+        $headers = $this->admin();
+        $master = $this->makeUser(['type' => 'master']);
+        $this->makeAccount($master);
+        $this->makeAccount($master, ['is_sandbox' => 1], 'mexc'); // a sandbox is no reference
+
+        $this->getJson('/api/admin/open-positions', $headers)
+            ->assertOk()
+            ->assertJsonPath('master_exchanges', ['binance']);
+    }
+
+    public function test_lists_traded_accounts_even_with_no_position_and_never_the_master(): void
+    {
+        $headers = $this->admin();
+        $master = $this->makeUser(['type' => 'master']);
+        $this->makeAccount($master);
+        $flat = $this->makeUser(['name' => 'Flat Fred']);
+        $this->makeAccount($flat);
+        $off = $this->makeUser(['name' => 'Off']);
+        $this->makeAccount($off, ['enabled' => 0]);
+
+        $accounts = collect($this->getJson('/api/admin/open-positions', $headers)->assertOk()->json('accounts'));
+
+        $this->assertSame([$flat], $accounts->pluck('uni_id')->all());
+    }
+
     public function test_refresh_has_a_thirty_second_platform_wide_cooldown(): void
     {
         Http::fake(['engine.test:5010/*' => Http::response(['success' => true], 200)]);
