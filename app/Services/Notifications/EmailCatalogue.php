@@ -49,8 +49,8 @@ class EmailCatalogue
             'amount' => 496.10,
             'profit' => 2480.50,
             'issued' => '1 Oct 2026',
-            'due' => '6 Oct 2026',
-            'pause' => '6 Oct 2026',
+            'due' => '4 Oct 2026',
+            'pause' => '4 Oct 2026',
         ];
         $customer = ['name' => 'Jonathan Meyer', 'first' => 'Jonathan', 'email' => 'jonathan.meyer@example.com', 'uni' => '9f3c1a7e-4b28-4d16-9f5a-2c8e0d71b3aa'];
         $tx = '7c1e9a42f0b3d5e8a1c6f47b29d0e3a58b6c41f7e2d9a0b35c8e1f64a7d2b90c';
@@ -107,10 +107,10 @@ class EmailCatalogue
                 'slug' => 'invoice-issued',
                 'audience' => self::AUDIENCE_CUSTOMER,
                 'title' => 'New invoice (day 0)',
-                'trigger' => 'When the monthly invoice is generated.',
+                'trigger' => 'The 1st of the month, when the engine invoices last month (16:00 Thailand time).',
                 'to' => 'The invoiced customer',
-                'live' => false,
-                'note' => 'Day 0 of the payment schedule: invoice → reminder day 2 → reminder day 3 → trading paused day 5.',
+                'live' => true,
+                'note' => 'Payment schedule: invoice on the 1st → reminder the 2nd → reminder the 3rd → trading paused the 4th (the due date), all at the billing hour.',
                 'mail' => new InvoiceIssued(
                     name: $customer['first'],
                     invoiceId: $inv['id'],
@@ -122,9 +122,9 @@ class EmailCatalogue
                     dueDate: $inv['due'],
                 ),
             ],
-            self::reminder('reminder-day-2', 'Payment reminder (day 2)', 'Two days after the invoice, if still unpaid.', PaymentReminder::STAGE_GENTLE, $customer, $inv),
-            self::reminder('reminder-day-3', 'Payment reminder (day 3)', 'Three days after the invoice, if still unpaid.', PaymentReminder::STAGE_FIRM, $customer, $inv),
-            self::reminder('reminder-day-5', 'Trading paused (day 5)', 'Five days after the invoice, if still unpaid — the account stops trading.', PaymentReminder::STAGE_PAUSED, $customer, $inv),
+            self::reminder('reminder-day-2', 'Payment reminder (the 2nd)', 'The 2nd of the month at the billing hour, if still unpaid.', PaymentReminder::STAGE_GENTLE, $customer, $inv),
+            self::reminder('reminder-day-3', 'Payment reminder (the 3rd)', 'The 3rd of the month at the billing hour, if still unpaid.', PaymentReminder::STAGE_FIRM, $customer, $inv),
+            self::reminder('reminder-day-5', 'Trading paused (the 4th)', 'The 4th — the due date — at the billing hour, if still unpaid: the account stops trading.', PaymentReminder::STAGE_PAUSED, $customer, $inv),
             [
                 'slug' => 'payment-received',
                 'audience' => self::AUDIENCE_CUSTOMER,
@@ -271,8 +271,8 @@ class EmailCatalogue
             'title' => $title,
             'trigger' => $trigger,
             'to' => 'The customer with the unpaid invoice',
-            'live' => false,
-            'note' => 'The team gets an "Invoice still unpaid" notice at the same moment.',
+            'live' => true,
+            'note' => 'The team sees who is still unpaid in the admin Telegram chat at the same moment.',
             'mail' => new PaymentReminder(
                 stage: $stage,
                 name: $c['first'],

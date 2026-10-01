@@ -2,8 +2,12 @@
 
 namespace Tests\Feature;
 
+use App\Mail\InvoiceIssued;
+use App\Mail\PaymentReminder;
 use App\Models\Invoice;
+use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Mail;
 
 /** POST /api/engine/binance/invoices/monthly — the engine's monthly run. */
 class EngineMonthlyInvoiceTest extends EngineTestCase
@@ -13,7 +17,8 @@ class EngineMonthlyInvoiceTest extends EngineTestCase
     protected function setUp(): void
     {
         parent::setUp();
-        $this->travelTo('2026-10-01 15:00:00'); // the 1st, 23:00 Asia/Manila
+        $this->travelTo('2026-10-01 09:00:00'); // the 1st, 16:00 Asia/Bangkok
+        Mail::fake();
     }
 
     /** A customer account that made $500 realized in September on a 1000 deposit. */
@@ -110,5 +115,67 @@ class EngineMonthlyInvoiceTest extends EngineTestCase
     {
         $this->postJson('/api/engine/mexc/invoices/monthly', ['month_year' => self::MONTH], $this->engineHeaders())
             ->assertStatus(422)->assertJson(['error_code' => 'EXCHANGE_UNSUPPORTED']);
+    }
+
+    public function test_the_invoice_email_goes_to_each_billed_customer(): void
+    {
+        $this->profitableCustomer(['email' => 'alice@example.com']);
+
+        $this->run_()->assertOk()->assertJsonPath('totals.emailed', 1);
+        Mail::assertSent(InvoiceIssued::class, fn ($m) => $m->hasTo('alice@example.com')
+            && $m->amount === 100.0 && $m->dueDate === '4 Oct 2026');
+    }
+
+    private function remind(string $stage)
+    {
+        return $this->postJson('/api/engine/binance/invoices/remind', ['month_year' => self::MONTH, 'stage' => $stage], $this->engineHeaders());
+    }
+
+    public function test_reminders_on_the_2nd_and_3rd_reach_only_the_unpaid(): void
+    {
+        $this->profitableCustomer(['email' => 'unpaid@example.com']);
+        $paid = $this->profitableCustomer(['email' => 'paid@example.com']);
+        $this->run_()->assertOk();
+        Invoice::where('account_id', $paid)->update(['status' => 'paid']);
+
+        $this->travelTo('2026-10-02 09:00:00');
+        $this->remind('gentle')->assertOk()->assertJsonPath('totals.unpaid', 1)->assertJsonPath('totals.emailed', 1);
+        Mail::assertSent(PaymentReminder::class, fn ($m) => $m->hasTo('unpaid@example.com') && $m->stage === PaymentReminder::STAGE_GENTLE);
+        Mail::assertNotSent(PaymentReminder::class, fn ($m) => $m->hasTo('paid@example.com'));
+
+        $this->travelTo('2026-10-03 09:00:00');
+        $this->remind('firm')->assertOk();
+        Mail::assertSent(PaymentReminder::class, fn ($m) => $m->stage === PaymentReminder::STAGE_FIRM && $m->pauseDate === '4 Oct 2026');
+    }
+
+    public function test_the_4th_pauses_unpaid_accounts_and_says_so_but_the_night_before_does_not(): void
+    {
+        $id = $this->profitableCustomer(['email' => 'late@example.com']);
+        $this->run_()->assertOk();
+
+        // 00:10 UTC on the 4th: the nightly safety net must not pause an invoice due TODAY.
+        $this->travelTo('2026-10-04 00:10:00');
+        Artisan::call('engine:mark-overdue');
+        $this->assertSame(1, (int) DB::table('binance_accounts')->where('id', $id)->value('enabled'));
+
+        $this->travelTo('2026-10-04 09:00:00');
+        $this->postJson('/api/engine/binance/invoices/enforce', [], $this->engineHeaders())->assertOk()
+            ->assertJsonPath('totals.overdue', 1)
+            ->assertJsonPath('totals.disabled', 1)
+            ->assertJsonPath('totals.emailed', 1);
+        $this->assertSame(0, (int) DB::table('binance_accounts')->where('id', $id)->value('enabled'));
+        $this->assertSame('overdue', Invoice::where('account_id', $id)->value('status'));
+        Mail::assertSent(PaymentReminder::class, fn ($m) => $m->hasTo('late@example.com') && $m->stage === PaymentReminder::STAGE_PAUSED);
+    }
+
+    public function test_a_paid_invoice_is_never_paused(): void
+    {
+        $id = $this->profitableCustomer();
+        $this->run_()->assertOk();
+        Invoice::where('account_id', $id)->update(['status' => 'paid']);
+
+        $this->travelTo('2026-10-04 09:00:00');
+        $this->postJson('/api/engine/binance/invoices/enforce', [], $this->engineHeaders())->assertOk()->assertJsonPath('totals.overdue', 0);
+        $this->assertSame(1, (int) DB::table('binance_accounts')->where('id', $id)->value('enabled'));
     }
 }

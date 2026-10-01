@@ -28,6 +28,10 @@ class InvoiceIssued extends PixelMail
         public float $amount,
         /** Already formatted, "7 Oct 2026". */
         public string $dueDate,
+        /** Fee on open positions at month end (0 when none) — listed on its own line. */
+        public float $unrealizedFee = 0.0,
+        public float $unrealizedRate = 0.0,
+        public float $unrealizedProfit = 0.0,
     ) {
     }
 

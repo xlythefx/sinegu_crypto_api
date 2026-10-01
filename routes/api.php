@@ -439,4 +439,7 @@ Route::prefix('engine/{exchange}')
         // The engine's monthly scheduler (1st, 23:00 Asia/Manila): invoice the
         // month that just ended. Skips anything already invoiced.
         Route::post('/invoices/monthly', [EngineInvoiceController::class, 'monthly']);
+        // Same hour on the 2nd/3rd (reminder emails) and the 4th (pause unpaid).
+        Route::post('/invoices/remind', [EngineInvoiceController::class, 'remind']);
+        Route::post('/invoices/enforce', [EngineInvoiceController::class, 'enforce']);
     });

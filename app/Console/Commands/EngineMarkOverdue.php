@@ -3,7 +3,7 @@
 namespace App\Console\Commands;
 
 use App\Models\BinanceAccount;
-use App\Models\Invoice;
+use App\Services\Billing\OverdueEnforcer;
 use App\Services\EngineCache;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\DB;
@@ -27,36 +27,14 @@ class EngineMarkOverdue extends Command
 
     protected $description = 'Mark past-due invoices overdue and disable their exchange accounts';
 
-    public function handle(EngineCache $engineCache): int
+    public function handle(EngineCache $engineCache, OverdueEnforcer $enforcer): int
     {
-        // 1) Past-due pending invoices → overdue + account disabled.
-        $due = Invoice::where('status', 'pending')
-            ->where('total_fee', '>', 0)
-            ->whereNotNull('due_date')
-            ->whereDate('due_date', '<', today())
-            ->get();
-
-        // The MASTER is the house's own trading and publishes the track record.
-        // It is normally never invoiced, but Admin → Sandbox may bill it to
-        // rehearse a real payment — and a rehearsal left unpaid must never stop
-        // the house trading. Its invoice still goes overdue; its account stays on.
-        $masterUniIds = DB::table('user_credentials')->where('type', 'master')->pluck('uni_id')->all();
-
-        $disabled = 0;
-        foreach ($due as $invoice) {
-            $invoice->status = 'overdue';
-            $invoice->save();
-
-            if (in_array($invoice->user_id, $masterUniIds, true)) {
-                continue;
-            }
-
-            if ($invoice->account_id && $invoice->exchange === 'binance') {
-                $disabled += BinanceAccount::whereKey($invoice->account_id)
-                    ->update(['enabled' => 0]);
-            }
-            // bybit/mexc: disable path lands with their accounts tables.
-        }
+        // 1) Past-due pending invoices → overdue + account disabled. Due
+        // BEFORE today: the engine's schedule pauses the due day itself at the
+        // billing hour; this nightly run is the safety net behind it.
+        $result = $enforcer->run(today()->subDay());
+        $due = $result['overdue'];
+        $disabled = $result['disabled'];
 
         // 2) Suspended users must not keep trading even with paid invoices.
         $suspendedDisabled = BinanceAccount::where('enabled', 1)

@@ -1,6 +1,10 @@
 @php
   use App\Support\MailFormat as F;
   $rate = rtrim(rtrim(number_format($feeRate, 2), '0'), '.');
+  // An invoice can also carry a fee on OPEN positions' unrealized profit; the
+  // email lists it on its own line so the total always equals its rows.
+  $openFee = (float) ($unrealizedFee ?? 0);
+  $openRate = rtrim(rtrim(number_format((float) ($unrealizedRate ?? 0), 2), '0'), '.');
 @endphp
 @extends('emails.layout', [
   'title' => 'Your Pixel Alpha invoice',
@@ -15,10 +19,21 @@
 
   <p style="margin:0 0 20px;font-size:15px;line-height:1.7;color:#374151;">
     Hi {{ $name }}, the strategies made you new profit in {{ $period }}.
-    Our fee is {{ $rate }}% of that profit — nothing on anything else.
+    @if ($openFee > 0)
+      Our fee is {{ $rate }}% of that profit, plus {{ $openRate }}% of the profit still open at month end.
+    @else
+      Our fee is {{ $rate }}% of that profit — nothing on anything else.
+    @endif
   </p>
 
-  @include('emails.partials.facts', ['rows' => [
+  @include('emails.partials.facts', ['rows' => $openFee > 0 ? [
+      ['New profit above your previous high', F::money($profit), ['color' => '#15803d', 'strong' => true]],
+      ['Pixel Alpha fee ('.$rate.'%)', F::money($amount - $openFee)],
+      ['Open positions ('.$openRate.'% of '.F::money((float) ($unrealizedProfit ?? 0)).')', F::money($openFee)],
+      ['Total due', F::money($amount), ['strong' => true]],
+      ['Due by', $dueDate],
+      ['Invoice', '#'.$invoiceId, ['mono' => true]],
+  ] : [
       ['New profit above your previous high', F::money($profit), ['color' => '#15803d', 'strong' => true]],
       ['Pixel Alpha fee ('.$rate.'%)', F::money($amount), ['strong' => true]],
       ['Due by', $dueDate],

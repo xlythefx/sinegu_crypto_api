@@ -2,8 +2,11 @@
 
 namespace App\Http\Controllers;
 
+use App\Mail\PaymentReminder;
 use App\Models\BinanceAccount;
 use App\Models\Invoice;
+use App\Services\Billing\InvoiceNotifier;
+use App\Services\Billing\OverdueEnforcer;
 use App\Services\InvoiceService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -36,7 +39,11 @@ use Illuminate\Support\Facades\Log;
  */
 class EngineInvoiceController extends Controller
 {
-    public function __construct(private InvoiceService $invoices) {}
+    public function __construct(
+        private InvoiceService $invoices,
+        private InvoiceNotifier $notifier,
+        private OverdueEnforcer $enforcer,
+    ) {}
 
     public function monthly(Request $request, string $exchange): JsonResponse
     {
@@ -101,7 +108,12 @@ class EngineInvoiceController extends Controller
                     'realized' => (float) ($account->realized_percentage ?? 20),
                     'unrealized' => (float) ($account->unrealized_percentage ?? 6),
                 ], $exchange);
+                // Day 0 of the schedule: "your invoice is ready". Only a real
+                // fee — a $0 month is stored paid and owes nothing.
+                $emailed = $invoice->status === 'pending' && (float) $invoice->total_fee > 0
+                    && $this->notifier->issued($invoice);
                 $created[] = $who + [
+                    'emailed' => $emailed,
                     'invoice_id' => $invoice->id,
                     'total_fee' => round((float) $invoice->total_fee, 2),
                     'status' => $invoice->status,
@@ -151,7 +163,94 @@ class EngineInvoiceController extends Controller
                 'skipped' => count($skipped) + count($disconnected),
                 'failed' => count($failed),
                 'amount' => round(array_sum(array_column($billed, 'total_fee')), 2),
+                'emailed' => count(array_filter($created, fn ($c) => $c['emailed'])),
             ],
         ]);
+    }
+
+    /**
+     * POST /api/engine/{exchange}/invoices/remind  {month_year, stage}
+     *
+     * stage `gentle` (the 2nd) / `firm` (the 3rd) emails every customer whose
+     * invoice for that month is still pending and not yet due; `issued`
+     * re-sends the day-0 "invoice ready" email to the same set (for a month
+     * invoiced before that email was live). Never the master, never a
+     * sandbox scratch row, never a paid or already-overdue invoice.
+     */
+    public function remind(Request $request, string $exchange): JsonResponse
+    {
+        $data = $request->validate([
+            'month_year' => ['required', 'regex:/^\d{4}-(0[1-9]|1[0-2])$/'],
+            'stage' => ['required', 'in:issued,gentle,firm'],
+        ]);
+
+        $masters = DB::table('user_credentials')->where('type', 'master')->pluck('uni_id')->all();
+        $open = Invoice::forExchange($exchange)
+            ->where('month_year', $data['month_year'])
+            ->where('status', 'pending')
+            ->where('total_fee', '>', 0)
+            ->whereDate('due_date', '>=', today()->toDateString())
+            ->where('api_key', 'not like', 'SBXINV-%')
+            ->whereNotIn('user_id', $masters)
+            ->orderBy('id')
+            ->get();
+
+        $rows = [];
+        foreach ($open as $invoice) {
+            $sent = $data['stage'] === 'issued'
+                ? $this->notifier->issued($invoice)
+                : $this->notifier->reminder($invoice, $data['stage'] === 'gentle'
+                    ? PaymentReminder::STAGE_GENTLE
+                    : PaymentReminder::STAGE_FIRM);
+            $rows[] = $this->row($invoice) + ['emailed' => $sent];
+        }
+
+        return response()->json([
+            'success' => true,
+            'month_year' => $data['month_year'],
+            'stage' => $data['stage'],
+            'unpaid' => $rows,
+            'totals' => [
+                'unpaid' => count($rows),
+                'emailed' => count(array_filter($rows, fn ($r) => $r['emailed'])),
+                'amount' => round(array_sum(array_column($rows, 'total_fee')), 2),
+            ],
+        ]);
+    }
+
+    /**
+     * POST /api/engine/{exchange}/invoices/enforce
+     *
+     * The 4th at the billing hour: every pending invoice due today or earlier
+     * goes overdue, its account stops trading and the customer is emailed
+     * "trading paused". Paying switches it back on (InvoiceService::settle).
+     * The nightly engine:mark-overdue is the safety net behind this.
+     */
+    public function enforce(string $exchange): JsonResponse
+    {
+        $result = $this->enforcer->run(today());
+        $rows = $result['overdue']->map(fn (Invoice $i) => $this->row($i))->values()->all();
+
+        return response()->json([
+            'success' => true,
+            'paused' => $rows,
+            'totals' => [
+                'overdue' => count($rows),
+                'disabled' => $result['disabled'],
+                'emailed' => $result['emailed'],
+                'amount' => round(array_sum(array_column($rows, 'total_fee')), 2),
+            ],
+        ]);
+    }
+
+    /** @return array{invoice_id: int, owner_name: ?string, total_fee: float, due_date: ?string} */
+    private function row(Invoice $invoice): array
+    {
+        return [
+            'invoice_id' => (int) $invoice->id,
+            'owner_name' => DB::table('user_credentials')->where('uni_id', $invoice->user_id)->value('name'),
+            'total_fee' => round((float) $invoice->total_fee, 2),
+            'due_date' => $invoice->due_date ? Carbon::parse($invoice->due_date)->toDateString() : null,
+        ];
     }
 }
