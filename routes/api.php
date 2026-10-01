@@ -8,6 +8,7 @@ use App\Http\Controllers\AdminInsightsController;
 use App\Http\Controllers\AdminInvoiceController;
 use App\Http\Controllers\AdminMaintenanceController;
 use App\Http\Controllers\AdminManualTradeController;
+use App\Http\Controllers\AdminOpenPositionsController;
 use App\Http\Controllers\AdminReferralController;
 use App\Http\Controllers\AdminTodoController;
 use App\Http\Controllers\AdminTradeLogController;
@@ -216,6 +217,12 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::put('/past-positions/{id}', [AdminController::class, 'updatePastPosition']);
         Route::delete('/positions/{id}', [AdminController::class, 'deletePosition']);
         Route::delete('/past-positions/{id}', [AdminController::class, 'deletePastPosition']);
+        // Admin Dashboard → Open positions: every venue, a forced exchange
+        // read (30 s platform-wide cooldown, in the controller) and a manual
+        // close through the engine's exit path.
+        Route::get('/open-positions', [AdminOpenPositionsController::class, 'index']);
+        Route::post('/open-positions/refresh', [AdminOpenPositionsController::class, 'refresh']);
+        Route::post('/open-positions/close', [AdminOpenPositionsController::class, 'close'])->middleware('throttle:10,1');
         // GET /users, /users/{uniId}{,/summary,/daily-pnl,/analytics} live in
         // the staff group above.
         Route::post('/users', [AdminUserController::class, 'store']);

@@ -124,6 +124,45 @@ class EngineCache
         return ['ledger' => $response->json('ledger'), 'exchange' => $response->json('exchange'), 'error' => null];
     }
 
+    /**
+     * Close specific open positions through the engine's exit path (Admin
+     * Dashboard → Open positions). Like ledger() it RETURNS the engine's
+     * answer and reports a failure: an admin is waiting on per-account results.
+     *
+     * The engine waits up to 40 s for the closes, so this waits a little longer.
+     *
+     * @param  list<array{exchange: string, uni_id: string, symbol: string, side: string}>  $positions
+     * @return array{status: ?int, body: mixed, error: ?string}
+     */
+    public function closePositions(array $positions, int $timeout = 55): array
+    {
+        $base = rtrim((string) config('services.engine.targets.local', 'http://127.0.0.1:5010'), '/');
+        $secret = (string) (config('services.engine.webhook_secrets.binance') ?? '');
+        if ($secret === '') {
+            return ['status' => null, 'body' => null, 'error' => 'The trading engine is not configured on this server.'];
+        }
+
+        try {
+            $response = Http::withHeaders(['X-Admin-Secret' => $secret])
+                ->timeout($timeout)
+                ->post("{$base}/admin/close-positions", ['positions' => array_values($positions)]);
+        } catch (\Throwable $e) {
+            Log::warning('Engine close-positions failed.', ['exception' => $e->getMessage()]);
+
+            return ['status' => null, 'body' => null, 'error' => 'The trading engine did not answer.'];
+        }
+
+        $body = $response->json() ?? ['raw' => substr((string) $response->body(), 0, 500)];
+
+        return [
+            'status' => $response->status(),
+            'body' => $body,
+            'error' => $response->successful()
+                ? null
+                : (string) ($response->json('message') ?? $response->json('error') ?? 'The engine refused the close.'),
+        ];
+    }
+
     /** @return array{refreshed: list<string>, error: ?string} */
     public function refreshAll(): array
     {
