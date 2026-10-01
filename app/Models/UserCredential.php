@@ -55,6 +55,7 @@ class UserCredential extends Authenticatable
             'affiliate_percentage' => 'decimal:2',
             'last_activity' => 'datetime',
             'discord_linked_at' => 'datetime',
+            'verification_code_expires_at' => 'datetime',
         ];
     }
 
@@ -137,6 +138,9 @@ class UserCredential extends Authenticatable
             'user_banner' => $this->imageUrl($this->user_banner),
             'has_exchange_account' => $this->hasExchangeAccount(),
             'has_password' => $this->hasPassword(),
+            // False until the mailed 6-digit code is accepted; every guarded
+            // route answers 403 EMAIL_UNVERIFIED until then.
+            'email_verified' => (bool) $this->email_verified,
             // The id stays a string: a Discord snowflake overflows a JS number.
             'discord' => $this->hasDiscord() ? [
                 'id' => (string) $this->discord_id,

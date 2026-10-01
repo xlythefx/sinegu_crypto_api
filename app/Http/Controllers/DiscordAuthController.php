@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\UserCredential;
+use App\Services\Auth\EmailVerification;
 use App\Services\Discord\DiscordGateway;
 use App\Services\Discord\DiscordRoleSync;
 use App\Services\Notifications\AccountMail;
@@ -56,6 +57,7 @@ class DiscordAuthController extends Controller
         private DiscordRoleSync $roles,
         private ReferralService $referrals,
         private AccountMail $mail,
+        private EmailVerification $verification,
     ) {}
 
     /**
@@ -267,8 +269,9 @@ class DiscordAuthController extends Controller
                     'name' => $name,
                     'email' => $profile['email'],
                     'password' => null,
-                    // Discord's word on the address, unlike register()'s blanket true.
-                    'email_verified' => $profile['verified'],
+                    // Discord's word on the address. When Discord has not
+                    // verified it, the mailed code (below) has to.
+                    'email_verified' => (bool) $profile['verified'],
                     'terms_accepted_at' => now(),
                     'terms_version' => $validated['terms_version'] ?? null,
                     'discord_id' => $profile['id'],
@@ -289,8 +292,14 @@ class DiscordAuthController extends Controller
 
         // Same queue, same notice as register() — a Discord signup lands in the
         // approval queue exactly like a password one, so the desk hears about
-        // both or it silently works only half the sign-ups.
-        $this->mail->registrationPending($user, AccountMail::VIA_DISCORD);
+        // both or it silently works only half the sign-ups. An address Discord
+        // vouches for is announced now; any other proves itself by the mailed
+        // code first, and EmailVerification::verify sends the notice then.
+        if ($user->email_verified) {
+            $this->mail->registrationPending($user, AccountMail::VIA_DISCORD);
+        } else {
+            $this->verification->issue($user);
+        }
 
         return $this->loggedIn($user, $profile['access_token'], 'Account created', 201);
     }

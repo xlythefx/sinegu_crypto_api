@@ -3,6 +3,7 @@
 namespace App\Services\Notifications;
 
 use App\Mail\AccountApproved;
+use App\Mail\EmailVerificationCode;
 use App\Mail\NewRegistrationNotice;
 use App\Models\UserCredential;
 use Illuminate\Support\Facades\Log;
@@ -10,8 +11,8 @@ use Illuminate\Support\Facades\Mail;
 use Throwable;
 
 /**
- * The two account-lifecycle emails: the admin's "someone is waiting" notice and
- * the customer's "you're approved".
+ * The account-lifecycle emails: the sign-up's verification code, the admin's
+ * "someone is waiting" notice and the customer's "you're approved".
  *
  * BEST-EFFORT, like EngineCache and DiscordRoleSync. A registration that 500s
  * because an SMTP host was unreachable loses the account the user just created;
@@ -86,6 +87,24 @@ class AccountMail
 
         $this->attempt('account-approved', $user->uni_id, fn () => Mail::to($to)->send(
             new AccountApproved(name: (string) $user->name)
+        ));
+    }
+
+    /**
+     * Mail a sign-up their email-verification code. Best-effort like the rest:
+     * the code is stored before this runs, so a mail outage leaves the user on
+     * the code screen with "Resend" — never a 500 that loses the registration.
+     */
+    public function verificationCode(UserCredential $user, string $code, int $ttlMinutes): void
+    {
+        $to = trim((string) $user->email);
+
+        if ($to === '') {
+            return;
+        }
+
+        $this->attempt('email-verification-code', $user->uni_id, fn () => Mail::to($to)->send(
+            new EmailVerificationCode(name: (string) $user->name, code: $code, ttlMinutes: $ttlMinutes)
         ));
     }
 

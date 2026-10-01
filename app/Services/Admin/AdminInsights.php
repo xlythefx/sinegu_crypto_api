@@ -67,7 +67,11 @@ class AdminInsights
         $masterToday = $this->pastRows($master)
             ->filter(fn ($p) => $p->closed_at >= $today->toDateTimeString());
 
+        // The approval queue holds VERIFIED sign-ups only: an address nobody
+        // has proven is not something the desk should approve. Unverified rows
+        // stay findable on User Management.
         $pendingUsers = UserCredential::where('status', 'pending')
+            ->where('email_verified', 1)
             ->orderBy('created_at')
             ->get(['uni_id', 'name', 'email', 'created_at']);
 

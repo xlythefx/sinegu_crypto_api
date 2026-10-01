@@ -3,7 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\UserCredential;
-use App\Services\Notifications\AccountMail;
+use App\Services\Auth\EmailVerification;
 use App\Services\ReferralService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -14,7 +14,7 @@ class AuthController extends Controller
 {
     public function __construct(
         private ReferralService $referrals,
-        private AccountMail $mail,
+        private EmailVerification $verification,
     ) {
     }
 
@@ -45,8 +45,9 @@ class AuthController extends Controller
                 'name' => $validated['name'],
                 'email' => $validated['email'],
                 'password' => $validated['password'],
-                // Local dev: skip the email-verification flow for now.
-                'email_verified' => true,
+                // Proven by the mailed code (POST /auth/email/verify); until
+                // then every guarded route answers 403 EMAIL_UNVERIFIED.
+                'email_verified' => false,
                 'terms_accepted_at' => now(),
                 'terms_version' => $validated['terms_version'] ?? null,
                 // New sign-ups wait in the admin approval queue (accept → active,
@@ -59,11 +60,15 @@ class AuthController extends Controller
             return $user;
         });
 
-        // The admin desk is the only thing standing between this row and a
-        // working account, so it is told immediately — after COMMIT, and
-        // best-effort: a mail failure must not undo a registration.
-        $this->mail->registrationPending($user, AccountMail::VIA_PASSWORD);
+        // Mail the verification code — after COMMIT, and best-effort: a mail
+        // failure must not undo a registration ("Resend" is the way on). The
+        // team's "someone registered" notice waits until the code is accepted
+        // (EmailVerification::verify), so an address nobody proved never
+        // reaches the approval desk.
+        $this->verification->issue($user);
 
+        // The token is still issued: the account exists, and the code screen
+        // needs a session to know whose code is being typed.
         $token = $user->createToken('spa')->plainTextToken;
 
         return response()->json([

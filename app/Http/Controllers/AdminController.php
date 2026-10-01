@@ -477,10 +477,12 @@ class AdminController extends Controller
 
         // Pending first (the approval queue), then newest. CASE rather than
         // MySQL's FIELD() so the same query runs on the SQLite test database.
-        $users = UserCredential::orderByRaw("CASE WHEN status = 'pending' THEN 0 ELSE 1 END")
+        // Only a VERIFIED pending sign-up is in the queue; an unverified one is
+        // still listed (staff can find it) but sorts with everyone else.
+        $users = UserCredential::orderByRaw("CASE WHEN status = 'pending' AND email_verified = 1 THEN 0 ELSE 1 END")
             ->orderByDesc('created_at')
             ->get([
-                'uni_id', 'name', 'email', 'status', 'type',
+                'uni_id', 'name', 'email', 'status', 'type', 'email_verified',
                 'realized_percentage', 'unrealized_percentage',
                 'created_at', 'last_activity',
             ]);
@@ -528,6 +530,8 @@ class AdminController extends Controller
                 'email' => $u->email,
                 'status' => $u->status,
                 'type' => $u->type,
+                // Lets the client keep unverified sign-ups out of its pending queue.
+                'email_verified' => (bool) $u->email_verified,
                 'realized_percentage' => (float) $u->realized_percentage,
                 'unrealized_percentage' => (float) $u->unrealized_percentage,
                 'created_at' => $u->created_at?->toISOString(),

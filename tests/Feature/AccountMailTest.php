@@ -3,14 +3,17 @@
 namespace Tests\Feature;
 
 use App\Mail\AccountApproved;
+use App\Mail\EmailVerificationCode;
 use App\Mail\NewRegistrationNotice;
 use App\Models\UserCredential;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Mail;
 use RuntimeException;
 
 /**
- * The two account-lifecycle emails: the admin's "someone is waiting" notice on
- * registration, and the customer's "you're approved" on acceptance.
+ * The account-lifecycle emails: the admin's "someone is waiting" notice once a
+ * sign-up has verified their email (EmailVerificationTest covers the code
+ * itself), and the customer's "you're approved" on acceptance.
  *
  * What matters here is that they are NOTIFICATIONS, not steps: neither a
  * missing admin address nor a dead SMTP host may take down a registration or
@@ -36,6 +39,15 @@ class AccountMailTest extends EngineTestCase
         ], $overrides));
     }
 
+    /** Register, then type the code the API stored — the notice is sent on verify. */
+    private function registerAndVerify(array $overrides = [])
+    {
+        $token = $this->register($overrides)->assertStatus(201)->json('token');
+        $code = DB::table('user_credentials')->where('email', $overrides['email'] ?? 'jonathan@example.test')->value('verification_code');
+
+        return $this->postJson('/api/auth/email/verify', ['code' => $code], ['Authorization' => 'Bearer '.$token]);
+    }
+
     private function adminHeaders(string $uniId): array
     {
         $this->app['auth']->forgetGuards();
@@ -43,9 +55,9 @@ class AccountMailTest extends EngineTestCase
         return ['Authorization' => 'Bearer '.UserCredential::find($uniId)->createToken('spa')->plainTextToken];
     }
 
-    public function test_a_registration_notifies_the_admin_desk_with_the_facts_it_needs(): void
+    public function test_a_verified_registration_notifies_the_admin_desk_with_the_facts_it_needs(): void
     {
-        $this->register()->assertStatus(201);
+        $this->registerAndVerify()->assertOk();
 
         Mail::assertSent(NewRegistrationNotice::class, function (NewRegistrationNotice $mail) {
             return $mail->hasTo('desk@pixel-alpha.test')
@@ -59,7 +71,7 @@ class AccountMailTest extends EngineTestCase
 
     public function test_the_notice_goes_to_the_desk_and_never_to_the_person_who_registered(): void
     {
-        $this->register()->assertStatus(201);
+        $this->registerAndVerify()->assertOk();
 
         Mail::assertSent(NewRegistrationNotice::class, fn (NewRegistrationNotice $mail) => ! $mail->hasTo('jonathan@example.test'));
         // Registering is not being approved: the welcome mail waits for an admin.
@@ -71,7 +83,7 @@ class AccountMailTest extends EngineTestCase
         // support@ plus a teammate; a junk entry is dropped, not fatal.
         config(['mail.admin_address' => 'desk@pixel-alpha.test, partner@example.test ,not-an-address']);
 
-        $this->register()->assertStatus(201);
+        $this->registerAndVerify()->assertOk();
 
         Mail::assertSent(NewRegistrationNotice::class, fn (NewRegistrationNotice $mail) => $mail->hasTo('desk@pixel-alpha.test')
             && $mail->hasTo('partner@example.test')
@@ -82,9 +94,11 @@ class AccountMailTest extends EngineTestCase
     {
         config(['mail.admin_address' => null]);
 
-        $this->register()->assertStatus(201);
+        $this->registerAndVerify()->assertOk();
 
-        Mail::assertNothingSent();
+        // Only the sign-up's own code went out; no team notice had anywhere to go.
+        Mail::assertNotSent(NewRegistrationNotice::class);
+        Mail::assertSent(EmailVerificationCode::class, fn (EmailVerificationCode $mail) => $mail->hasTo('jonathan@example.test'));
         $this->assertDatabaseHas('user_credentials', ['email' => 'jonathan@example.test', 'status' => 'pending']);
     }
 

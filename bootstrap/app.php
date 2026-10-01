@@ -17,6 +17,8 @@ return Application::configure(basePath: dirname(__DIR__))
             'admin' => \App\Http\Middleware\EnsureAdmin::class,
             'staff' => \App\Http\Middleware\EnsureStaff::class,
             'developer' => \App\Http\Middleware\EnsureDeveloper::class,
+            // Not 'verified' — that is Laravel's own alias for its link-based flow.
+            'email.verified' => \App\Http\Middleware\EnsureEmailVerified::class,
             'engine' => \App\Http\Middleware\VerifyEngineSecret::class,
             'stripe.webhook' => \App\Http\Middleware\VerifyStripeSignature::class,
             'coinsbuy.webhook' => \App\Http\Middleware\VerifyCoinsbuySignature::class,

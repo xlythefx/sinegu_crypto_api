@@ -3,6 +3,7 @@
 namespace App\Services\Notifications;
 
 use App\Mail\AccountApproved;
+use App\Mail\EmailVerificationCode;
 use App\Mail\ExchangeConnectedNotice;
 use App\Mail\InvoiceIssued;
 use App\Mail\InvoiceIssuedNotice;
@@ -15,6 +16,7 @@ use App\Mail\PaymentReminder;
 use App\Mail\PixelMail;
 use App\Mail\WeeklySummary;
 use App\Mail\WelcomePending;
+use App\Services\Auth\EmailVerification;
 
 /**
  * Every email the product sends, with realistic sample data — the ONE list
@@ -153,13 +155,23 @@ class EmailCatalogue
                 'note' => 'Already sent today.',
                 'mail' => new PasswordResetCode($customer['first'], '408217', 15),
             ],
+            [
+                'slug' => 'email-verification-code',
+                'audience' => self::AUDIENCE_CUSTOMER,
+                'title' => 'Email verification code',
+                'trigger' => 'Right after someone registers (and on "Resend code").',
+                'to' => 'The new sign-up',
+                'live' => true,
+                'note' => 'Sent today. The team\'s sign-up notice now waits until this code is entered.',
+                'mail' => new EmailVerificationCode($customer['first'], '408217', EmailVerification::CODE_TTL_MINUTES),
+            ],
 
             // ── To the team ────────────────────────────────────────────────
             [
                 'slug' => 'team-new-registration',
                 'audience' => self::AUDIENCE_TEAM,
                 'title' => 'New sign-up',
-                'trigger' => 'The moment someone registers.',
+                'trigger' => 'The moment a new sign-up confirms their email (or signs up through Discord with a verified email).',
                 'to' => $team,
                 'live' => true,
                 'note' => 'Already sent today.',

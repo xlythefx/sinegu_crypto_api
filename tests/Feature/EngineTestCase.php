@@ -43,6 +43,9 @@ abstract class EngineTestCase extends TestCase
             'password' => bcrypt('secret-password'),
             'status' => 'active',
             'type' => 'user',
+            // Every guarded route requires it (EnsureEmailVerified); a test
+            // about an unverified account overrides it explicitly.
+            'email_verified' => 1,
             'created_at' => now(),
             'updated_at' => now(),
         ], $overrides));
