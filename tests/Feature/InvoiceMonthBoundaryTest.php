@@ -68,7 +68,7 @@ class InvoiceMonthBoundaryTest extends EngineTestCase
         $this->assertEqualsWithDelta(500, (float) $invoice->realized_pnl, 0.01, 'June trade only');
         $this->assertEqualsWithDelta(100, (float) $invoice->total_fee, 0.01);
         // Due on the 8th of the month after the period, never a month later.
-        $this->assertSame('2026-07-08', $invoice->due_date->toDateString());
+        $this->assertSame('2026-07-04', $invoice->due_date->toDateString());
     }
 
     /** February is the sharpest edge: no 29th, 30th or 31st in a common year. */

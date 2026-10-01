@@ -49,7 +49,7 @@ class EngineMonthlyInvoiceTest extends EngineTestCase
             ->assertJsonPath('totals.created', 1)
             ->assertJsonPath('totals.billed', 1)
             ->assertJsonPath('totals.amount', 100) // 20% of 500 realized
-            ->assertJsonPath('created.0.due_date', '2026-10-08');
+            ->assertJsonPath('created.0.due_date', '2026-10-04');
 
         $invoice = Invoice::where(['account_id' => $id, 'month_year' => self::MONTH])->firstOrFail();
         $this->assertSame('pending', $invoice->status);

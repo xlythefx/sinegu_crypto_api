@@ -581,7 +581,7 @@ class SandboxInvoiceController extends Controller
                 'fee_unrealized' => 0,
                 'total_fee' => 0,
                 'status' => 'paid',
-                'due_date' => $prior->copy()->addMonthNoOverflow()->startOfMonth()->addDays(7)->toDateString(),
+                'due_date' => $prior->copy()->addMonthNoOverflow()->startOfMonth()->addDays(3)->toDateString(),
             ]
         );
     }

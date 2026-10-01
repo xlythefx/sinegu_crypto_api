@@ -196,7 +196,9 @@ class InvoiceService
         $totalFee = round($feeRealized + $feeUnrealized, 8);
 
         $hwmAfter = $chargeable ? max($hwmBefore, $equityEnd) : $hwmBefore;
-        $dueDate = $period->copy()->addMonthNoOverflow()->startOfMonth()->addDays(7);
+        // Due the 4th of the following month (owner, 2026-10-01): invoiced the
+        // 1st, reminded the 2nd and 3rd, paused on the 4th if still unpaid.
+        $dueDate = $period->copy()->addMonthNoOverflow()->startOfMonth()->addDays(3);
 
         return [
             'user_id' => $account->uni_id,
