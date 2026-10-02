@@ -107,9 +107,11 @@ class InvoiceService
      * (a split that does not add up to the total would be a second, divergent
      * statement of what is owed), and fee_source says so.
      *
-     * Due in seven days from TODAY, not from the billing month: a manual
-     * invoice for a past month would otherwise be born overdue, and
-     * engine:mark-overdue would disable the account the same night.
+     * Due on the 4th of the month after the billing month — the same due
+     * date as the monthly run (owner, 2026-10-02). When that 4th has already
+     * passed (an invoice issued late), it is due 3 days from TODAY instead:
+     * a past due date would be born overdue, and engine:mark-overdue would
+     * disable the account the same night.
      *
      * @throws \DomainException for an account that is never invoiced, or when
      *                          that month's invoice is already paid
@@ -141,8 +143,16 @@ class InvoiceService
             'total_fee' => round($amount, 2),
             'fee_source' => 'manual',
             'status' => 'pending',
-            'due_date' => now()->addDays(7)->toDateString(),
+            'due_date' => self::manualDueDate($monthYear)->toDateString(),
         ]));
+    }
+
+    /** See generateManual: the billing 4th, or today + 3 once it has passed. */
+    public static function manualDueDate(string $monthYear): Carbon
+    {
+        $fourth = Carbon::createFromFormat('!Y-m', $monthYear)->addMonthNoOverflow()->startOfMonth()->addDays(3);
+
+        return $fourth->lt(today()) ? today()->addDays(3) : $fourth;
     }
 
     /**

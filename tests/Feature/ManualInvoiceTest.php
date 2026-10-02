@@ -40,9 +40,31 @@ class ManualInvoiceTest extends EngineTestCase
 
         $row = DB::table('invoices')->first();
         $this->assertSame('manual', $row->fee_source);
-        // Due a week from today, never from the (past) billing month — or the
-        // overdue sweep would disable the account the night it was created.
-        $this->assertSame(now()->addDays(7)->toDateString(), substr((string) $row->due_date, 0, 10));
+    }
+
+    public function test_it_is_due_on_the_4th_after_the_billing_month(): void
+    {
+        $id = $this->makeAccount($this->makeUser());
+        $this->admin();
+        $this->travelTo('2026-09-01 10:00:00');
+
+        $this->manual($id, 15, '2026-08')->assertCreated();
+
+        // August's invoice, issued 1 Sep → due 4 Sep, like the monthly run.
+        $this->assertSame('2026-09-04', substr((string) DB::table('invoices')->value('due_date'), 0, 10));
+    }
+
+    public function test_a_late_one_is_due_in_three_days_never_in_the_past(): void
+    {
+        $id = $this->makeAccount($this->makeUser());
+        $this->admin();
+        $this->travelTo('2026-09-10 10:00:00');
+
+        $this->manual($id, 15, '2026-08')->assertCreated();
+
+        // 4 Sep has passed: a past due date would let the overdue sweep
+        // disable the account the night it was created. 10 Sep + 3 days.
+        $this->assertSame('2026-09-13', substr((string) DB::table('invoices')->value('due_date'), 0, 10));
     }
 
     public function test_it_replaces_an_unpaid_invoice_and_regenerating_resets_the_source(): void
