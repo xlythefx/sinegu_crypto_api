@@ -150,7 +150,7 @@ class AdminOpenPositionsTest extends EngineTestCase
         $this->postJson('/api/admin/open-positions/close', [
             'positions' => [['exchange' => 'binance', 'id' => $id]],
         ], $headers)->assertStatus(422)->assertJson(['error_code' => 'NOT_CLOSABLE']);
-        Http::assertNothingSent();
+        $this->assertNoEngineAction();
     }
 
     public function test_close_refuses_a_row_that_is_gone(): void
@@ -159,6 +159,48 @@ class AdminOpenPositionsTest extends EngineTestCase
         $this->postJson('/api/admin/open-positions/close', [
             'positions' => [['exchange' => 'binance', 'id' => 999999]],
         ], $this->admin())->assertStatus(409)->assertJson(['error_code' => 'POSITION_GONE']);
-        Http::assertNothingSent();
+        $this->assertNoEngineAction();
+    }
+
+    /**
+     * The engine refuses a whole close request naming a venue it is not
+     * trading, so such a row must not be closable — or one Bybit row inside a
+     * "close everyone" would stop every other close in the batch.
+     */
+    public function test_a_venue_the_engine_does_not_trade_is_not_closable(): void
+    {
+        Http::fake(['engine.test:5010/health' => Http::response(['status' => 'ok', 'exchanges' => ['binance' => []]], 200)]);
+        $headers = $this->admin();
+        $alice = $this->makeUser();
+        $binance = $this->position($alice, $this->makeAccount($alice));
+        $bybit = $this->position($alice, $this->makeAccount($alice, [], 'bybit'), [], 'bybit');
+
+        $rows = collect($this->getJson('/api/admin/open-positions', $headers)->assertOk()->json('positions'));
+        $this->assertTrue($rows->first(fn ($r) => $r['exchange'] === 'binance' && $r['id'] === $binance)['closable']);
+        $off = $rows->first(fn ($r) => $r['exchange'] === 'bybit' && $r['id'] === $bybit);
+        $this->assertFalse($off['closable']);
+        $this->assertStringContainsString('not trading Bybit', $off['blocked_reason']);
+
+        $this->postJson('/api/admin/open-positions/close', [
+            'positions' => [['exchange' => 'bybit', 'id' => $bybit]],
+        ], $headers)->assertStatus(422)->assertJson(['error_code' => 'NOT_CLOSABLE']);
+        $this->assertNoEngineAction();
+    }
+
+    public function test_an_engine_that_does_not_answer_blocks_no_venue(): void
+    {
+        Http::fake(['engine.test:5010/health' => Http::response('', 503)]);
+        $headers = $this->admin();
+        $alice = $this->makeUser();
+        $bybit = $this->position($alice, $this->makeAccount($alice, [], 'bybit'), [], 'bybit');
+
+        $rows = collect($this->getJson('/api/admin/open-positions', $headers)->assertOk()->json('positions'));
+        $this->assertTrue($rows->first(fn ($r) => $r['exchange'] === 'bybit' && $r['id'] === $bybit)['closable']);
+    }
+
+    /** Reading /health is fine; nothing may be closed or re-synced. */
+    private function assertNoEngineAction(): void
+    {
+        Http::assertNotSent(fn (HttpRequest $r) => str_contains($r->url(), '/admin/'));
     }
 }

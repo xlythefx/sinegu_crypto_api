@@ -220,6 +220,12 @@ class AdminOpenPositionsController extends Controller
     private function rows(string $exchange, ?array $ids = null): Collection
     {
         $schema = ExchangeSchema::for($exchange);
+        // A venue the engine is not trading would make it refuse the WHOLE
+        // close request (EXCHANGE_NOT_ENABLED) — so one Bybit row inside a
+        // "close everyone" would stop every other close. Unknown (engine
+        // silent) blocks nothing; the engine's own refusal still stands.
+        $traded = $this->engine->tradedExchanges();
+        $venueOff = $traded !== null && ! in_array($exchange, $traded, true);
         $query = DB::table("{$schema->positions} as p")
             ->leftJoin("{$schema->accountsTable} as a", 'p.api_key', '=', 'a.api_key')
             ->leftJoin('user_credentials as u', 'p.uni_id', '=', 'u.uni_id')
@@ -234,12 +240,14 @@ class AdminOpenPositionsController extends Controller
             'a.id as account_id', 'a.name as account_name', 'a.enabled', 'a.demo', 'a.is_sandbox',
             'a.deleted_at', 'a.key_status',
             'u.name as owner_name', 'u.type as owner_type', 'u.status as owner_status',
-        ])->map(function ($p) use ($exchange) {
+        ])->map(function ($p) use ($exchange, $venueOff) {
             $amount = (float) $p->position_amt;
             $side = in_array($p->position_side, ['LONG', 'SHORT'], true)
                 ? $p->position_side
                 : ($amount < 0 ? 'SHORT' : 'LONG');
-            $reason = $this->blockedReason($p);
+            $reason = $venueOff
+                ? 'The engine is not trading '.ucfirst($exchange).' — close it on the exchange.'
+                : $this->blockedReason($p);
 
             return [
                 'id' => (int) $p->id,

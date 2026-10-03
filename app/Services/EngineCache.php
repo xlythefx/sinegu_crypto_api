@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
@@ -31,6 +32,8 @@ class EngineCache
      * two seconds it is down, and the TTL will cover us.
      */
     private const TIMEOUT = 2;
+
+    private const TRADED_KEY = 'engine:traded-exchanges';
 
     /** Who may trade changed: connected, disconnected, enabled, suspended. */
     public function refreshAccounts(): bool
@@ -161,6 +164,37 @@ class EngineCache
                 ? null
                 : (string) ($response->json('message') ?? $response->json('error') ?? 'The engine refused the close.'),
         ];
+    }
+
+    /**
+     * The venues the engine is trading right now (its `/health` →
+     * `exchanges`), remembered for a minute. Null when the engine does not
+     * answer — UNKNOWN, which callers must not read as "trades nothing".
+     *
+     * @return list<string>|null
+     */
+    public function tradedExchanges(): ?array
+    {
+        $cached = Cache::get(self::TRADED_KEY);
+        if (is_array($cached)) {
+            return $cached;
+        }
+
+        $base = rtrim((string) config('services.engine.targets.local', 'http://127.0.0.1:5010'), '/');
+        try {
+            $response = Http::timeout(self::TIMEOUT)->get("{$base}/health");
+        } catch (\Throwable) {
+            return null;
+        }
+        $exchanges = $response->successful() ? $response->json('exchanges') : null;
+        if (! is_array($exchanges)) {
+            return null;
+        }
+
+        $list = array_values(array_map('strval', array_keys($exchanges)));
+        Cache::put(self::TRADED_KEY, $list, 60);
+
+        return $list;
     }
 
     /** @return array{refreshed: list<string>, error: ?string} */
