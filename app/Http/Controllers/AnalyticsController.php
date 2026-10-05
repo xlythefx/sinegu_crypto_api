@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\UserCredential;
 use App\Services\Exchanges\ExchangeSchema;
+use App\Services\Pnl\DailyReturnStore;
 use App\Services\UserStatsService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -15,7 +16,10 @@ class AnalyticsController extends Controller
     /** Bucket label for closed trades that carry no strategy tag. */
     private const UNTAGGED = 'Untagged';
 
-    public function __construct(private UserStatsService $stats) {}
+    public function __construct(
+        private UserStatsService $stats,
+        private DailyReturnStore $returns,
+    ) {}
 
     /**
      * GET /api/analytics
@@ -171,6 +175,19 @@ class AnalyticsController extends Controller
             'unrecorded_fees' => $dailyUnrecordedFees,
         ] = UserStatsService::capitalWalk($everyTrade, $flowByDay, $accounts);
         $initialDeposit = (float) $accounts->sum('initial_deposit');
+
+        // The saved daily percentages the Date Range card ADDS up. Saved from
+        // the trades and flows already loaded above (no extra query), through
+        // the same function as the P&L calendar's cells, then read back — what
+        // the page presents is what the table holds. All-time and chip-free on
+        // purpose: a stored day is the calendar's day, whatever this view is
+        // narrowed to; the card decides which days to add.
+        $this->returns->sync(
+            $uniId,
+            $exchange,
+            UserStatsService::dailyReturns($everyTrade, $flowByDay, $accounts),
+        );
+        $dailyReturns = $this->returns->read($uniId, $exchange);
 
         $tradingDays = $dailyPnl->count();
         $avgDailyPnl = $tradingDays > 0 ? round($totalRealized / $tradingDays, 2) : null;
@@ -411,6 +428,9 @@ class AnalyticsController extends Controller
                 // daily_balance, broken out so it can be shown.
                 'daily_unrecorded_fees' => $dailyUnrecordedFees,
                 'daily_flows' => $flowByDay,
+                // Saved per-day % of the starting balance (`daily_returns`),
+                // the P&L calendar's figure — summed by the Period Return.
+                'daily_returns' => (object) $dailyReturns,
                 // Capital the account held before any transfer we have on
                 // record — the walk's seed. NOT `baseline`, which is net flows
                 // alone and leaves this out.

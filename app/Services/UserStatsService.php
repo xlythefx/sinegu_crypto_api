@@ -656,31 +656,26 @@ class UserStatsService
         // (what the toggle did before) made a deposit rewrite the percentage
         // of every day already shown. Same walk as Performance Analytics'
         // `daily_capital`, so the two pages agree on any given day.
-        ['start' => $startBalance] = self::capitalWalk(
+        $returns = self::dailyReturns(
             $past,
             self::flowsByDay($this->transactions($accounts, ['type', 'amount', 'created_at'])),
             $accounts,
         );
-        $pctOf = fn (float $pnl, ?float $base) => $base !== null && $base > 0
-            ? round($pnl / $base * 100, 2)
-            : null;
 
         // The calendar is the one before-fees-era screen that keeps AFTER fees
         // as its headline: a cell is "what landed that day". `total_gross` and
         // `fees` ride along for the hover.
         $days = [];
         foreach ($past->groupBy(fn ($t) => substr((string) $t->closed_at, 0, 10)) as $date => $trades) {
-            $total = round((float) $trades->sum('pnl_net'), 2);
-            $totalGross = round((float) $trades->sum('pnl_gross'), 2);
-            $balance = $startBalance[$date] ?? null;
+            $day = $returns[$date];
             $days[$date] = [
-                'total' => $total,
-                'total_gross' => $totalGross,
+                'total' => $day['pnl'],
+                'total_gross' => $day['pnl_gross'],
                 // Null when the walk has no positive capital for the day (an
                 // account with no deposit on record) — never a divide-by-pennies.
-                'start_balance' => $balance,
-                'pct' => $pctOf($total, $balance),
-                'pct_gross' => $pctOf($totalGross, $balance),
+                'start_balance' => $day['start_balance'],
+                'pct' => $day['pct'],
+                'pct_gross' => $day['pct_gross'],
                 'fees' => round((float) $trades->sum('pnl_fee'), 2),
                 'wins' => $trades->where('pnl_net', '>', 0)->count(),
                 'losses' => $trades->where('pnl_net', '<', 0)->count(),
@@ -708,6 +703,47 @@ class UserStatsService
                 ]))->values(),
             ];
         }
+
+        return $days;
+    }
+
+    /**
+     * Each trading day's P&L and its percentage of the balance the day STARTED
+     * with — the figure printed on every P&L calendar cell, and the row
+     * {@see \App\Services\Pnl\DailyReturnStore} saves. One function so the
+     * calendar and the saved table can never disagree about a day.
+     *
+     * `pct` is rounded to 2 dp HERE, on purpose: the Date Range card adds the
+     * stored percentages up, and the sum has to be exactly the sum of the
+     * numbers the calendar shows (4.00 + 1.00 = 5.00), not of their hidden
+     * decimals.
+     *
+     * $trades must already carry the fee basis ({@see withFeeBasis}).
+     *
+     * @return array<string, array{start_balance: ?float, pnl: float, pnl_gross: float, pct: ?float, pct_gross: ?float, trades: int}>
+     */
+    public static function dailyReturns(Collection $trades, array $flowByDay, Collection $accounts): array
+    {
+        ['start' => $startBalance] = self::capitalWalk($trades, $flowByDay, $accounts);
+        $pctOf = fn (float $pnl, ?float $base) => $base !== null && $base > 0
+            ? round($pnl / $base * 100, 2)
+            : null;
+
+        $days = [];
+        foreach ($trades->groupBy(fn ($t) => substr((string) $t->closed_at, 0, 10)) as $date => $rows) {
+            $pnl = round((float) $rows->sum('pnl_net'), 2);
+            $pnlGross = round((float) $rows->sum('pnl_gross'), 2);
+            $balance = $startBalance[$date] ?? null;
+            $days[$date] = [
+                'start_balance' => $balance,
+                'pnl' => $pnl,
+                'pnl_gross' => $pnlGross,
+                'pct' => $pctOf($pnl, $balance),
+                'pct_gross' => $pctOf($pnlGross, $balance),
+                'trades' => $rows->count(),
+            ];
+        }
+        ksort($days);
 
         return $days;
     }

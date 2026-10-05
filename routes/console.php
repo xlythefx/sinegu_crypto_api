@@ -42,3 +42,8 @@ Schedule::command('payments:watch-tron')->everyMinute()->withoutOverlapping(5);
 // pass only catches the write that happened while Discord was down and the
 // role someone removed by hand in the server.
 Schedule::command('discord:sync-roles')->dailyAt('00:40')->withoutOverlapping(30);
+
+// Saved daily P&L percentages (the Date Range card adds them up). The
+// analytics endpoint saves its own scope on every read, so this only keeps the
+// rows of users who have not opened the page since their last close current.
+Schedule::command('pnl:daily-returns')->everyFifteenMinutes()->withoutOverlapping(15);
