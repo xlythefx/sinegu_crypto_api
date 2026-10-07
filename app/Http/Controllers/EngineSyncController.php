@@ -47,7 +47,9 @@ class EngineSyncController extends Controller
         $data = $request->validate([
             'accounts' => ['required', 'array'],
             'accounts.*.api_key' => ['required', 'string', 'max:128'],
-            'accounts.*.uni_id' => ['required', 'string', 'max:36'],
+            // Accepted for payload compatibility, never stored: the owner is
+            // read off the account row (see ownersByApiKey).
+            'accounts.*.uni_id' => ['sometimes', 'nullable', 'string', 'max:36'],
             'accounts.*.positions' => ['present', 'array'],
             'accounts.*.positions.*.symbol' => ['required', 'string', 'max:32'],
             'accounts.*.positions.*.position_side' => ['required', 'string', 'max:16'],
@@ -69,15 +71,24 @@ class EngineSyncController extends Controller
         ];
 
         $table = $this->schema($exchange)->positions;
+        $owners = $this->ownersByApiKey($exchange, array_column($data['accounts'], 'api_key'));
         $deleted = 0;
         $inserted = 0;
+        $unknown = 0;
 
         foreach ($data['accounts'] as $account) {
+            $uniId = $owners[$account['api_key']] ?? null;
+            if ($uniId === null) {
+                $unknown++;
+
+                continue;
+            }
+
             $rows = [];
             foreach ($account['positions'] as $pos) {
                 $row = [
                     'api_key' => $account['api_key'],
-                    'uni_id' => $account['uni_id'],
+                    'uni_id' => $uniId,
                     'symbol' => $pos['symbol'],
                     'position_side' => $pos['position_side'],
                     'position_amt' => $pos['position_amt'],
@@ -101,7 +112,13 @@ class EngineSyncController extends Controller
             });
         }
 
-        return response()->json(['success' => true, 'deleted' => $deleted, 'inserted' => $inserted]);
+        return response()->json([
+            'success' => true,
+            'deleted' => $deleted,
+            'inserted' => $inserted,
+            // Accounts with no row on this exchange — nothing was written for them.
+            'unknown_accounts' => $unknown,
+        ]);
     }
 
     /**
@@ -118,7 +135,8 @@ class EngineSyncController extends Controller
 
         $data = $request->validate([
             'api_key' => ['required', 'string', 'max:128'],
-            'uni_id' => ['required', 'string', 'max:36'],
+            // Accepted for payload compatibility, never stored (ownersByApiKey).
+            'uni_id' => ['sometimes', 'nullable', 'string', 'max:36'],
             'symbol' => ['required', 'string', 'max:32'],
             'position_side' => ['required', 'string', 'max:16'],
             'position_amt' => ['required', 'numeric'],
@@ -127,7 +145,14 @@ class EngineSyncController extends Controller
 
         $table = $this->schema($exchange)->positions;
 
-        $result = DB::transaction(function () use ($table, $data) {
+        $uniId = $this->ownersByApiKey($exchange, [$data['api_key']])[$data['api_key']] ?? null;
+        if ($uniId === null) {
+            // No row on this exchange, so no owner to file under — and a purge
+            // cascades positions, so there is nothing of its to delete either.
+            return response()->json(['success' => true, 'result' => 'unknown_account']);
+        }
+
+        $result = DB::transaction(function () use ($table, $data, $uniId) {
             $query = DB::table($table)
                 ->where('api_key', $data['api_key'])
                 ->where('symbol', $data['symbol'])
@@ -153,7 +178,7 @@ class EngineSyncController extends Controller
 
             DB::table($table)->insert([
                 'api_key' => $data['api_key'],
-                'uni_id' => $data['uni_id'],
+                'uni_id' => $uniId,
                 'symbol' => $data['symbol'],
                 'position_side' => $data['position_side'],
                 'position_amt' => $data['position_amt'],
@@ -232,7 +257,8 @@ class EngineSyncController extends Controller
         $data = $request->validate([
             'rows' => ['required', 'array'],
             'rows.*.api_key' => ['required', 'string', 'max:128'],
-            'rows.*.uni_id' => ['required', 'string', 'max:36'],
+            // Accepted for payload compatibility, never stored (ownersByApiKey).
+            'rows.*.uni_id' => ['sometimes', 'nullable', 'string', 'max:36'],
             'rows.*.symbol' => ['required', 'string', 'max:32'],
             'rows.*.position_side' => ['required', 'string', 'max:16'],
             'rows.*.position_amt' => ['required', 'numeric'],
@@ -250,11 +276,20 @@ class EngineSyncController extends Controller
         ]);
 
         $table = $this->schema($exchange)->pastPositions;
+        $owners = $this->ownersByApiKey($exchange, array_column($data['rows'], 'api_key'));
         $inserted = 0;
         $updated = 0;
         $skipped = 0;
+        $unknown = 0;
 
         foreach ($data['rows'] as $row) {
+            $uniId = $owners[$row['api_key']] ?? null;
+            if ($uniId === null) {
+                $unknown++;
+
+                continue;
+            }
+
             $existing = DB::table($table)
                 ->where('api_key', $row['api_key'])
                 ->where('symbol', $row['symbol'])
@@ -272,7 +307,7 @@ class EngineSyncController extends Controller
             if (! $existing) {
                 DB::table($table)->insert([
                     'api_key' => $row['api_key'],
-                    'uni_id' => $row['uni_id'],
+                    'uni_id' => $uniId,
                     'symbol' => $row['symbol'],
                     'position_side' => $row['position_side'],
                     'position_amt' => $row['position_amt'],
@@ -323,6 +358,8 @@ class EngineSyncController extends Controller
             'inserted' => $inserted,
             'updated' => $updated,
             'skipped' => $skipped,
+            // Rows for a key with no account on this exchange — not written.
+            'unknown' => $unknown,
         ]);
     }
 
@@ -664,5 +701,41 @@ class EngineSyncController extends Controller
             'unconfirmed' => $unconfirmed,
             'errors' => $errors,
         ]);
+    }
+
+    /**
+     * api_key → uni_id for this exchange's accounts, soft-deleted included.
+     *
+     * The owner of every row the sync endpoints write comes from the ACCOUNT
+     * ROW, never from the payload. Readers scope trades and positions by
+     * uni_id alone (UserStatsService), so a payload naming someone else's
+     * uni_id — an engine bug, a replayed request — would file this account's
+     * trades on a stranger's dashboard and into their invoice. The row already
+     * knows who it belongs to; the posted uni_id is accepted for payload
+     * compatibility and otherwise ignored. A key with no row at all has no
+     * owner to file under and is skipped and counted, never guessed — and the
+     * request still succeeds, because the engine advances its watermarks on
+     * success and a 4xx here would replay the same batch forever.
+     *
+     * Trashed rows are included on purpose: a disconnected account's late
+     * close (the poller's lookback) still belongs to the person who traded
+     * it. `api_key` is UNIQUE table-wide, so the lookup is unambiguous.
+     *
+     * @param  string[]  $apiKeys
+     * @return array<string, string>
+     */
+    private function ownersByApiKey(string $exchange, array $apiKeys): array
+    {
+        $apiKeys = array_values(array_unique(array_filter($apiKeys, 'is_string')));
+        if ($apiKeys === []) {
+            return [];
+        }
+
+        return $this->schema($exchange)->accountQuery()
+            ->withTrashed()
+            ->whereIn('api_key', $apiKeys)
+            ->pluck('uni_id', 'api_key')
+            ->map(fn ($uniId) => (string) $uniId)
+            ->all();
     }
 }

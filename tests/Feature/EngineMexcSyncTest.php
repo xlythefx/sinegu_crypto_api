@@ -68,6 +68,8 @@ class EngineMexcSyncTest extends EngineTestCase
 
     public function test_positions_sync_and_check_use_mexc_positions(): void
     {
+        // Writes file under the MEXC account's owner; an unknown key is skipped.
+        $this->makeAccount($this->makeUser(), ['api_key' => 'mx-key'], 'mexc');
         DB::table('binance_positions')->insert([
             'api_key' => 'mx-key', 'uni_id' => 'u1', 'symbol' => 'BTCUSDT', 'position_side' => 'LONG',
             'position_amt' => 0.5, 'created_at' => now(),
@@ -109,6 +111,7 @@ class EngineMexcSyncTest extends EngineTestCase
     public function test_past_positions_are_netted_at_the_mexc_taker_rate(): void
     {
         config(['services.mexc.taker_fee_rate' => 0.0002]);
+        $this->makeAccount($this->makeUser(), ['api_key' => 'mx-key'], 'mexc');
         $before = $this->binanceCounts();
 
         $this->postJson('/api/engine/mexc/past-positions/sync', ['rows' => [[
@@ -123,6 +126,27 @@ class EngineMexcSyncTest extends EngineTestCase
         $this->assertSame(19.8, (float) $row->realized_pnl);
         $this->assertSame(TradingFee::SOURCE_ESTIMATED, $row->fee_source);
         $this->assertSame(800746480548793856, (int) $row->order_id);
+        $this->assertBinanceUntouched($before);
+    }
+
+    /**
+     * The owner lookup is per exchange: a key that exists only in
+     * binance_accounts has no owner on the MEXC route, so nothing is written
+     * there — and nothing is guessed from the payload's uni_id either.
+     */
+    public function test_a_binance_accounts_key_is_unknown_on_the_mexc_route(): void
+    {
+        $user = $this->makeUser();
+        $this->makeAccount($user, ['api_key' => 'bn-only-key'], 'binance');
+        $before = $this->binanceCounts();
+
+        $this->postJson('/api/engine/mexc/past-positions/sync', ['rows' => [[
+            'api_key' => 'bn-only-key', 'uni_id' => $user, 'symbol' => 'LTCUSDT', 'position_side' => 'LONG',
+            'position_amt' => 10, 'exit_price' => 50, 'realized_pnl' => 20.0, 'side' => 'SELL',
+            'order_id' => 1, 'closed_at' => '2026-09-16 10:00:00',
+        ]]], $this->engineHeaders())->assertOk()->assertJson(['inserted' => 0, 'unknown' => 1]);
+
+        $this->assertSame(0, DB::table('mexc_pastpositions')->count());
         $this->assertBinanceUntouched($before);
     }
 

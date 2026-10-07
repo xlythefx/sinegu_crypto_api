@@ -8,6 +8,20 @@ use Illuminate\Support\Facades\DB;
 /** The engine's bookkeeping writes: positions, past positions, balances, transactions. */
 class EngineSyncTest extends EngineTestCase
 {
+    /** Owner of the connected account `key-a` that the write tests post for. */
+    private string $ownerA;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+        // Every write files its rows under the ACCOUNT's owner, and a key
+        // with no account row is skipped — so the key these tests post must
+        // be connected. `uni_id` in the payloads below is deliberately a
+        // placeholder the API ignores.
+        $this->ownerA = $this->makeUser();
+        $this->makeAccount($this->ownerA, ['api_key' => 'key-a']);
+    }
+
     private function seedPosition(string $apiKey, string $symbol = 'BTCUSDT', float $amt = 0.5, string $side = 'LONG'): void
     {
         DB::table('binance_positions')->insert([
@@ -296,5 +310,76 @@ class EngineSyncTest extends EngineTestCase
             ->assertOk()->assertJson(['inserted' => 0]);
 
         $this->assertSame(1, DB::table('binance_transactions')->where('tran_id', 424242)->count());
+    }
+
+    /* ---- who a row belongs to ---- */
+
+    /**
+     * The owner of every row written is the ACCOUNT's, never the payload's.
+     * Readers scope trades and positions by uni_id alone, so a payload naming
+     * someone else would file this account's trades on a stranger's dashboard
+     * and into their invoice.
+     */
+    public function test_writes_take_the_owner_from_the_account_row_not_the_payload(): void
+    {
+        $headers = $this->engineHeaders();
+        $stranger = $this->makeUser();
+
+        $this->postJson('/api/engine/binance/positions/sync', ['accounts' => [[
+            'api_key' => 'key-a', 'uni_id' => $stranger,
+            'positions' => [['symbol' => 'BTCUSDT', 'position_side' => 'LONG', 'position_amt' => 1]],
+        ]]], $headers)->assertOk()->assertJson(['inserted' => 1, 'unknown_accounts' => 0]);
+        $this->assertSame($this->ownerA, DB::table('binance_positions')->where('api_key', 'key-a')->value('uni_id'));
+
+        $this->postJson('/api/engine/binance/positions/upsert', [
+            'api_key' => 'key-a', 'uni_id' => $stranger, 'symbol' => 'ETHUSDT', 'position_side' => 'LONG', 'position_amt' => 2,
+        ], $headers)->assertOk()->assertJson(['result' => 'inserted']);
+        $this->assertSame($this->ownerA, DB::table('binance_positions')->where('api_key', 'key-a')->where('symbol', 'ETHUSDT')->value('uni_id'));
+
+        $this->postJson('/api/engine/binance/past-positions/sync', ['rows' => [[
+            'api_key' => 'key-a', 'uni_id' => $stranger, 'symbol' => 'BTCUSDT', 'position_side' => 'LONG',
+            'position_amt' => 1, 'exit_price' => 60000, 'realized_pnl' => 10, 'side' => 'SELL',
+            'order_id' => 77, 'closed_at' => '2026-09-12 10:00:00',
+        ]]], $headers)->assertOk()->assertJson(['inserted' => 1, 'unknown' => 0]);
+        $this->assertSame($this->ownerA, DB::table('binance_pastpositions')->where('order_id', 77)->value('uni_id'));
+
+        $this->assertSame(0, DB::table('binance_positions')->where('uni_id', $stranger)->count());
+        $this->assertSame(0, DB::table('binance_pastpositions')->where('uni_id', $stranger)->count());
+    }
+
+    /** A key with no account row has no owner to file under: skipped, never guessed from the payload. */
+    public function test_an_unknown_api_key_is_skipped_not_filed_under_the_posted_uni_id(): void
+    {
+        $headers = $this->engineHeaders();
+        $victim = $this->makeUser();
+
+        $this->postJson('/api/engine/binance/positions/sync', ['accounts' => [[
+            'api_key' => 'no-such-key', 'uni_id' => $victim,
+            'positions' => [['symbol' => 'BTCUSDT', 'position_side' => 'LONG', 'position_amt' => 1]],
+        ]]], $headers)->assertOk()->assertJson(['inserted' => 0, 'unknown_accounts' => 1]);
+
+        $this->postJson('/api/engine/binance/positions/upsert', [
+            'api_key' => 'no-such-key', 'uni_id' => $victim, 'symbol' => 'BTCUSDT', 'position_side' => 'LONG', 'position_amt' => 1,
+        ], $headers)->assertOk()->assertJson(['result' => 'unknown_account']);
+
+        $this->postJson('/api/engine/binance/past-positions/sync', ['rows' => [[
+            'api_key' => 'no-such-key', 'uni_id' => $victim, 'symbol' => 'BTCUSDT', 'position_side' => 'LONG',
+            'position_amt' => 1, 'realized_pnl' => 10, 'side' => 'SELL', 'order_id' => 78, 'closed_at' => '2026-09-12 10:00:00',
+        ]]], $headers)->assertOk()->assertJson(['inserted' => 0, 'unknown' => 1]);
+
+        $this->assertSame(0, DB::table('binance_positions')->count());
+        $this->assertSame(0, DB::table('binance_pastpositions')->count());
+    }
+
+    /** A disconnected account's late close (the poller's lookback) still belongs to the person who traded it. */
+    public function test_a_disconnected_accounts_late_close_is_still_filed_under_its_owner(): void
+    {
+        DB::table('binance_accounts')->where('api_key', 'key-a')->update(['deleted_at' => now()]);
+
+        $this->postJson('/api/engine/binance/past-positions/sync', ['rows' => [[
+            'api_key' => 'key-a', 'uni_id' => 'whatever', 'symbol' => 'BTCUSDT', 'position_side' => 'LONG',
+            'position_amt' => 1, 'realized_pnl' => 10, 'side' => 'SELL', 'order_id' => 79, 'closed_at' => '2026-09-12 10:00:00',
+        ]]], $this->engineHeaders())->assertOk()->assertJson(['inserted' => 1]);
+        $this->assertSame($this->ownerA, DB::table('binance_pastpositions')->where('order_id', 79)->value('uni_id'));
     }
 }
