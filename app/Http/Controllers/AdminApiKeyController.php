@@ -37,9 +37,10 @@ use Illuminate\Validation\Rule;
  *    sweep perform** — the row keeps its history (positions and invoices are
  *    joined on api_key) and the user's one-account-per-exchange slot is freed.
  *  - **Permanent delete exists but is narrow**: only a key that is not working
- *    (refused by the exchange, or already disconnected) and has no invoices.
- *    See {@see purgeBlockedReason()} — it is a tool for clearing rubbish rows,
- *    not an account-management action.
+ *    (refused by the exchange, or already disconnected), with no real-money
+ *    trades an invoice has yet to bill, and with no invoices. See
+ *    {@see purgeBlock()} — it is a tool for clearing rubbish rows, not an
+ *    account-management action.
  */
 class AdminApiKeyController extends Controller
 {
@@ -302,13 +303,15 @@ class AdminApiKeyController extends Controller
      *
      * Erase the row and this account's own market data — the only hard delete
      * on this screen, and the only way a stored credential ever leaves the
-     * database. Guarded by {@see purgeBlockedReason()}: not-working keys only,
-     * never one with invoices.
+     * database. Guarded by {@see purgeBlock()}: not-working keys only, never
+     * one with real-money trades no invoice has billed, never one with
+     * invoices.
      *
      * The guard is re-evaluated HERE, not trusted from the listing the admin
      * was looking at: the engine can clear a key's blocked flag between the
-     * page loading and the button being pressed, and a working key must not be
-     * erasable on the strength of a stale row.
+     * page loading and the button being pressed, a close can land in the same
+     * window, and a working key must not be erasable on the strength of a
+     * stale row.
      */
     public function purge(string $exchange, int $id): JsonResponse
     {
@@ -323,13 +326,9 @@ class AdminApiKeyController extends Controller
         }
 
         $usage = $this->usageFor($schema, [$account->api_key], [$account->id]);
-        $reason = $this->purgeBlockedReason($account, $usage);
-        if ($reason !== null) {
-            return response()->json([
-                'success' => false,
-                'error_code' => 'PURGE_REFUSED',
-                'message' => $reason,
-            ], 422);
+        $block = $this->purgeBlock($account, $usage);
+        if ($block !== null) {
+            return response()->json(['success' => false] + $block, 422);
         }
 
         $apiKey = $account->api_key;
@@ -475,7 +474,7 @@ class AdminApiKeyController extends Controller
     }
 
     /**
-     * Row counts for every listed key of one exchange, in three grouped
+     * Row counts for every listed key of one exchange, in a handful of grouped
      * queries against that exchange's own tables.
      *
      * `invoices` matches on account_id OR api_key: an invoice carries both, and
@@ -484,13 +483,17 @@ class AdminApiKeyController extends Controller
      * because `account_id` repeats across the per-exchange tables — a Binance
      * invoice must not shield the MEXC account that happens to share its id.
      *
+     * `trade_months` is the closed-trade count per (api_key, 'YYYY-MM') — the
+     * month an invoice would bill each trade in — which, against each
+     * invoice's `month_year`, is what {@see uninvoicedTrades()} reads.
+     *
      * @param  string[]  $apiKeys
      * @param  int[]  $ids
      */
     private function usageFor(ExchangeSchema $schema, array $apiKeys, array $ids): array
     {
         if ($apiKeys === []) {
-            return ['trades' => [], 'positions' => [], 'transactions' => [], 'invoices' => collect()];
+            return ['trades' => [], 'positions' => [], 'transactions' => [], 'trade_months' => [], 'invoices' => collect()];
         }
 
         $countBy = fn (string $table) => DB::table($table)
@@ -500,17 +503,31 @@ class AdminApiKeyController extends Controller
             ->pluck('n', 'api_key')
             ->all();
 
+        // SUBSTR(closed_at, 1, 7) reads 'YYYY-MM' off the stored datetime on
+        // MySQL and SQLite alike. closed_at is UTC, which is how invoice months
+        // bucket trades (BinancePnlSource) — the two must agree on the month.
+        $tradeMonths = [];
+        $byMonth = DB::table($schema->pastPositions)
+            ->whereIn('api_key', $apiKeys)
+            ->groupByRaw('api_key, SUBSTR(closed_at, 1, 7)')
+            ->selectRaw('api_key, SUBSTR(closed_at, 1, 7) AS month, COUNT(*) AS n')
+            ->get();
+        foreach ($byMonth as $r) {
+            $tradeMonths[$r->api_key][(string) $r->month] = (int) $r->n;
+        }
+
         $invoices = DB::table('invoices')
             ->where('exchange', $schema->exchange)
             ->where(function ($q) use ($ids, $apiKeys) {
                 $q->whereIn('account_id', $ids)->orWhereIn('api_key', $apiKeys);
             })
-            ->get(['account_id', 'api_key']);
+            ->get(['account_id', 'api_key', 'month_year']);
 
         return [
             'trades' => $countBy($schema->pastPositions),
             'positions' => $countBy($schema->positions),
             'transactions' => $countBy($schema->transactions),
+            'trade_months' => $tradeMonths,
             'invoices' => $invoices,
         ];
     }
@@ -536,6 +553,10 @@ class AdminApiKeyController extends Controller
         $graceEnds = $blocked && $blockedAt
             ? $blockedAt->copy()->addDays(ExchangeAccount::KEY_GRACE_DAYS)
             : null;
+        $purgeBlock = $this->purgeBlock($a, $usage);
+        $uninvoiced = $this->isRealMoney($a)
+            ? $this->uninvoicedTrades($usage, (int) $a->id, (string) $a->api_key)
+            : ['trades' => 0, 'months' => []];
 
         return [
             'id' => $a->id,
@@ -582,44 +603,134 @@ class AdminApiKeyController extends Controller
                 'positions' => (int) ($usage['positions'][$a->api_key] ?? 0),
                 'transactions' => (int) ($usage['transactions'][$a->api_key] ?? 0),
                 'invoices' => $this->invoiceCount($usage, (int) $a->id, (string) $a->api_key),
+                // Real-money closed trades no invoice covers, and the months
+                // they fall in — the figure purgeBlock() refuses on, so the
+                // dialog can say which invoice is missing. Always 0 / [] for a
+                // demo, sandbox or SBXINV- account.
+                'uninvoiced_trades' => $uninvoiced['trades'],
+                'uninvoiced_months' => $uninvoiced['months'],
             ],
-            'purgeable' => $this->purgeBlockedReason($a, $usage) === null,
-            'purge_blocked_reason' => $this->purgeBlockedReason($a, $usage),
+            'purgeable' => $purgeBlock === null,
+            'purge_blocked_reason' => $purgeBlock['message'] ?? null,
         ];
     }
 
     /**
-     * Why this row may NOT be erased from the database, or null when it may.
+     * Why this row may NOT be erased from the database — the 422 body
+     * (`error_code`, `message`, and the figure behind it) — or null when it may.
      *
-     * Two independent gates, and the UI mirrors both:
+     * Three gates, every one re-evaluated server-side on the call itself, and
+     * the UI mirrors them through `purgeable` / `purge_blocked_reason`:
      *  1. **Only a key that is not working.** A healthy, connected account is
      *     someone's live trading setup; permanent delete is a cleanup tool for
      *     rubbish rows, not an account-management action. "Not working" means
      *     the exchange is refusing it, or it is already disconnected.
-     *  2. **Never one with invoices.** Billing is the audit trail — an invoice
-     *     whose account row vanished cannot be explained to the person who
-     *     paid it. Those stay disconnected forever instead.
-     * Closed trades do NOT block the purge; they are cascaded, and the
-     * confirmation states how many, because a key that traded and was then
-     * abandoned is exactly what an admin wants to clear out.
+     *  2. **Never one with real-money trades no invoice covers**
+     *     (`UNINVOICED_TRADES`). The purge cascades the account's closed
+     *     trades, and for an account disconnected mid-month those are exactly
+     *     the rows that month's invoice is computed from — the monthly run
+     *     does not bill a disconnected account, it names it for a human to
+     *     invoice by hand (EngineInvoiceController), and the evidence must
+     *     still exist when they do. "No invoice covers" = closed in a month
+     *     AFTER the account's latest invoice, or any trade at all when it has
+     *     no invoice. There is no override flag: generate that invoice first
+     *     (Sandbox → Invoice Testing) or wait for the monthly run. Demo,
+     *     sandbox and SBXINV- scratch accounts are exempt — nothing ever
+     *     invoices them, so there is no next invoice to protect, and a testnet
+     *     key that traded is exactly the rubbish this button exists for.
+     *  3. **Never one with invoices** (`PURGE_REFUSED`). Billing is the audit
+     *     trail — an invoice whose account row vanished cannot be explained to
+     *     the person who paid it. Those stay disconnected forever instead.
+     * Gate 2 is checked before gate 3 on purpose: an account with both has
+     * money unbilled, and that is the fact the admin must act on first.
+     * Trades an invoice has covered do not block the purge on their own; they
+     * cascade, and the confirmation states how many.
+     *
+     * @return array{error_code: string, message: string, uninvoiced?: array{trades: int, months: string[]}}|null
      */
-    private function purgeBlockedReason(object $a, array $usage = []): ?string
+    private function purgeBlock(object $a, array $usage = []): ?array
     {
         $blocked = $a->key_status === ExchangeAccount::KEY_BLOCKED;
         $disconnected = $a->deleted_at !== null;
 
         if (! $blocked && ! $disconnected) {
-            return 'Only a key the exchange is refusing, or one already disconnected, can be deleted permanently.';
+            return [
+                'error_code' => 'PURGE_REFUSED',
+                'message' => 'Only a key the exchange is refusing, or one already disconnected, can be deleted permanently.',
+            ];
+        }
+
+        if ($this->isRealMoney($a)) {
+            $open = $this->uninvoicedTrades($usage, (int) $a->id, (string) $a->api_key);
+            if ($open['trades'] > 0) {
+                return [
+                    'error_code' => 'UNINVOICED_TRADES',
+                    'message' => sprintf(
+                        'This account has %d closed trade%s in %s that no invoice covers — generate that invoice first (Sandbox → Invoice Testing) or wait for the monthly run.',
+                        $open['trades'],
+                        $open['trades'] === 1 ? '' : 's',
+                        implode(', ', $open['months']),
+                    ),
+                    'uninvoiced' => $open,
+                ];
+            }
         }
 
         $invoices = $this->invoiceCount($usage, (int) $a->id, (string) $a->api_key);
         if ($invoices > 0) {
-            return $invoices === 1
-                ? 'This account has 1 invoice — billing history cannot be erased. Disconnect it instead.'
-                : "This account has {$invoices} invoices — billing history cannot be erased. Disconnect it instead.";
+            return [
+                'error_code' => 'PURGE_REFUSED',
+                'message' => $invoices === 1
+                    ? 'This account has 1 invoice — billing history cannot be erased. Disconnect it instead.'
+                    : "This account has {$invoices} invoices — billing history cannot be erased. Disconnect it instead.",
+            ];
         }
 
         return null;
+    }
+
+    /**
+     * An account an invoice can ever bill — the monthly run's own filter
+     * (EngineInvoiceController: demo 0, not a sandbox, not an SBXINV- scratch).
+     */
+    private function isRealMoney(object $a): bool
+    {
+        return ! (bool) $a->demo
+            && ! (bool) $a->is_sandbox
+            && ! str_starts_with((string) $a->api_key, 'SBXINV-');
+    }
+
+    /**
+     * Closed trades no invoice covers, by month: every trade in a month AFTER
+     * the account's latest invoice `month_year`, or every trade at all when
+     * the account has none. Months are 'YYYY-MM' strings on both sides, so
+     * they compare as text.
+     *
+     * @return array{trades: int, months: string[]}
+     */
+    private function uninvoicedTrades(array $usage, int $id, string $apiKey): array
+    {
+        $byMonth = $usage['trade_months'][$apiKey] ?? [];
+        if ($byMonth === []) {
+            return ['trades' => 0, 'months' => []];
+        }
+
+        $latest = null;
+        foreach ($usage['invoices'] ?? [] as $invoice) {
+            if ((int) $invoice->account_id === $id || $invoice->api_key === $apiKey) {
+                $month = (string) $invoice->month_year;
+                $latest = $latest === null || $month > $latest ? $month : $latest;
+            }
+        }
+
+        $open = array_filter(
+            $byMonth,
+            fn (string $month) => $latest === null || $month > $latest,
+            ARRAY_FILTER_USE_KEY,
+        );
+        ksort($open);
+
+        return ['trades' => (int) array_sum($open), 'months' => array_keys($open)];
     }
 
     /**

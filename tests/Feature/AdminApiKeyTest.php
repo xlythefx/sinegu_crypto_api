@@ -341,6 +341,9 @@ class AdminApiKeyTest extends EngineTestCase
         $owner = $this->makeUser();
         $id = $this->makeAccount($owner, [
             'api_key' => 'MEXCFAULTY0001',
+            // Testnet: nothing ever invoices its trades, so they cascade. A
+            // real-money trade no invoice covers refuses the purge instead.
+            'demo' => 1,
             'key_status' => MexcAccount::KEY_BLOCKED,
             'key_blocked_at' => now()->subDays(4),
         ], 'mexc');
@@ -439,6 +442,10 @@ class AdminApiKeyTest extends EngineTestCase
         $owner = $this->makeUser();
         $id = $this->makeAccount($owner, [
             'api_key' => 'FAULTYKEY0001',
+            // Testnet: nothing ever invoices its trades, so they cascade. A
+            // real-money trade no invoice covers refuses the purge instead
+            // (the uninvoiced-trades tests below).
+            'demo' => 1,
             'key_status' => BinanceAccount::KEY_BLOCKED,
             'key_blocked_at' => now()->subDays(4),
         ]);
@@ -500,6 +507,141 @@ class AdminApiKeyTest extends EngineTestCase
 
         $this->assertStringContainsString('invoice', $response->json('message'));
         $this->assertDatabaseHas('binance_accounts', ['id' => $id]);
+    }
+
+    /* ---- uninvoiced trades: the next invoice's evidence ---- */
+
+    /**
+     * An account disconnected mid-month still owes that month's fee, and the
+     * monthly run leaves a disconnected account for a human to invoice by
+     * hand — from exactly the rows the purge would cascade. Trades in a month
+     * after the latest invoice therefore refuse the purge, naming the count
+     * and the months, and the listing carries the same figure.
+     */
+    public function test_trades_after_the_last_invoiced_month_block_a_purge(): void
+    {
+        $admin = $this->admin();
+        $owner = $this->makeUser();
+        $id = $this->makeAccount($owner, ['api_key' => 'MIDMONTH00001', 'deleted_at' => '2026-10-05 12:00:00']);
+        $this->paidInvoice($owner, $id, 'MIDMONTH00001', '2026-08');
+        $this->paidInvoice($owner, $id, 'MIDMONTH00001', '2026-09');
+        $this->closedTrade('MIDMONTH00001', $owner, '2026-09-20 10:00:00'); // covered by September's invoice
+        $this->closedTrade('MIDMONTH00001', $owner, '2026-10-01 08:00:00'); // nobody has billed October
+        $this->closedTrade('MIDMONTH00001', $owner, '2026-10-04 08:00:00');
+
+        $this->deleteJson("/api/admin/api-keys/binance/{$id}/purge", [], $this->headersFor($admin))
+            ->assertStatus(422)
+            ->assertJsonPath('error_code', 'UNINVOICED_TRADES')
+            ->assertJsonPath('uninvoiced.trades', 2)
+            ->assertJsonPath('uninvoiced.months', ['2026-10']);
+
+        $this->assertDatabaseHas('binance_accounts', ['id' => $id]);
+        $this->assertSame(3, DB::table('binance_pastpositions')->where('api_key', 'MIDMONTH00001')->count());
+
+        $row = collect($this->getJson('/api/admin/api-keys', $this->headersFor($admin))->json('keys'))->firstWhere('id', $id);
+        $this->assertFalse($row['purgeable']);
+        $this->assertSame(2, $row['usage']['uninvoiced_trades']);
+        $this->assertSame(['2026-10'], $row['usage']['uninvoiced_months']);
+        $this->assertStringContainsString('2026-10', $row['purge_blocked_reason']);
+    }
+
+    /**
+     * Trades an invoice already covers do not trip the gate. The refusal that
+     * remains is the invoice gate's — a different fact, with a different code.
+     */
+    public function test_trades_only_in_invoiced_months_pass_the_uninvoiced_gate(): void
+    {
+        $admin = $this->admin();
+        $owner = $this->makeUser();
+        $id = $this->makeAccount($owner, ['api_key' => 'BILLEDUP00001', 'deleted_at' => now()]);
+        $this->paidInvoice($owner, $id, 'BILLEDUP00001', '2026-09');
+        $this->closedTrade('BILLEDUP00001', $owner, '2026-08-15 10:00:00');
+        $this->closedTrade('BILLEDUP00001', $owner, '2026-09-30 23:59:59');
+
+        $response = $this->deleteJson("/api/admin/api-keys/binance/{$id}/purge", [], $this->headersFor($admin))
+            ->assertStatus(422)
+            ->assertJsonPath('error_code', 'PURGE_REFUSED');
+        $this->assertStringContainsString('invoice', $response->json('message'));
+        $this->assertNull($response->json('uninvoiced'));
+
+        $row = collect($this->getJson('/api/admin/api-keys', $this->headersFor($admin))->json('keys'))->firstWhere('id', $id);
+        $this->assertSame(0, $row['usage']['uninvoiced_trades']);
+        $this->assertSame([], $row['usage']['uninvoiced_months']);
+    }
+
+    public function test_trades_with_no_invoice_at_all_block_a_purge(): void
+    {
+        $admin = $this->admin();
+        $owner = $this->makeUser();
+        $id = $this->makeAccount($owner, ['api_key' => 'NEVERBILLED01', 'deleted_at' => now()]);
+        $this->closedTrade('NEVERBILLED01', $owner, '2026-09-15 10:00:00');
+
+        $this->deleteJson("/api/admin/api-keys/binance/{$id}/purge", [], $this->headersFor($admin))
+            ->assertStatus(422)
+            ->assertJsonPath('error_code', 'UNINVOICED_TRADES')
+            ->assertJsonPath('uninvoiced.trades', 1)
+            ->assertJsonPath('uninvoiced.months', ['2026-09']);
+
+        $this->assertDatabaseHas('binance_accounts', ['id' => $id]);
+        $this->assertDatabaseHas('binance_pastpositions', ['api_key' => 'NEVERBILLED01']);
+    }
+
+    /** Open positions and transfers are not billing evidence; with no trades and no invoices the purge goes ahead. */
+    public function test_no_invoices_and_no_trades_purges(): void
+    {
+        $admin = $this->admin();
+        $owner = $this->makeUser();
+        $id = $this->makeAccount($owner, ['api_key' => 'EMPTYKEY00001', 'deleted_at' => now()]);
+        DB::table('binance_transactions')->insert([
+            'api_key' => 'EMPTYKEY00001', 'uni_id' => $owner, 'type' => 'DEPOSIT',
+            'amount' => 100, 'tran_id' => 7, 'created_at' => now(),
+        ]);
+
+        $row = collect($this->getJson('/api/admin/api-keys', $this->headersFor($admin))->json('keys'))->firstWhere('id', $id);
+        $this->assertTrue($row['purgeable']);
+        $this->assertSame(0, $row['usage']['uninvoiced_trades']);
+
+        $this->deleteJson("/api/admin/api-keys/binance/{$id}/purge", [], $this->headersFor($admin))
+            ->assertOk()
+            ->assertJsonPath('removed.transactions', 1);
+        $this->assertNull(BinanceAccount::withTrashed()->find($id));
+    }
+
+    /** Nothing ever invoices a sandbox (or demo) account, so its trades protect nothing and cascade. */
+    public function test_a_sandbox_accounts_trades_never_block_a_purge(): void
+    {
+        $admin = $this->admin();
+        $owner = $this->makeUser();
+        $id = $this->makeAccount($owner, ['api_key' => 'SANDBOXKEY001', 'is_sandbox' => 1, 'deleted_at' => now()]);
+        $this->closedTrade('SANDBOXKEY001', $owner, '2026-10-02 10:00:00');
+
+        $row = collect($this->getJson('/api/admin/api-keys', $this->headersFor($admin))->json('keys'))->firstWhere('id', $id);
+        $this->assertTrue($row['purgeable']);
+        $this->assertSame(0, $row['usage']['uninvoiced_trades']);
+
+        $this->deleteJson("/api/admin/api-keys/binance/{$id}/purge", [], $this->headersFor($admin))
+            ->assertOk()
+            ->assertJsonPath('removed.trades', 1);
+    }
+
+    /** One closed real-money trade, dated so it falls in a chosen month. */
+    private function closedTrade(string $apiKey, string $owner, string $closedAt): void
+    {
+        DB::table('binance_pastpositions')->insert([
+            'api_key' => $apiKey, 'uni_id' => $owner, 'symbol' => 'LTCUSDT',
+            'position_side' => 'LONG', 'position_amt' => 1, 'entry_price' => 100,
+            'exit_price' => 110, 'realized_pnl' => 10, 'side' => 'SELL',
+            'order_id' => random_int(1, 1_000_000_000), 'closed_at' => $closedAt, 'created_at' => now(),
+        ]);
+    }
+
+    private function paidInvoice(string $owner, int $accountId, string $apiKey, string $month): void
+    {
+        DB::table('invoices')->insert([
+            'user_id' => $owner, 'account_id' => $accountId, 'exchange' => 'binance',
+            'api_key' => $apiKey, 'month_year' => $month, 'total_fee' => 100, 'status' => 'paid',
+            'created_at' => now(), 'updated_at' => now(),
+        ]);
     }
 
     /** The listing tells the UI which rows the button may act on, and why not. */
