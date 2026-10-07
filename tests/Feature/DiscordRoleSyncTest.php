@@ -77,6 +77,10 @@ class DiscordRoleSyncTest extends DiscordTestCase
     {
         $uniId = $this->makeLinkedUser(['status' => 'active']);
         $this->inServer([self::ROLE_MEMBER]);
+        // The live account below is on MEXC, which a plain user may not connect
+        // while the venue is staff-only (403 EXCHANGE_RESTRICTED, the default
+        // since 2026-09-23). This test is about the roles, not the rollout.
+        config(['exchanges.staff_only' => []]);
 
         $this->postJson('/api/exchange/binance', [
             'name' => 'Demo', 'api_key' => 'demo-key-000000000001', 'secret_key' => 'x', 'demo' => true,
