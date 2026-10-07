@@ -148,4 +148,17 @@ return [
      */
     'site_url' => env('MAIL_SITE_URL', 'https://pixel-alpha.com'),
 
+    /*
+     * Domains Admin → Sandbox → Email Templates may mail a PREVIEW copy to,
+     * besides the admin's own address (SandboxEmailController). One preview
+     * call mails every template — a dozen emails from support@ — to whatever
+     * address it is given, so without this list any admin login is a spam
+     * relay signed by the product. CSV of bare domains (no "@"); the team's
+     * own two by default (the same people MAIL_ADMIN_ADDRESS names).
+     */
+    'preview_domains' => array_values(array_filter(array_map(
+        'trim',
+        explode(',', (string) env('MAIL_PREVIEW_DOMAINS', 'pixel-alpha.com,feature-digital.com')),
+    ))),
+
 ];

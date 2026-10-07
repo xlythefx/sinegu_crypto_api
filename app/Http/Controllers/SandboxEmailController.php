@@ -8,6 +8,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Mail;
+use Illuminate\Support\Str;
 use Throwable;
 
 /**
@@ -17,6 +18,12 @@ use Throwable;
  *
  * A test copy is always a sample: "[Preview]" in the subject and invented
  * figures in the body. Nothing here reads or mails a real customer.
+ *
+ * And it goes to a REVIEWER only: the admin pressing the button, or a team
+ * mailbox (MAIL_PREVIEW_DOMAINS). One call with no slug mails every template
+ * — a dozen emails from support@ — to whatever address it is given, so an
+ * unrestricted recipient would turn any admin login into a spam relay
+ * signed by the product.
  */
 class SandboxEmailController extends Controller
 {
@@ -57,6 +64,15 @@ class SandboxEmailController extends Controller
             'slug' => ['nullable', 'string', 'max:64'],
         ]);
 
+        if (! $this->recipientAllowed($data['to'], $request->user()?->email)) {
+            return response()->json([
+                'success' => false,
+                'error_code' => 'RECIPIENT_NOT_ALLOWED',
+                'message' => 'A preview can only be sent to your own address or a team mailbox ('
+                    .implode(', ', $this->previewDomains()).').',
+            ], 422);
+        }
+
         $entries = EmailCatalogue::all();
         if (! empty($data['slug'])) {
             $entries = array_values(array_filter($entries, fn ($e) => $e['slug'] === $data['slug']));
@@ -86,5 +102,32 @@ class SandboxEmailController extends Controller
             'sent' => $sent,
             'delivers' => config('mail.default') !== 'log' && config('mail.default') !== 'array',
         ]);
+    }
+
+    /**
+     * The caller's own address, or any address on a team domain. Compared
+     * lower-cased, on the whole address and on the part after the LAST "@"
+     * (the validator already guarantees there is one) — so a look-alike such
+     * as pixel-alpha.com.evil.example is a different domain, not a match.
+     */
+    private function recipientAllowed(string $to, ?string $own): bool
+    {
+        $to = strtolower(trim($to));
+        if ($own !== null && $to === strtolower(trim($own))) {
+            return true;
+        }
+
+        $domain = strtolower(Str::afterLast($to, '@'));
+
+        return $domain !== '' && in_array($domain, $this->previewDomains(), true);
+    }
+
+    /** @return string[] config('mail.preview_domains'), trimmed and lower-cased */
+    private function previewDomains(): array
+    {
+        return array_values(array_filter(array_map(
+            fn ($domain) => strtolower(trim((string) $domain)),
+            (array) config('mail.preview_domains', []),
+        )));
     }
 }

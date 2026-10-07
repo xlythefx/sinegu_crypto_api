@@ -17,6 +17,9 @@ class SandboxEmailTemplatesTest extends EngineTestCase
     {
         parent::setUp();
         Mail::fake();
+        // The shipped default, pinned so a local MAIL_PREVIEW_DOMAINS cannot
+        // change what these tests measure.
+        config(['mail.preview_domains' => ['pixel-alpha.com', 'feature-digital.com']]);
     }
 
     private function headers(string $uniId): array
@@ -55,11 +58,11 @@ class SandboxEmailTemplatesTest extends EngineTestCase
     {
         $admin = $this->makeUser(['type' => 'admin']);
 
-        $this->postJson('/api/admin/sandbox/emails/send', ['to' => 'reviewer@example.test', 'slug' => 'reminder-day-5'], $this->headers($admin))
+        $this->postJson('/api/admin/sandbox/emails/send', ['to' => 'reviewer@pixel-alpha.com', 'slug' => 'reminder-day-5'], $this->headers($admin))
             ->assertOk()
             ->assertJsonPath('sent', 1);
 
-        Mail::assertSent(PixelMail::class, fn (PixelMail $mail) => $mail->hasTo('reviewer@example.test')
+        Mail::assertSent(PixelMail::class, fn (PixelMail $mail) => $mail->hasTo('reviewer@pixel-alpha.com')
             && str_starts_with((string) $mail->envelope()->subject, '[Preview] '));
     }
 
@@ -67,7 +70,7 @@ class SandboxEmailTemplatesTest extends EngineTestCase
     {
         $admin = $this->makeUser(['type' => 'admin']);
 
-        $this->postJson('/api/admin/sandbox/emails/send', ['to' => 'reviewer@example.test'], $this->headers($admin))
+        $this->postJson('/api/admin/sandbox/emails/send', ['to' => 'reviewer@pixel-alpha.com'], $this->headers($admin))
             ->assertOk()
             ->assertJsonPath('sent', count(EmailCatalogue::all()));
 
@@ -80,8 +83,46 @@ class SandboxEmailTemplatesTest extends EngineTestCase
     {
         $admin = $this->makeUser(['type' => 'admin']);
 
-        $this->postJson('/api/admin/sandbox/emails/send', ['to' => 'reviewer@example.test', 'slug' => 'nope'], $this->headers($admin))
+        $this->postJson('/api/admin/sandbox/emails/send', ['to' => 'reviewer@pixel-alpha.com', 'slug' => 'nope'], $this->headers($admin))
             ->assertNotFound();
+        Mail::assertNothingSent();
+    }
+
+    /* ---- who a preview may go to ---- */
+
+    public function test_a_preview_may_go_to_the_admins_own_address(): void
+    {
+        $admin = $this->makeUser(['type' => 'admin', 'email' => 'Me@Elsewhere.test']);
+
+        // Case does not matter: the address on file is what it is compared to.
+        $this->postJson('/api/admin/sandbox/emails/send', ['to' => 'me@elsewhere.test', 'slug' => 'reminder-day-5'], $this->headers($admin))
+            ->assertOk()
+            ->assertJsonPath('sent', 1);
+        Mail::assertSent(PixelMail::class, fn (PixelMail $mail) => $mail->hasTo('me@elsewhere.test'));
+    }
+
+    public function test_a_preview_may_go_to_a_team_domain(): void
+    {
+        $admin = $this->makeUser(['type' => 'admin']);
+
+        $this->postJson('/api/admin/sandbox/emails/send', ['to' => 'Dmitri@Feature-Digital.com', 'slug' => 'reminder-day-5'], $this->headers($admin))
+            ->assertOk()
+            ->assertJsonPath('sent', 1);
+        Mail::assertSent(PixelMail::class, fn (PixelMail $mail) => $mail->hasTo('Dmitri@Feature-Digital.com'));
+    }
+
+    /** A dozen emails from support@ to any address would make an admin login a spam relay. */
+    public function test_a_preview_to_an_outside_address_is_refused(): void
+    {
+        $admin = $this->makeUser(['type' => 'admin']);
+
+        $this->postJson('/api/admin/sandbox/emails/send', ['to' => 'victim@example.test'], $this->headers($admin))
+            ->assertStatus(422)
+            ->assertJsonPath('error_code', 'RECIPIENT_NOT_ALLOWED');
+        // A look-alike domain is an outside address too.
+        $this->postJson('/api/admin/sandbox/emails/send', ['to' => 'victim@pixel-alpha.com.evil.test'], $this->headers($admin))
+            ->assertStatus(422)
+            ->assertJsonPath('error_code', 'RECIPIENT_NOT_ALLOWED');
         Mail::assertNothingSent();
     }
 }
