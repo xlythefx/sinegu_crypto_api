@@ -34,7 +34,10 @@ use Illuminate\Support\Facades\Log;
  *   regenerated — regenerating would overwrite a manual fee an admin typed,
  *   and would restate figures a customer may already be looking at.
  * - Only a month that has ENDED (UTC, which is how invoice months bucket
- *   trades) may be billed; the running month is refused.
+ *   trades) may be billed; the running month is refused. And only the month
+ *   that ended most recently is billed on the robot's word — an older month
+ *   would be born overdue and priced from today's balance — unless the body
+ *   carries `force: true` (a human billing an older month deliberately).
  * - One account failing never stops the rest; it is reported, not thrown.
  */
 class EngineInvoiceController extends Controller
@@ -49,6 +52,8 @@ class EngineInvoiceController extends Controller
     {
         $data = $request->validate([
             'month_year' => ['required', 'regex:/^\d{4}-(0[1-9]|1[0-2])$/'],
+            // A human's say-so for a month other than the one that just ended.
+            'force' => ['sometimes', 'boolean'],
         ]);
         $month = $data['month_year'];
 
@@ -65,6 +70,23 @@ class EngineInvoiceController extends Controller
                 'success' => false,
                 'error_code' => 'MONTH_NOT_ENDED',
                 'message' => "{$month} has not ended yet.",
+            ], 422);
+        }
+
+        // Only the month that just ended is billed on the robot's word. An
+        // older month's due date — the 4th of the month after it — is already
+        // behind us, so a back-dated invoice is born overdue and the next
+        // enforce step pauses the account the same day; and it is priced from
+        // TODAY's balance, not the equity that month actually ended on. The
+        // engine never sends anything else, so any other month is a bug or a
+        // replayed request unless a human says `force: true` and owns it.
+        $previous = now()->utc()->startOfMonth()->subMonth()->format('Y-m');
+        if ($month !== $previous && ! ($data['force'] ?? false)) {
+            return response()->json([
+                'success' => false,
+                'error_code' => 'MONTH_NOT_PREVIOUS',
+                'message' => "Only {$previous}, the month that just ended, is invoiced automatically; send force: true to bill {$month}.",
+                'expected_month_year' => $previous,
             ], 422);
         }
 

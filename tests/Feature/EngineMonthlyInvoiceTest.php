@@ -95,6 +95,40 @@ class EngineMonthlyInvoiceTest extends EngineTestCase
         $this->assertSame(0, Invoice::count());
     }
 
+    /**
+     * Only the month that just ended is billed on the robot's word. An older
+     * month's due date (the 4th after it) is already past — the invoice would
+     * be born overdue and the next enforce step would pause the account — and
+     * it would be priced from today's balance, not that month's.
+     */
+    public function test_only_the_month_that_just_ended_is_billed_without_force(): void
+    {
+        $this->profitableCustomer();
+
+        // Two months back, on 1 October: refused, naming the month expected.
+        $this->run_(['month_year' => '2026-08'])->assertStatus(422)
+            ->assertJson(['error_code' => 'MONTH_NOT_PREVIOUS', 'expected_month_year' => '2026-09']);
+        $this->assertSame(0, Invoice::count());
+
+        // The month that just ended — what the engine sends — is accepted.
+        $this->run_(['month_year' => '2026-09'])->assertOk()->assertJsonPath('totals.created', 1);
+    }
+
+    public function test_force_lets_a_human_bill_an_older_month(): void
+    {
+        $id = $this->profitableCustomer();
+
+        $this->run_(['month_year' => '2026-08', 'force' => true])->assertOk()
+            ->assertJsonPath('month_year', '2026-08')
+            ->assertJsonPath('totals.created', 1)
+            ->assertJsonPath('totals.failed', 0);
+        $this->assertTrue(Invoice::where(['account_id' => $id, 'month_year' => '2026-08'])->exists());
+
+        // Force never reaches into a month that has not ended.
+        $this->run_(['month_year' => '2026-10', 'force' => true])->assertStatus(422)
+            ->assertJson(['error_code' => 'MONTH_NOT_ENDED']);
+    }
+
     public function test_an_account_connected_after_the_month_is_not_billed_for_it(): void
     {
         $this->profitableCustomer([], ['created_at' => '2026-10-01 01:00:00']);
