@@ -141,6 +141,9 @@ class UserCredential extends Authenticatable
             // False until the mailed 6-digit code is accepted; every guarded
             // route answers 403 EMAIL_UNVERIFIED until then.
             'email_verified' => (bool) $this->email_verified,
+            // An email change in flight: the new address waits here until its
+            // own code is accepted, and `email` stays the live one meanwhile.
+            'pending_email' => $this->pending_email,
             // The id stays a string: a Discord snowflake overflows a JS number.
             'discord' => $this->hasDiscord() ? [
                 'id' => (string) $this->discord_id,

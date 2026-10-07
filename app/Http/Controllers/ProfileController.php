@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Services\Auth\EmailVerification;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
@@ -10,8 +11,24 @@ use Illuminate\Validation\Rule;
 
 class ProfileController extends Controller
 {
+    public function __construct(private EmailVerification $verification)
+    {
+    }
+
     /**
-     * PUT /api/user/profile (auth:sanctum)
+     * PUT /api/user/profile (auth:sanctum)  { name, email, current_password? }
+     *
+     * The name saves outright. The EMAIL does not: a different address needs
+     * the current password and then proves itself by the mailed code before
+     * `email` moves (EmailVerificationController::verify). Until then the row
+     * carries it as `pending_email` and the OLD address keeps every login and
+     * guarded route — so a typo cannot lock the owner out, and a stolen bearer
+     * token (the SPA keeps it in localStorage) cannot re-point the account at
+     * an attacker's inbox and collect it through forgot-password.
+     *
+     * 200 { success, message, user }  — name saved; and, for a new address, a code mailed to it
+     * 422 PASSWORD_REQUIRED | NO_PASSWORD | INVALID_PASSWORD — nothing saved, the name included
+     * 409 RESEND_TOO_SOON { retry_after } — a code went out under a minute ago
      */
     public function updateProfile(Request $request): JsonResponse
     {
@@ -25,13 +42,102 @@ class ProfileController extends Controller
                 'max:255',
                 Rule::unique('user_credentials', 'email')->ignore($user->uni_id, 'uni_id'),
             ],
+            'current_password' => ['nullable', 'string'],
         ]);
 
-        $user->fill($validated)->save();
+        $newEmail = trim($validated['email']);
+        $emailChanges = strcasecmp($newEmail, trim((string) $user->email)) !== 0;
 
+        if ($emailChanges) {
+            if ($refusal = $this->refuseEmailChange($user, $validated['current_password'] ?? null)) {
+                return $refusal;
+            }
+        }
+
+        $user->forceFill(['name' => $validated['name']])->save();
+
+        if (! $emailChanges) {
+            // Back on the live address: whatever change was in flight is off.
+            $this->verification->cancelEmailChange($user);
+
+            return $this->profileSaved($user, 'Profile updated');
+        }
+
+        $this->verification->beginEmailChange($user, $newEmail);
+
+        return $this->profileSaved($user, "We sent a code to {$newEmail}. Your email changes once you enter it.");
+    }
+
+    /**
+     * DELETE /api/user/email/pending (auth:sanctum)
+     *
+     * Drop an email change that has not been proven. `email` was never
+     * touched, so this is a cancel, not a revert.
+     */
+    public function cancelPendingEmail(Request $request): JsonResponse
+    {
+        $user = $request->user();
+
+        $this->verification->cancelEmailChange($user);
+
+        return $this->profileSaved($user, 'Email change cancelled');
+    }
+
+    /**
+     * Why a new address may not be parked yet, or null to go ahead.
+     *
+     * The password comes BEFORE anything is written so a refusal leaves the
+     * row exactly as it was. A Discord-only account has no password to prove
+     * with, and is told to set one first (the same NO_PASSWORD the Settings
+     * page already handles for change-password). The send cooldown is the
+     * one resend enforces: without it this route would mail a code to any
+     * address on every request, a mail bomb aimed from a logged-in account.
+     */
+    private function refuseEmailChange($user, ?string $currentPassword): ?JsonResponse
+    {
+        if (! $user->hasPassword()) {
+            return response()->json([
+                'success' => false,
+                'error_code' => 'NO_PASSWORD',
+                'message' => 'Set a password before changing your email.',
+            ], 422);
+        }
+
+        if ($currentPassword === null || $currentPassword === '') {
+            return response()->json([
+                'success' => false,
+                'error_code' => 'PASSWORD_REQUIRED',
+                'message' => 'Enter your current password to change your email.',
+            ], 422);
+        }
+
+        if (! Hash::check($currentPassword, $user->password)) {
+            return response()->json([
+                'success' => false,
+                'error_code' => 'INVALID_PASSWORD',
+                'message' => 'Current password is incorrect.',
+            ], 422);
+        }
+
+        $wait = $this->verification->resendWaitSeconds($user);
+        if ($wait > 0) {
+            return response()->json([
+                'success' => false,
+                'error_code' => 'RESEND_TOO_SOON',
+                'code' => 'RESEND_TOO_SOON',
+                'message' => "Please wait {$wait} seconds before requesting another code.",
+                'retry_after' => $wait,
+            ], 409);
+        }
+
+        return null;
+    }
+
+    private function profileSaved($user, string $message): JsonResponse
+    {
         return response()->json([
             'success' => true,
-            'message' => 'Profile updated',
+            'message' => $message,
             'user' => $user->toAuthPayload(),
         ]);
     }

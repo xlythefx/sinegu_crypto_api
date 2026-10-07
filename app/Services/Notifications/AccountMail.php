@@ -94,10 +94,14 @@ class AccountMail
      * Mail a sign-up their email-verification code. Best-effort like the rest:
      * the code is stored before this runs, so a mail outage leaves the user on
      * the code screen with "Resend" — never a 500 that loses the registration.
+     *
+     * `$to` is the address being PROVEN, which for an email change is the new
+     * one, not the row's — the code must land in the inbox whose ownership it
+     * establishes, or the old inbox could vouch for an address it never saw.
      */
-    public function verificationCode(UserCredential $user, string $code, int $ttlMinutes): void
+    public function verificationCode(UserCredential $user, string $code, int $ttlMinutes, ?string $to = null): void
     {
-        $to = trim((string) $user->email);
+        $to = trim((string) ($to ?? $user->email));
 
         if ($to === '') {
             return;

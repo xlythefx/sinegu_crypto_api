@@ -161,6 +161,7 @@ Route::middleware(['auth:sanctum', 'email.verified'])->group(function () {
 
     Route::prefix('user')->group(function () {
         Route::put('/profile', [ProfileController::class, 'updateProfile']);
+        Route::delete('/email/pending', [ProfileController::class, 'cancelPendingEmail']);
         Route::post('/image', [ProfileController::class, 'uploadImage']);
         Route::put('/password', [ProfileController::class, 'updatePassword']);
         // The first password of a Discord-only account (refused once one exists).
