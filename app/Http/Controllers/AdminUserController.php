@@ -637,6 +637,15 @@ class AdminUserController extends Controller
         // Percentage columns are not fillable — forceFill is deliberate.
         $user->forceFill($validated)->save();
 
+        // A suspension ends the user's sessions NOW. Until 2026-10-07 only the
+        // next login looked at `status`, so a suspended user kept every open
+        // browser signed in — dashboard, exchange keys, payouts — for as long
+        // as the token lived, which was for ever. EnsureAccountActive refuses
+        // a surviving token too; this makes sure there is none to refuse.
+        if ($statusChanged && $validated['status'] === 'suspended') {
+            $user->tokens()->delete();
+        }
+
         // Suspend / reactivate moves the Discord roles; a fee edit does not
         // deserve a Discord round trip.
         if ($statusChanged) {

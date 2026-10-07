@@ -102,9 +102,13 @@ Route::prefix('auth')->group(function () {
     // cap (EmailVerification::MAX_ATTEMPTS, 5) for the same reason
     // reset-password does; resend SENDS MAIL, so it also carries a 60 s
     // server-side cooldown (409 RESEND_TOO_SOON).
-    Route::middleware('auth:sanctum')->group(function () {
+    // Sign-out alone is open to a SUSPENDED account: dropping your own token
+    // must always work. Everything else signed-in — these three included —
+    // sits behind account.active (EnsureAccountActive → 403 ACCOUNT_SUSPENDED).
+    Route::middleware('auth:sanctum')->post('/logout', [AuthController::class, 'logout']);
+
+    Route::middleware(['auth:sanctum', 'account.active'])->group(function () {
         Route::get('/me', [AuthController::class, 'me']);
-        Route::post('/logout', [AuthController::class, 'logout']);
 
         Route::post('/email/verify', [EmailVerificationController::class, 'verify'])
             ->middleware('throttle:10,1');
@@ -113,9 +117,11 @@ Route::prefix('auth')->group(function () {
     });
 });
 
-// Everything else signed-in requires a verified email (EnsureEmailVerified →
-// 403 EMAIL_UNVERIFIED), the admin groups nested below included.
-Route::middleware(['auth:sanctum', 'email.verified'])->group(function () {
+// Everything else signed-in requires an account that is not suspended
+// (EnsureAccountActive → 403 ACCOUNT_SUSPENDED) and a verified email
+// (EnsureEmailVerified → 403 EMAIL_UNVERIFIED), the admin groups nested below
+// included.
+Route::middleware(['auth:sanctum', 'account.active', 'email.verified'])->group(function () {
     Route::get('/dashboard/summary', [DashboardController::class, 'summary']);
     Route::get('/dashboard/daily-pnl', [DashboardController::class, 'dailyPnl']);
     Route::get('/dashboard/asset-performance', [DashboardController::class, 'assetPerformance']);

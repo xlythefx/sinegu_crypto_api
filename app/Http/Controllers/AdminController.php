@@ -580,6 +580,13 @@ class AdminController extends Controller
 
         $user->forceFill(['status' => $status])->save();
 
+        // A rejected sign-up is a suspended account: whatever session the
+        // registration opened (register signs the user in, so there is one)
+        // ends here, same rule as AdminUserController::update.
+        if ($status === 'suspended') {
+            $user->tokens()->delete();
+        }
+
         // The Overview's pending strip is approved FROM the dashboard, so a
         // resolved sign-up must not linger there for the cache's minute.
         Cache::forget(AdminInsightsController::CACHE_PREFIX.'overview');

@@ -50,7 +50,13 @@ return [
     |
     */
 
-    'expiration' => null,
+    // 30 days. Until 2026-10-07 this was null — a token never expired, so a
+    // browser that held one (localStorage, no logout) stayed signed in for
+    // ever, and a copied token was good for ever too. 30 days is long enough
+    // that a daily user is never interrupted and short enough that a lost
+    // laptop's session dies on its own. The SPA already clears its session
+    // and returns to /auth on a 401.
+    'expiration' => (int) env('SANCTUM_TOKEN_EXPIRATION_MINUTES', 30 * 24 * 60),
 
     /*
     |--------------------------------------------------------------------------

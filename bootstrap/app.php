@@ -19,6 +19,8 @@ return Application::configure(basePath: dirname(__DIR__))
             'developer' => \App\Http\Middleware\EnsureDeveloper::class,
             // Not 'verified' — that is Laravel's own alias for its link-based flow.
             'email.verified' => \App\Http\Middleware\EnsureEmailVerified::class,
+            // A suspended account's token is refused everywhere but sign-out.
+            'account.active' => \App\Http\Middleware\EnsureAccountActive::class,
             'engine' => \App\Http\Middleware\VerifyEngineSecret::class,
             'stripe.webhook' => \App\Http\Middleware\VerifyStripeSignature::class,
             'coinsbuy.webhook' => \App\Http\Middleware\VerifyCoinsbuySignature::class,
