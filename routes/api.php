@@ -63,23 +63,29 @@ Route::prefix('public')->middleware('throttle:60,1')->group(function () {
     Route::get('/order-book', [PublicMarketController::class, 'orderBook']);
 });
 
-// Per-IP limits on the four unauthenticated writes. An account here holds
-// exchange API keys, so login is what credential stuffing aims at; 10/min is
-// still generous for a person mistyping a password. Register is lower because
-// a bot creating accounts has no legitimate rate at all. The reset pair is
-// the lowest: forgot SENDS MAIL on every call. Reset sits ABOVE its per-code
-// attempt cap (PasswordResetController::MAX_ATTEMPTS, 5) on purpose — the cap
-// is what voids a guessed-at code, and it must be reachable before the IP
-// limit hides it; the IP limit is the backstop against hammering many codes.
+// The four unauthenticated writes carry NAMED limiters
+// (AppServiceProvider::configureRateLimiting). Each pairs the old per-IP
+// limit with a per-EMAIL one that counts whoever sends the request, because
+// a per-IP limit alone is walked past by rotating addresses. Login 10/min per
+// IP + 5/min per account — an account here holds exchange API keys, so login
+// is what credential stuffing aims at; 10 is still generous for a person
+// mistyping. Register 5/min per IP: a bot creating accounts has no
+// legitimate rate at all. Forgot is the lowest (3/min per IP, 2/min per
+// email): it SENDS MAIL, and its controller adds a 60 s per-account cooldown
+// and carries the guess count across a reissue. Reset (10/min each) sits
+// ABOVE its per-code attempt cap (PasswordResetController::MAX_ATTEMPTS, 5)
+// on purpose — the cap is what voids a guessed-at code, and it must be
+// reachable before the throttle hides it; the throttle is the backstop
+// against hammering many codes.
 Route::prefix('auth')->group(function () {
     Route::post('/register', [AuthController::class, 'register'])
-        ->middleware('throttle:5,1');
+        ->middleware('throttle:register');
     Route::post('/login', [AuthController::class, 'login'])
-        ->middleware('throttle:10,1');
+        ->middleware('throttle:login');
     Route::post('/forgot-password', [PasswordResetController::class, 'forgot'])
-        ->middleware('throttle:3,1');
+        ->middleware('throttle:forgot-password');
     Route::post('/reset-password', [PasswordResetController::class, 'reset'])
-        ->middleware('throttle:10,1');
+        ->middleware('throttle:reset-password');
 
     // "Sign in with Discord". config is read on every /auth page view and
     // carries nothing secret (60/min, like /public). callback and

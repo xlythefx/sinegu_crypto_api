@@ -80,10 +80,31 @@ class AuthController extends Controller
     }
 
     /**
+     * A real bcrypt hash of a throwaway string, checked when the email is
+     * UNKNOWN so that branch costs the same as a wrong password. bcrypt is
+     * deliberately slow; skipping it for a missing row would make "no such
+     * account" measurable from the response time even though the body no
+     * longer says it. Cost 12 — the rounds real rows are stored at.
+     */
+    private const DUMMY_HASH = '$2y$12$geVBqL2VdtbjCcjo84G1M.WclN7fr5WPV4.unGwAkvK3BytKSxDo2';
+
+    /**
      * POST /api/auth/login
      *
-     * Error codes mirror the mother API (USER_NOT_FOUND, INVALID_PASSWORD,
-     * ACCOUNT_SUSPENDED) so the frontend can branch on them.
+     * Error codes the frontend branches on: INVALID_CREDENTIALS, DISCORD_ONLY,
+     * ACCOUNT_SUSPENDED. The mother API's USER_NOT_FOUND / INVALID_PASSWORD
+     * pair was mirrored until 2026-10-07; it told anyone holding a list of
+     * addresses which of them have an account here — an account that holds
+     * exchange API keys — so the two are now ONE answer: same code, same
+     * message, same bcrypt cost (DUMMY_HASH). The per-account limiter on the
+     * route (`throttle:login`) is the brake on guessing against that answer.
+     *
+     * DISCORD_ONLY stays distinct on purpose. A Discord-only row has no hash
+     * to check, and "use the Discord button" is the one thing that user needs
+     * to hear; the hint it leaks — this email is Discord-linked — is small
+     * beside sending them round a password form that can never work.
+     * ACCOUNT_SUSPENDED is only reached after a correct password, so it tells
+     * a stranger nothing.
      */
     public function login(Request $request): JsonResponse
     {
@@ -95,15 +116,14 @@ class AuthController extends Controller
         $user = UserCredential::where('email', $validated['email'])->first();
 
         if (! $user) {
-            return response()->json([
-                'success' => false,
-                'error_code' => 'USER_NOT_FOUND',
-                'message' => 'No account found with this email address',
-            ], 401);
+            // Spend the bcrypt either way — see DUMMY_HASH.
+            Hash::check($validated['password'], self::DUMMY_HASH);
+
+            return $this->invalidCredentials();
         }
 
         // A Discord-only account has no password to compare — say so, rather
-        // than "incorrect password" against a hash that does not exist.
+        // than "incorrect" against a hash that does not exist.
         if (! $user->hasPassword()) {
             return response()->json([
                 'success' => false,
@@ -113,11 +133,7 @@ class AuthController extends Controller
         }
 
         if (! Hash::check($validated['password'], $user->password)) {
-            return response()->json([
-                'success' => false,
-                'error_code' => 'INVALID_PASSWORD',
-                'message' => 'Incorrect password. Please try again.',
-            ], 401);
+            return $this->invalidCredentials();
         }
 
         // Suspended accounts are blocked entirely; pending may still log in
@@ -140,6 +156,16 @@ class AuthController extends Controller
             'token' => $token,
             'user' => $this->userPayload($user),
         ]);
+    }
+
+    /** The one refusal for unknown-email and wrong-password alike (see login()). */
+    private function invalidCredentials(): JsonResponse
+    {
+        return response()->json([
+            'success' => false,
+            'error_code' => 'INVALID_CREDENTIALS',
+            'message' => 'Email or password is incorrect.',
+        ], 401);
     }
 
     /**

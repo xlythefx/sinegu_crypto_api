@@ -5,10 +5,15 @@ namespace Tests\Feature;
 use Illuminate\Support\Facades\DB;
 
 /**
- * POST /api/auth/register — the Terms checkbox.
+ * POST /api/auth/register — the Terms checkbox — and the brakes on
+ * POST /api/auth/login.
  *
  * The acceptance is recorded on the row (timestamp + the version shown),
  * because a ticked box with nothing behind it is not evidence of anything.
+ * Login is limited per IP AND per account, and answers an unknown email and
+ * a wrong password identically, because an account here holds exchange API
+ * keys and "which of these addresses has one" is the first thing an
+ * attacker asks.
  */
 class AuthRegistrationTest extends EngineTestCase
 {
@@ -22,6 +27,15 @@ class AuthRegistrationTest extends EngineTestCase
             'terms' => true,
             'terms_version' => 'September 1, 2026',
         ], $overrides);
+    }
+
+    private function login(string $email, string $password, ?string $ip = null)
+    {
+        if ($ip !== null) {
+            $this->withServerVariables(['REMOTE_ADDR' => $ip]);
+        }
+
+        return $this->postJson('/api/auth/login', ['email' => $email, 'password' => $password]);
     }
 
     public function test_registration_records_when_and_which_terms_were_accepted(): void
@@ -56,16 +70,54 @@ class AuthRegistrationTest extends EngineTestCase
         $this->assertDatabaseMissing('user_credentials', ['email' => 'new-trader@test.local']);
     }
 
-    public function test_login_is_rate_limited_per_ip(): void
+    // ---- login ----------------------------------------------------------------
+
+    public function test_login_gives_one_answer_for_an_unknown_email_and_a_wrong_password(): void
     {
         $this->makeUser(['email' => 'victim@test.local']);
 
-        for ($i = 0; $i < 10; $i++) {
-            $this->postJson('/api/auth/login', ['email' => 'victim@test.local', 'password' => 'wrong'])
-                ->assertStatus(401);
+        $wrongPassword = $this->login('victim@test.local', 'wrong')->assertStatus(401);
+        $unknownEmail = $this->login('nobody@test.local', 'wrong')->assertStatus(401);
+
+        // Byte-for-byte the same body: nothing in it may say which it was.
+        $this->assertSame($wrongPassword->json(), $unknownEmail->json());
+        $wrongPassword
+            ->assertJsonPath('success', false)
+            ->assertJsonPath('error_code', 'INVALID_CREDENTIALS')
+            ->assertJsonPath('message', 'Email or password is incorrect.');
+
+        foreach (['USER_NOT_FOUND', 'INVALID_PASSWORD'] as $leak) {
+            $this->assertStringNotContainsString($leak, $unknownEmail->getContent());
+        }
+    }
+
+    public function test_login_is_rate_limited_per_ip(): void
+    {
+        // Ten DIFFERENT addresses, so it is the IP bucket that fills and not
+        // the per-account one below.
+        for ($i = 1; $i <= 10; $i++) {
+            $this->login("nobody{$i}@test.local", 'wrong')->assertStatus(401);
         }
 
-        $this->postJson('/api/auth/login', ['email' => 'victim@test.local', 'password' => 'wrong'])
-            ->assertStatus(429);
+        $this->login('nobody11@test.local', 'wrong')->assertStatus(429);
+    }
+
+    public function test_login_for_one_email_is_rate_limited_across_ips(): void
+    {
+        $this->makeUser(['email' => 'victim@test.local']);
+
+        for ($i = 1; $i <= 5; $i++) {
+            $this->login('victim@test.local', 'wrong', "10.0.0.{$i}")->assertStatus(401);
+        }
+
+        $this->login('victim@test.local', 'wrong', '10.0.0.6')->assertStatus(429);
+
+        // The bucket counts requests, not failures: the owner is held off too
+        // — for the minute, not locked out. Case and whitespace share it.
+        $this->login('victim@test.local', 'secret-password', '10.0.0.7')->assertStatus(429);
+        $this->login(' Victim@Test.local ', 'secret-password', '10.0.0.8')->assertStatus(429);
+
+        $this->travel(61)->seconds();
+        $this->login('victim@test.local', 'secret-password', '10.0.0.9')->assertOk();
     }
 }
