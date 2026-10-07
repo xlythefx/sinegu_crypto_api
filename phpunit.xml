@@ -32,5 +32,8 @@
         <env name="PULSE_ENABLED" value="false"/>
         <env name="TELESCOPE_ENABLED" value="false"/>
         <env name="NIGHTWATCH_ENABLED" value="false"/>
+        <!-- Payment rollout switches: pinned so a developer's local .env (TRON_PUBLIC=true, provider tron) cannot leak into the suite. -->
+        <env name="TRON_PUBLIC" value="false"/>
+        <env name="PAYMENTS_DEFAULT_PROVIDER" value="coinsbuy"/>
     </php>
 </phpunit>
