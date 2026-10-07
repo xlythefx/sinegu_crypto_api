@@ -3,6 +3,7 @@
 namespace Tests\Feature;
 
 use App\Models\UserCredential;
+use App\Services\Exchanges\ExchangeSchema;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Testing\TestResponse;
@@ -162,6 +163,107 @@ class AdminDatabaseTest extends EngineTestCase
         )->assertOk()
             ->assertJsonPath('per_page', 200)
             ->assertJsonPath('sort', 'uni_id');
+    }
+
+    /**
+     * Every venue's accounts table carries the same two credential columns.
+     * Until the mask was keyed by column NAME, only binance_accounts was
+     * listed and mexc_accounts / bybit_accounts returned the exchange secret
+     * in the clear. The loop reads the registry so a fourth venue is asserted
+     * the day it is registered.
+     */
+    public function test_rows_mask_exchange_secrets_on_every_venue(): void
+    {
+        $headers = $this->admin();
+        $uniId = $this->makeUser();
+
+        foreach (ExchangeSchema::supported() as $exchange) {
+            $table = ExchangeSchema::for($exchange)->accountsTable;
+
+            $this->makeAccount($uniId, [
+                'api_key' => 'abcdEFGHIJKLMNOPQRSTUVwxyz',
+                'secret_key' => "the-{$exchange}-secret-never-shown",
+            ], $exchange);
+
+            $response = $this->getJson("/api/admin/database/tables/{$table}/rows", $headers)
+                ->assertOk()
+                ->assertJsonPath('total', 1);
+
+            $row = $response->json('rows.0');
+            $this->assertSame('••••••••', $row['secret_key'], "{$table} leaks secret_key");
+            $this->assertSame('abcd…wxyz', $row['api_key'], "{$table} shows the full api_key");
+
+            // The UI reads masked_columns to know which cells not to round-trip.
+            $this->assertContains('secret_key', $response->json('masked_columns'), $table);
+            $this->assertContains('api_key', $response->json('masked_columns'), $table);
+
+            $this->assertContains(
+                'secret_key',
+                $this->getJson("/api/admin/database/tables/{$table}/structure", $headers)->assertOk()->json('masked_columns'),
+                "{$table} structure omits secret_key"
+            );
+        }
+    }
+
+    /**
+     * A masked cell is only hidden if it cannot be asked about either: the
+     * search is a bound LIKE, so scanning secret_key would confirm a secret
+     * one prefix at a time. Name and the api_key hint must still find the row.
+     */
+    public function test_rows_search_cannot_probe_a_masked_secret(): void
+    {
+        $headers = $this->admin();
+        $uniId = $this->makeUser();
+
+        foreach (ExchangeSchema::supported() as $exchange) {
+            $table = ExchangeSchema::for($exchange)->accountsTable;
+
+            $this->makeAccount($uniId, [
+                'api_key' => 'KEYPREFIX-'.$exchange.'-0123456789',
+                'secret_key' => 'SECRETPREFIX-'.$exchange.'-9876543210',
+                'name' => "Findable {$exchange} account",
+            ], $exchange);
+
+            $search = fn (string $term) => $this->getJson(
+                "/api/admin/database/tables/{$table}/rows?search=".urlencode($term),
+                $headers
+            )->assertOk()->json('total');
+
+            $this->assertSame(0, $search('SECRETPREFIX'), "{$table}: a secret prefix matched a row");
+            $this->assertSame(0, $search('SECRETPREFIX-'.$exchange), "{$table}: a longer secret prefix matched a row");
+            $this->assertSame(1, $search('Findable'), "{$table}: search by name broke");
+            $this->assertSame(1, $search('KEYPREFIX'), "{$table}: search by api_key hint broke");
+        }
+    }
+
+    /**
+     * The grid renders `abcd…wxyz` for a key; a cell saved unchanged must not
+     * write that hint over the real key, any more than bullets over a hash.
+     */
+    public function test_row_update_rejects_round_tripped_mask_on_exchange_accounts(): void
+    {
+        $headers = $this->admin();
+        $uniId = $this->makeUser();
+
+        foreach (ExchangeSchema::supported() as $exchange) {
+            $table = ExchangeSchema::for($exchange)->accountsTable;
+            $id = $this->makeAccount($uniId, [
+                'api_key' => 'abcdEFGHIJKLMNOPQRSTUVwxyz',
+                'secret_key' => 'keep-this-secret',
+            ], $exchange);
+
+            $this->putJson("/api/admin/database/tables/{$table}/rows", [
+                'key' => ['id' => $id], 'values' => ['secret_key' => '••••••••'],
+            ], $headers)->assertStatus(422)->assertJson(['error_code' => 'MASKED_VALUE']);
+
+            $this->putJson("/api/admin/database/tables/{$table}/rows", [
+                'key' => ['id' => $id], 'values' => ['api_key' => 'abcd…wxyz'],
+            ], $headers)->assertStatus(422)->assertJson(['error_code' => 'MASKED_VALUE']);
+
+            $row = DB::table($table)->where('id', $id)->first();
+            $this->assertSame('abcdEFGHIJKLMNOPQRSTUVwxyz', $row->api_key, $table);
+            $this->assertSame('keep-this-secret', $row->secret_key, $table);
+        }
     }
 
     /* ============ row writes ============ */
@@ -395,5 +497,21 @@ class AdminDatabaseTest extends EngineTestCase
         $response = $this->sql($headers, 'select uni_id, password from user_credentials')->assertOk();
 
         $this->assertSame('••••••••', $response->json('rows.0.password'));
+    }
+
+    /** MASKED_EVERYWHERE reaches the SQL tab too, on a table the per-table list never named. */
+    public function test_query_masks_secret_key_from_any_venue_table(): void
+    {
+        $headers = $this->admin();
+        $uniId = $this->makeUser();
+
+        foreach (ExchangeSchema::supported() as $exchange) {
+            $table = ExchangeSchema::for($exchange)->accountsTable;
+            $this->makeAccount($uniId, ['secret_key' => 'loose-'.$exchange.'-secret'], $exchange);
+
+            $response = $this->sql($headers, "select id, secret_key from {$table}")->assertOk();
+
+            $this->assertSame('••••••••', $response->json('rows.0.secret_key'), $table);
+        }
     }
 }

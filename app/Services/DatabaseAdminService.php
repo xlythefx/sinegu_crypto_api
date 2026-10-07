@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Services\Exchanges\ExchangeSchema;
 use Illuminate\Database\Query\Builder;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
@@ -36,6 +37,14 @@ use Illuminate\Support\Facades\Schema;
  * Known limits, stated rather than hidden:
  *  - Column masking is NAME-based, so `select password as p from ...` defeats it.
  *    Accepted: this surface already permits arbitrary SELECT for admin+master.
+ *  - `secret_key` is masked by NAME on every table (MASKED_EVERYWHERE), not per
+ *    table: the three venues' account tables share the column, and listing
+ *    binance_accounts alone is how mexc_accounts and bybit_accounts shipped
+ *    with their exchange secrets in the clear. The row search skips every
+ *    fully-masked column for the same reason — a bound LIKE on a hidden column
+ *    confirms its value one prefix at a time. Partially-masked columns (the
+ *    `api_key` hint) stay searchable on purpose; that is how an operator finds
+ *    the row behind a key an exchange error message names.
  *  - The banned-fragment scan is textual, so a literal like `select 'load data'`
  *    is a false positive. Blocking a harmless query is the safe failure.
  *  - MySQL's max_execution_time bounds SELECT only. There is no statement
@@ -54,29 +63,50 @@ class DatabaseAdminService
     /** What a masked value renders as. Submitting this back is refused. */
     public const MASK = '••••••••';
 
+    /**
+     * The gap in a partial render (`abcd…wxyz`). A submitted value carrying it
+     * on a partial column is the hint coming back, not a key, and is refused.
+     */
+    public const PARTIAL_GAP = '…';
+
     /** Statement kinds the console will run. Anything else is blocked. */
     private const READ_STATEMENTS = ['select', 'show', 'explain', 'describe', 'desc', 'with'];
 
     private const WRITE_STATEMENTS = ['insert', 'update', 'delete', 'replace'];
 
-    /** Fully hidden, per table. */
+    /**
+     * Fully hidden by column NAME on EVERY table, known or not.
+     *
+     * A per-table list is only as complete as the last person who added a
+     * table: `binance_accounts => [secret_key]` was right until mexc_accounts
+     * and bybit_accounts arrived with the same column and nobody appended
+     * them. A name this unambiguous is safer hidden wherever it appears.
+     */
+    public const MASKED_EVERYWHERE = ['secret_key'];
+
+    /** Fully hidden, per table — names that are secrets only on THIS table. */
     private const MASKED_COLUMNS = [
         'user_credentials' => ['password', 'reset_code', 'verification_code', 'remember_token'],
         'users' => ['password', 'remember_token'],
-        'binance_accounts' => ['secret_key'],
         'personal_access_tokens' => ['token'],
         'password_reset_tokens' => ['token'],
         'sessions' => ['payload'],
     ];
 
-    /** Shown as `abcd…wxyz` so the row stays identifiable. */
-    private const PARTIAL_COLUMNS = [
-        'binance_accounts' => ['api_key'],
-    ];
+    /**
+     * Shown as `abcd…wxyz` on every exchange's accounts table so the row stays
+     * identifiable. The tables themselves are read off ExchangeSchema in
+     * partialColumns() — a fourth venue is covered the day it is registered.
+     */
+    private const PARTIAL_EXCHANGE_COLUMNS = ['api_key'];
 
-    /** Masked by bare name in arbitrary SQL result sets. */
+    /**
+     * Masked by bare name in arbitrary SQL result sets. MASKED_EVERYWHERE is
+     * folded in at presentation time so a name hidden on every known table
+     * cannot resurface through the SQL tab.
+     */
     private const MASKED_ANY = [
-        'password', 'secret_key', 'remember_token', 'reset_code', 'verification_code', 'token',
+        'password', 'remember_token', 'reset_code', 'verification_code', 'token',
     ];
 
     /**
@@ -196,15 +226,60 @@ class DatabaseAdminService
         return $binary;
     }
 
-    /** @return list<string> masked names that actually exist on $table */
-    public function maskedColumns(string $table): array
+    /**
+     * Per-table partial masks: `api_key` on every registered venue's accounts
+     * table. Derived, not listed, so the registry is the one place a venue is
+     * added — the hole this closes was a hand-kept list that stopped at binance.
+     *
+     * @return array<string, list<string>>
+     */
+    private static function partialColumns(): array
     {
-        $declared = array_merge(
-            self::MASKED_COLUMNS[$table] ?? [],
-            self::PARTIAL_COLUMNS[$table] ?? [],
-        );
+        // Memoized: presentRow() runs once per row, and the registry answers
+        // with a model instance per venue. The map is constant for a process.
+        static $partial = null;
+
+        if ($partial === null) {
+            $partial = [];
+            foreach (ExchangeSchema::supported() as $exchange) {
+                $partial[ExchangeSchema::for($exchange)->accountsTable] = self::PARTIAL_EXCHANGE_COLUMNS;
+            }
+        }
+
+        return $partial;
+    }
+
+    /**
+     * Fully hidden names that actually exist on $table — the per-table list
+     * plus MASKED_EVERYWHERE. These render as MASK and are never searched.
+     *
+     * @return list<string>
+     */
+    public function fullyMaskedColumns(string $table): array
+    {
+        $declared = array_merge(self::MASKED_COLUMNS[$table] ?? [], self::MASKED_EVERYWHERE);
 
         return array_values(array_intersect($declared, $this->columnNames($table)));
+    }
+
+    /**
+     * Names rendered as `abcd…wxyz` on $table. Still searchable: the hint is
+     * what an operator has when an exchange error names a key.
+     *
+     * @return list<string>
+     */
+    public function partiallyMaskedColumns(string $table): array
+    {
+        return array_values(array_intersect(self::partialColumns()[$table] ?? [], $this->columnNames($table)));
+    }
+
+    /** @return list<string> every masked name (full or partial) that exists on $table */
+    public function maskedColumns(string $table): array
+    {
+        return array_values(array_unique(array_merge(
+            $this->fullyMaskedColumns($table),
+            $this->partiallyMaskedColumns($table),
+        )));
     }
 
     /* ============ value rendering ============ */
@@ -227,14 +302,14 @@ class DatabaseAdminService
     {
         return strlen($value) <= 10
             ? self::MASK
-            : substr($value, 0, 4).'…'.substr($value, -4);
+            : substr($value, 0, 4).self::PARTIAL_GAP.substr($value, -4);
     }
 
     /** Mask + JSON-harden one row of a known table. */
     public function presentRow(string $table, array $row): array
     {
-        $full = self::MASKED_COLUMNS[$table] ?? [];
-        $partial = self::PARTIAL_COLUMNS[$table] ?? [];
+        $full = array_merge(self::MASKED_COLUMNS[$table] ?? [], self::MASKED_EVERYWHERE);
+        $partial = self::partialColumns()[$table] ?? [];
 
         $out = [];
         foreach ($row as $column => $value) {
@@ -253,9 +328,11 @@ class DatabaseAdminService
     /** Mask + JSON-harden a row from an arbitrary statement, by bare column name. */
     public function presentLooseRow(array $row): array
     {
+        $hidden = array_merge(self::MASKED_ANY, self::MASKED_EVERYWHERE);
+
         $out = [];
         foreach ($row as $column => $value) {
-            $out[$column] = $value !== null && in_array(strtolower($column), self::MASKED_ANY, true)
+            $out[$column] = $value !== null && in_array(strtolower($column), $hidden, true)
                 ? self::MASK
                 : $this->jsonSafe($value);
         }

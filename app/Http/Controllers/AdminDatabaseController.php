@@ -351,11 +351,24 @@ class AdminDatabaseController extends Controller
         ];
     }
 
-    /** Columns a LIKE search can meaningfully scan. */
+    /**
+     * Columns a LIKE search can meaningfully scan.
+     *
+     * Fully-masked columns are left out: the display hides a secret, but a
+     * bound `LIKE '%abc%'` on it answers "does the secret contain abc" — and a
+     * prefix walk recovers the whole value in a few hundred requests. Partial
+     * columns (the api_key hint) stay in; finding a row by the key an exchange
+     * error named is what the search is for.
+     */
     private function textualColumns(string $table): array
     {
+        $hidden = $this->db->fullyMaskedColumns($table);
+
         $textual = [];
         foreach ($this->db->columns($table) as $column) {
+            if (in_array($column['name'], $hidden, true)) {
+                continue;
+            }
             if (str_contains(strtolower((string) $column['type_name']), 'char')
                 || str_contains(strtolower((string) $column['type_name']), 'text')
                 || strtolower((string) $column['type_name']) === 'enum') {
@@ -392,20 +405,24 @@ class AdminDatabaseController extends Controller
     /**
      * Guard a write payload: real columns only, nothing immutable, and never a
      * masked placeholder — a round-tripped grid would otherwise overwrite a
-     * password hash with bullets.
+     * password hash with bullets, or an exchange key with its own `abcd…wxyz`
+     * hint. The MASK check is on the VALUE, whatever the column, so it covers
+     * every table MASKED_EVERYWHERE reaches without a second list here.
      */
     private function rejectValues(string $table, array $values, bool $forInsert): ?JsonResponse
     {
         $columns = $this->db->columnNames($table);
         $immutable = $this->db->immutableColumns($table);
         $binary = $this->db->binaryColumns($table);
+        $partial = $this->db->partiallyMaskedColumns($table);
 
         foreach ($values as $column => $value) {
             if (! in_array($column, $columns, true)) {
                 return $this->fail('UNKNOWN_COLUMN', "“{$column}” is not a column on {$table}.");
             }
 
-            if ($value === DatabaseAdminService::MASK) {
+            if ($value === DatabaseAdminService::MASK
+                || (in_array($column, $partial, true) && is_string($value) && str_contains($value, DatabaseAdminService::PARTIAL_GAP))) {
                 return $this->fail('MASKED_VALUE', "“{$column}” is hidden — clear the field to keep it, or type a real value.");
             }
 
