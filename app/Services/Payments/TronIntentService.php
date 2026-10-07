@@ -15,6 +15,15 @@ use RuntimeException;
  */
 class TronIntentService
 {
+    /**
+     * An open intent closed because the invoice it quoted for changed its fee
+     * underneath it. Listed in the payment_intents migration's status comment
+     * from day one; the model constant has not been added yet because
+     * PaymentIntent is outside this change's scope — move it there when that
+     * file is next touched.
+     */
+    public const STATUS_SUPERSEDED = 'superseded';
+
     public function __construct(private PaymentEnvironment $env) {}
 
     /**
@@ -26,6 +35,14 @@ class TronIntentService
      * of a space that is deliberately narrow, and two open intents for one
      * invoice would make its own payment ambiguous against itself.
      * `$intent->reused` tells the caller which happened.
+     *
+     * Reused ONLY WHILE ITS FIGURE IS STILL THE INVOICE'S FIGURE. An admin
+     * editing `total_fee`, or regenerating the invoice, while a reservation is
+     * open would otherwise leave the old amount matchable: the watcher settles
+     * whatever the intent reserved, and the invoice would be marked paid at the
+     * new fee for the old money. So a stale reservation is superseded — its
+     * `open_units` released, its `expected_units` kept for the admin screen's
+     * late-payment hints — and a fresh one minted at the current fee.
      *
      * @throws RuntimeException  message is the error code the controller returns
      */
@@ -53,13 +70,82 @@ class TronIntentService
             ->orderByDesc('id')
             ->first();
 
-        if ($existing) {
+        if ($existing && $this->usdToCents($existing->expected_usd) === $invoice->feeCents()) {
             $existing->reused = true;
 
             return $existing;
         }
 
+        if ($existing) {
+            $this->supersede($existing);
+        }
+
         return $this->mint($invoice, $t);
+    }
+
+    /**
+     * Close a reservation whose figure the invoice no longer owes. Conditional
+     * on it still being open, like claim(): the watcher may have consumed it
+     * between our read and this write, and a settled intent must keep its
+     * settled status and tx_hash.
+     */
+    private function supersede(PaymentIntent $intent): void
+    {
+        PaymentIntent::whereKey($intent->getKey())
+            ->where('status', PaymentIntent::STATUS_OPEN)
+            ->update([
+                'status' => self::STATUS_SUPERSEDED,
+                'open_units' => null,
+                'updated_at' => now(),
+            ]);
+    }
+
+    /**
+     * `expected_usd` back to the cents it was issued from, so it can be compared
+     * with Invoice::feeCents() exactly. Same bcmath half-up as feeCents(): the
+     * column is decimal(20,8), which MySQL hands back as a string and SQLite as
+     * a float, and `(int) round($usd * 100)` would disagree with feeCents() on
+     * a value like 12.345.
+     */
+    private function usdToCents(string|float|int|null $usd): int
+    {
+        $usd = (string) ($usd ?? '0');
+        if ($usd === '' || ! is_numeric($usd)) {
+            return 0;
+        }
+
+        $scaled = bcmul($usd, '100', 8);
+        $rounded = bccomp($scaled, '0', 8) >= 0
+            ? bcadd($scaled, '0.5', 0)
+            : bcsub($scaled, '0.5', 0);
+
+        return (int) $rounded;
+    }
+
+    /**
+     * The accepted band around an expected amount — THE ONE DEFINITION of the
+     * tolerance. mint() stores it on the row, and the watcher reads it back when
+     * an admin attributes by hand, so "inside tolerance" means the same thing on
+     * the automatic path and the manual one. A second derivation anywhere else
+     * is how the two would drift.
+     *
+     * Floor and ceiling are clamped the way floorUnits()/ceilingUnits() behave
+     * on a stored intent: the shortfall never exceeds the amount itself.
+     *
+     * @return array{expected: string, shortfall: string, overpay: string, floor: string, ceiling: string}
+     */
+    public function bandFor(string $expectedUnits, int $decimals): array
+    {
+        $shortfall = $this->shortfallUnits($expectedUnits, $decimals);
+        $overpay = TronUnits::pctUnits($expectedUnits, (float) config('payments.tron.overpay_pct', 5.0));
+
+        return [
+            'expected' => $expectedUnits,
+            'shortfall' => $shortfall,
+            'overpay' => $overpay,
+            'floor' => bcsub($expectedUnits, $shortfall, 0),
+            'ceiling' => bcadd($expectedUnits, $overpay, 0),
+        ];
     }
 
     /**
@@ -91,8 +177,7 @@ class TronIntentService
                 ? bcadd($base, (string) random_int(1, $fingerprintMax), 0)
                 : $base;
 
-            $shortfall = $this->shortfallUnits($units, $decimals);
-            $overpay = TronUnits::pctUnits($units, (float) config('payments.tron.overpay_pct', 5.0));
+            $band = $this->bandFor($units, $decimals);
 
             try {
                 $intent = PaymentIntent::create([
@@ -107,8 +192,8 @@ class TronIntentService
                     'decimals' => $decimals,
                     'expected_units' => $units,
                     'expected_usd' => $cents / 100,
-                    'shortfall_units' => $shortfall,
-                    'overpay_units' => $overpay,
+                    'shortfall_units' => $band['shortfall'],
+                    'overpay_units' => $band['overpay'],
                     'open_units' => $units,
                     'status' => PaymentIntent::STATUS_OPEN,
                     'expires_at' => now()->addSeconds($ttl),

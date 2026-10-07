@@ -103,12 +103,25 @@ class AdminTronTransferController extends Controller
 
     /**
      * POST /api/admin/tron-transfers/{id}/attribute
-     * Body: { invoice_id: int }
+     * Body: { invoice_id: int, accept_amount?: bool }
+     *
+     * Three refusals, all 422, all re-evaluated here rather than trusted from
+     * the row the admin was looking at:
+     *   ATTRIBUTION_REFUSED — the transfer or the invoice is no longer eligible;
+     *   NETWORK_MISMATCH    — the transfer is on a network the invoice owner's
+     *                         role does not pay on (a testnet transfer must never
+     *                         settle a customer's real invoice); final;
+     *   AMOUNT_MISMATCH     — the amount is outside the watcher's own tolerance.
+     *                         Carries expected_usd / received_usdt / difference
+     *                         so the page can show them, and is overridden by
+     *                         re-posting with `accept_amount: true` — wrong
+     *                         amounts are what this screen is for.
      */
     public function attribute(Request $request, int $id): JsonResponse
     {
         $data = $request->validate([
             'invoice_id' => ['required', 'integer'],
+            'accept_amount' => ['sometimes', 'boolean'],
         ]);
 
         $transfer = TronTransfer::find($id);
@@ -128,6 +141,19 @@ class AdminTronTransferController extends Controller
         }
         if ($invoice->isPaid()) {
             return $this->refused('That invoice has already been paid.');
+        }
+
+        // Before the intent is touched, so a refusal consumes nothing.
+        $refusal = $this->watcher->manualAttributionRefusal(
+            $transfer,
+            $invoice,
+            (bool) ($data['accept_amount'] ?? false),
+        );
+        if ($refusal !== null) {
+            return response()->json(
+                ['success' => false, 'error_code' => $refusal['code']] + array_diff_key($refusal, ['code' => true]),
+                422,
+            );
         }
 
         // If a reservation for this invoice exists, close it alongside the
@@ -222,6 +248,10 @@ class AdminTronTransferController extends Controller
                 // The scheduler is load-bearing for money now. A stale scan means
                 // payments are arriving and nothing is noticing.
                 'scan_stale' => $t['configured'] && TronGateway::scanIsStale($network),
+                // The stall a fresh scan can hide: the page budget ran out inside
+                // the overlap window, so the cursor is not moving and anything
+                // newer is unreachable. Null once a scan makes progress again.
+                'budget_exhausted_at' => TronGateway::budgetExhaustedAt($network)?->toIso8601String(),
                 'last_transfer_at' => TronTransfer::forNetwork($network)->max('created_at'),
             ];
         }, $names);

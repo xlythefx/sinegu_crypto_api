@@ -204,6 +204,66 @@ class TronIntentTest extends PaymentTestCase
         $this->assertSame('0', $intent->floorUnits());
     }
 
+    // ---- a fee that changes under an open reservation ---------------------
+
+    /**
+     * An admin edits `total_fee` (or regenerates the invoice) while a quote is
+     * open. The old figure must stop being matchable: the watcher settles
+     * whatever the intent reserved, and the invoice would otherwise be marked
+     * paid at the new fee for the old money.
+     */
+    public function test_a_changed_fee_supersedes_the_open_reservation(): void
+    {
+        $first = $this->intents->openFor($this->invoice, 'nile');
+
+        $this->invoice->forceFill(['total_fee' => 15.00])->save();
+        $second = $this->intents->openFor($this->invoice, 'nile');
+
+        $this->assertNotSame($first->id, $second->id);
+        $this->assertFalse($second->reused);
+        $this->assertSame('15000000', (string) $second->expected_units);
+        $this->assertSame('15000000', (string) $second->open_units);
+        $this->assertEquals(15.00, (float) $second->expected_usd);
+
+        $stale = $first->fresh();
+        $this->assertSame(TronIntentService::STATUS_SUPERSEDED, $stale->status);
+        // The reservation is released; the expectation survives for the admin
+        // screen's late-payment hint, exactly as an expired intent's does.
+        $this->assertNull($stale->open_units);
+        $this->assertSame('12340000', (string) $stale->expected_units);
+
+        $this->assertSame(1, PaymentIntent::open()->count());
+    }
+
+    /** Superseding must actually free the figure, or the UNIQUE index still holds it. */
+    public function test_a_superseded_figure_is_free_for_another_invoice(): void
+    {
+        $other = $this->makeInvoice($this->accountId, $this->uniId, ['month_year' => '2026-05']);
+
+        $this->intents->openFor($this->invoice, 'nile');
+        $this->invoice->forceFill(['total_fee' => 15.00])->save();
+        $this->intents->openFor($this->invoice, 'nile');
+
+        $reissued = $this->intents->openFor($other, 'nile');
+
+        $this->assertSame('12340000', (string) $reissued->expected_units);
+        $this->assertSame(2, PaymentIntent::open()->count());
+    }
+
+    /** A re-save that does not change the cents is not a change. */
+    public function test_an_unchanged_fee_reuses_the_same_reservation(): void
+    {
+        $first = $this->intents->openFor($this->invoice, 'nile');
+
+        $this->invoice->forceFill(['total_fee' => '12.340'])->save();
+        $second = $this->intents->openFor($this->invoice, 'nile');
+
+        $this->assertTrue($second->reused);
+        $this->assertSame($first->id, $second->id);
+        $this->assertSame(PaymentIntent::STATUS_OPEN, $first->fresh()->status);
+        $this->assertSame(1, PaymentIntent::count());
+    }
+
     /** Two networks are two independent spaces; the same figure is free in both. */
     public function test_the_same_figure_may_be_reserved_on_two_networks(): void
     {

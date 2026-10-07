@@ -26,6 +26,13 @@ class TronGateway
     /** Cache key holding the last time a network was successfully scanned. */
     private const SCAN_STAMP = 'tron:last_scan:';
 
+    /**
+     * Cache key holding the last time a scan spent its whole page budget
+     * without getting past the overlap window — the one failure mode a
+     * "successful" scan can hide. See TronWatcher::budgetStalled().
+     */
+    private const BUDGET_STAMP = 'tron:budget_exhausted:';
+
     /** True once a call died before TronGrid answered at all. */
     private bool $transportFailed = false;
 
@@ -72,6 +79,7 @@ class TronGateway
             'configured' => $t['configured'],
             'last_scan_at' => $scannedAt?->toIso8601String(),
             'scan_stale' => self::scanIsStale($network),
+            'budget_exhausted_at' => self::budgetExhaustedAt($network)?->toIso8601String(),
             'transport_failed' => $this->transportFailed,
             'trace' => $this->trace,
         ];
@@ -112,6 +120,34 @@ class TronGateway
         $minutes = (int) config('payments.tron.scan_stale_minutes', 10);
 
         return $at->lt(now()->subMinutes($minutes));
+    }
+
+    /**
+     * When the most recent completed scan of this network stalled: it used its
+     * whole page budget and still never reached past the overlap window, so the
+     * derived cursor did not move and the next run will re-read the same rows.
+     *
+     * Distinct from `scan_stale` on purpose — a stalled scan COMPLETES, so the
+     * liveness stamp keeps getting refreshed while nothing new is ever fetched.
+     * Beside `last_scan_at` in the cache for the same reason that one is: it is
+     * a signal, not a record. Cleared by the next scan that does make progress,
+     * so a non-null value always describes the current state.
+     */
+    public static function budgetExhaustedAt(string $network): ?Carbon
+    {
+        $stamp = Cache::get(self::BUDGET_STAMP.$network);
+
+        return $stamp ? Carbon::parse($stamp) : null;
+    }
+
+    public static function markBudgetExhausted(string $network): void
+    {
+        Cache::put(self::BUDGET_STAMP.$network, now()->toIso8601String(), now()->addDay());
+    }
+
+    public static function clearBudgetExhausted(string $network): void
+    {
+        Cache::forget(self::BUDGET_STAMP.$network);
     }
 
     // ---- transport -------------------------------------------------------
@@ -212,6 +248,19 @@ class TronGateway
      * minute and cannot be rolled back by a fork — so there is no confirmation
      * count to tune here, and inventing one would only add lag.
      *
+     * `contract_address` narrows the read to the configured USDT contract. The
+     * endpoint otherwise returns EVERY TRC-20 transfer to the address, any
+     * token — and minting a worthless token and sending it to a public address
+     * costs an attacker nothing. The page budget is the defence against one
+     * flood outlasting its minute, but it is bounded: more fake-token rows
+     * inside one overlap window than the budget can read, and every run
+     * re-reads the same window and never advances, while a real payment behind
+     * it goes unseen until the invoice is overdue and the account paused — all
+     * with each scan reporting success. Asking only for our token takes the
+     * free flood off the table; the stall detector in TronWatcher is what is
+     * left for the paid kind. The contract check on ingest stays: this is a
+     * request parameter, not a trust decision.
+     *
      * @return array{ok: bool, status: int, items: list<array>, pages: int, truncated: bool}
      */
     public function incomingTransfers(string $network, int $sinceMs, ?int $maxPages = null): array
@@ -235,6 +284,9 @@ class TronGateway
                 'min_timestamp' => $sinceMs,
                 'limit' => $limit,
             ];
+            if ($t['contract'] !== '') {
+                $query['contract_address'] = $t['contract'];
+            }
             if ($fingerprint !== null) {
                 $query['fingerprint'] = $fingerprint;
             }

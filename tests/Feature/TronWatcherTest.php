@@ -6,11 +6,14 @@ use App\Models\Invoice;
 use App\Models\PaymentEvent;
 use App\Models\PaymentIntent;
 use App\Models\TronTransfer;
+use App\Services\Payments\TronGateway;
+use App\Services\Payments\TronIntentService;
 use App\Services\Payments\TronWatcher;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 
 /**
  * The watcher, against a faked TronGrid. Nothing here touches a chain, a wallet
@@ -372,6 +375,95 @@ class TronWatcherTest extends PaymentTestCase
         $this->assertSame('block_timestamp,asc', $query['order_by']);
     }
 
+    /**
+     * Without this the endpoint returns every TRC-20 transfer to the address,
+     * any token — and a worthless token costs nothing to mint and send. Enough
+     * of them inside one overlap window and the page budget is spent re-reading
+     * the same rows every minute, with a real payment behind them never
+     * reached. The contract check on ingest is unchanged; this is a request
+     * parameter, not a trust decision.
+     */
+    public function test_it_asks_only_for_the_configured_contract(): void
+    {
+        $this->fakeTron([$this->tronPage([])]);
+        $this->scan()->assertSuccessful();
+
+        $query = $this->queryOfLastRequest();
+
+        $this->assertSame($this->tronNileContract, $query['contract_address']);
+        // The filter never relaxes the ordering it is meant to protect.
+        $this->assertSame('block_timestamp,asc', $query['order_by']);
+    }
+
+    /**
+     * The stall a successful scan can hide. The cursor is MAX(block_timestamp)
+     * stored minus the overlap; a run that spends its whole budget without
+     * fetching anything newer than that leaves the cursor exactly where it was,
+     * and every later run re-reads the same rows — while `last_scan_at` keeps
+     * being refreshed and `scan_stale` never fires.
+     */
+    public function test_a_run_that_stalls_inside_the_overlap_window_is_reported(): void
+    {
+        config(['payments.tron.page_limit' => 2, 'payments.tron.max_pages' => 1]);
+        $overlapMs = config('payments.tron.scan_overlap_minutes') * 60 * 1000;
+
+        // The newest row we already hold, which the cursor is derived from.
+        $newestStored = now()->subMinutes(5)->getTimestampMs();
+        TronTransfer::create([
+            'network' => 'nile',
+            'event_key' => hash('sha256', 'seed-newest'),
+            'tx_hash' => 'tx-seed-newest',
+            'contract_address' => $this->tronNileContract,
+            'from_address' => $this->tronPayer,
+            'to_address' => $this->tronNileAddress,
+            'value_raw' => '1',
+            'value_units' => '1',
+            'block_timestamp' => $newestStored,
+            'confirmed' => true,
+            'status' => TronTransfer::STATUS_REJECTED,
+            'reject_reason' => 'dust',
+        ]);
+
+        // A full page, more to come, and nothing on it newer than what we hold;
+        // then, for the run after it, a caught-up (empty) page.
+        $this->fakeTron([
+            $this->tronPage([
+                $this->tronItem(['value' => '1', 'block_timestamp' => $newestStored - 25 * 60 * 1000]),
+                $this->tronItem(['value' => '1', 'block_timestamp' => $newestStored - 24 * 60 * 1000]),
+            ], 'more-to-come'),
+            $this->tronPage([]),
+        ]);
+
+        Log::spy();
+        $summary = app(TronWatcher::class)->scan('nile');
+
+        $this->assertTrue($summary['truncated']);
+        $this->assertTrue($summary['budget_exhausted']);
+        $this->assertNull($summary['error']);
+
+        Log::shouldHaveReceived('warning')
+            ->once()
+            ->withArgs(fn (string $message, array $context) => str_contains($message, 'page budget')
+                && $context['network'] === 'nile'
+                && $context['max_pages'] === 1
+                && $context['page_limit'] === 2
+                && $context['cursor_from'] === $newestStored - $overlapMs);
+
+        // Surfaced beside last_scan_at, because a stalled scan still completes.
+        $this->assertNotNull(TronGateway::lastScanAt('nile'));
+        $this->assertNotNull(TronGateway::budgetExhaustedAt('nile'));
+
+        // What was fetched is stored; nothing it did not fetch was invented.
+        $this->assertSame(3, TronTransfer::count());
+
+        // The cursor has not moved: the next run asks for the same window.
+        $this->scan()->assertSuccessful();
+        $this->assertSame($newestStored - $overlapMs, (int) $this->queryOfLastRequest()['min_timestamp']);
+
+        // That run caught up, so the stamp describes the current state only.
+        $this->assertNull(TronGateway::budgetExhaustedAt('nile'));
+    }
+
     public function test_the_cursor_resumes_from_the_newest_stored_transfer_less_an_overlap(): void
     {
         $blockTs = now()->subMinutes(5)->getTimestampMs();
@@ -421,10 +513,38 @@ class TronWatcherTest extends PaymentTestCase
         $this->scan()->assertSuccessful();
         $this->assertSame(2, TronTransfer::count());
         $this->assertSame('pending', $this->invoice->fresh()->status);
+        // Truncated but PROGRESSING — the first run reached well past its
+        // cursor's overlap window — so it is not the stall the stamp is for.
+        $this->assertNull(TronGateway::budgetExhaustedAt('nile'));
 
         $this->scan()->assertSuccessful();
         $this->assertSame(3, TronTransfer::count());
         $this->assertSame('paid', $this->invoice->fresh()->status);
+    }
+
+    /**
+     * The fee changed while a quote was open, so the quote was superseded. A
+     * payment of the OLD figure must not settle the invoice at the new one; it
+     * is left for a human, who is told which reservation it matched.
+     */
+    public function test_a_payment_of_a_superseded_figure_is_left_for_a_human(): void
+    {
+        $intents = app(TronIntentService::class);
+        $intents->openFor($this->invoice, 'nile');
+        $this->invoice->forceFill(['total_fee' => 15.00])->save();
+        $intents->openFor($this->invoice, 'nile');
+
+        $this->fakeTron([$this->tronPage([$this->tronItem(['value' => '12340000'])])]);
+        $this->scan()->assertSuccessful();
+
+        $this->assertSame('pending', $this->invoice->fresh()->status);
+        $transfer = TronTransfer::firstOrFail();
+        $this->assertSame(TronTransfer::STATUS_UNMATCHED, $transfer->status);
+
+        $suggestions = app(TronWatcher::class)->suggestionsFor($transfer);
+        $this->assertCount(1, $suggestions);
+        $this->assertSame($this->invoice->id, $suggestions[0]['invoice_id']);
+        $this->assertSame(TronIntentService::STATUS_SUPERSEDED, $suggestions[0]['intent_status']);
     }
 
     // ---- failure ---------------------------------------------------------

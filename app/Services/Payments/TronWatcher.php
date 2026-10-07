@@ -5,6 +5,7 @@ namespace App\Services\Payments;
 use App\Models\Invoice;
 use App\Models\PaymentIntent;
 use App\Models\TronTransfer;
+use App\Models\UserCredential;
 use App\Services\InvoiceService;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\Log;
@@ -41,7 +42,7 @@ class TronWatcher
      *
      * @return array{network: string, configured: bool, fetched: int, stored: int,
      *   settled: int, unmatched: int, rejected: int, ambiguous: int,
-     *   cursor_from: int, truncated: bool, error: ?string}
+     *   cursor_from: int, truncated: bool, budget_exhausted: bool, error: ?string}
      */
     public function scan(string $network, bool $dryRun = false, ?int $sinceMs = null): array
     {
@@ -58,6 +59,7 @@ class TronWatcher
             'ambiguous' => 0,
             'cursor_from' => 0,
             'truncated' => false,
+            'budget_exhausted' => false,
             'error' => null,
         ];
 
@@ -99,9 +101,63 @@ class TronWatcher
         // network that has been unreachable for an hour would still look fresh.
         if ($page['ok']) {
             TronGateway::markScanned($network);
+
+            $summary['budget_exhausted'] = $this->budgetStalled($network, $cursor, $page);
         }
 
         return $summary;
+    }
+
+    /**
+     * Did this run spend its whole page budget without getting past the
+     * overlap window? If so the derived cursor has not moved, the next run will
+     * read exactly the same rows, and anything newer is unreachable for as long
+     * as that holds — invoices go overdue and accounts get paused while every
+     * scan reports success and `scan_stale` never fires. The one stall a
+     * successful scan can hide, so it gets its own stamp beside `last_scan_at`.
+     *
+     * The test is on what was FETCHED, not stored: the cursor is derived from
+     * the newest stored row, and a run that reached nothing newer than
+     * `cursor + overlap` (which is at least the newest row it started from)
+     * has by construction left it where it was.
+     *
+     * Only a completed, truncated page qualifies — a failed fetch is reported
+     * as an error, and an un-truncated one caught up by definition.
+     *
+     * @param  array{ok: bool, items: list<array>, pages: int, truncated: bool}  $page
+     */
+    private function budgetStalled(string $network, int $cursor, array $page): bool
+    {
+        if (! $page['truncated']) {
+            TronGateway::clearBudgetExhausted($network);
+
+            return false;
+        }
+
+        $overlapMs = (int) config('payments.tron.scan_overlap_minutes', 30) * 60 * 1000;
+        $newest = 0;
+        foreach ($page['items'] as $item) {
+            $newest = max($newest, (int) ($item['block_timestamp'] ?? 0));
+        }
+
+        if ($newest > $cursor + $overlapMs) {
+            TronGateway::clearBudgetExhausted($network);
+
+            return false;
+        }
+
+        Log::warning('TRON scan exhausted its page budget without advancing past the overlap window; the cursor is not moving.', [
+            'network' => $network,
+            'pages' => $page['pages'],
+            'page_limit' => (int) config('payments.tron.page_limit', 200),
+            'max_pages' => (int) config('payments.tron.max_pages', 10),
+            'cursor_from' => $cursor,
+            'newest_fetched' => $newest,
+            'overlap_minutes' => (int) config('payments.tron.scan_overlap_minutes', 30),
+        ]);
+        TronGateway::markBudgetExhausted($network);
+
+        return true;
     }
 
     /**
@@ -334,11 +390,121 @@ class TronWatcher
     }
 
     /**
+     * Why a HUMAN may not attribute this transfer to this invoice, or null.
+     *
+     * Two checks the automatic matcher gets for free and the manual path used
+     * to skip entirely. The matcher only ever consults intents on the
+     * transfer's own network and inside their stored band; an admin picking an
+     * invoice from a list has neither constraint, so they are re-stated here:
+     *
+     *   NETWORK_MISMATCH — the transfer is not on the network the invoice
+     *     owner's role maps to (PaymentEnvironment::tronNetworkFor, the single
+     *     role-aware call). Without it a Nile TESTNET transfer could settle a
+     *     customer's real invoice: free tokens marking real money as received,
+     *     and the account re-enabled on the strength of it. A developer's
+     *     invoice takes the developer network; a customer's takes mainnet.
+     *     Never overridable — there is no legitimate reading of it.
+     *
+     *   AMOUNT_MISMATCH — the amount lies outside the band the watcher itself
+     *     would have accepted (the same bandFor() a minted intent stores). This
+     *     one IS overridable, because wrong amounts are precisely what the
+     *     admin screen exists for: a late payment, a short one, two halves.
+     *     `$acceptAmount` is the admin saying they have looked at the figures,
+     *     which the refusal carries so the UI can show them before asking.
+     *
+     * Runs BEFORE any intent is claimed, so a refusal consumes nothing.
+     *
+     * @return array<string, mixed>|null  with `code` and `message`, plus the
+     *                                    figures for an amount mismatch
+     */
+    public function manualAttributionRefusal(TronTransfer $transfer, Invoice $invoice, bool $acceptAmount): ?array
+    {
+        $ownerType = UserCredential::where('uni_id', $invoice->user_id)->value('type');
+        $invoiceNetwork = $this->env->tronNetworkFor($ownerType === 'developer');
+
+        if ($transfer->network !== $invoiceNetwork) {
+            return [
+                'code' => 'NETWORK_MISMATCH',
+                'message' => sprintf(
+                    'This transfer is on %s, but invoice #%d can only be paid on %s.',
+                    $transfer->network, $invoice->id, $invoiceNetwork,
+                ),
+                'transfer_network' => $transfer->network,
+                'invoice_network' => $invoiceNetwork,
+            ];
+        }
+
+        if ($acceptAmount) {
+            return null;
+        }
+
+        $t = $this->env->tron($transfer->network);
+        $decimals = (int) $t['decimals'];
+        $units = (string) $transfer->value_units;
+        $expectedUnits = TronUnits::centsToUnits($invoice->feeCents(), $decimals);
+
+        if ($this->insideBand($units, $expectedUnits, $decimals)) {
+            return null;
+        }
+
+        $difference = bcsub($units, $expectedUnits, 0);
+        $short = bccomp($difference, '0', 0) < 0;
+
+        return [
+            'code' => 'AMOUNT_MISMATCH',
+            'message' => sprintf(
+                'Received %s %s but invoice #%d expects %s — %s by %s. Confirm to attribute it anyway.',
+                TronUnits::format($units, $decimals),
+                $t['asset'],
+                $invoice->id,
+                TronUnits::format($expectedUnits, $decimals),
+                $short ? 'short' : 'over',
+                TronUnits::format(ltrim($difference, '-'), $decimals),
+            ),
+            'expected_usd' => $invoice->feeCents() / 100,
+            'received_usdt' => TronUnits::toUsd($units, $decimals),
+            'difference' => (float) (($short ? '-' : '').TronUnits::format(ltrim($difference, '-'), $decimals)),
+            'direction' => $short ? 'short' : 'over',
+        ];
+    }
+
+    /** Is $units within the band the watcher would accept for $expectedUnits? */
+    private function insideBand(string $units, string $expectedUnits, int $decimals): bool
+    {
+        $band = $this->intents->bandFor($expectedUnits, $decimals);
+
+        return bccomp($units, $band['floor'], 0) >= 0 && bccomp($units, $band['ceiling'], 0) <= 0;
+    }
+
+    /**
+     * The audit id of a settlement made by anything other than the watcher.
+     *
+     * The watcher writes its own row under the transfer's `event_key` — once,
+     * either as a settlement or as an unmatched record, never both. A manual
+     * attribution comes LATER, for a transfer the watcher already recorded as
+     * unmatched under that key, so reusing it loses to UNIQUE(provider,
+     * event_id) and PaymentEventRecorder::record() swallows the failure by
+     * design: the attribution left no audit row at all. Its own id makes it a
+     * second row beside the first, which is the honest history — could not be
+     * placed, then placed by a named admin.
+     */
+    public static function attributionEventId(string $eventKey): string
+    {
+        return hash('sha256', 'tron-attribution|'.$eventKey);
+    }
+
+    /**
      * Settle an invoice from a transfer. THE ONE DEFINITION OF SETTLEMENT for
      * this rail — the watcher and the admin's manual attribution both come
      * through here, so the two can never drift apart.
      *
-     * `$by` is 'watcher' or "admin:{uni_id}".
+     * `$by` is 'watcher', "admin:{uni_id}" or "simulated:{uni_id}".
+     *
+     * The audit row's `secondary_status` is 'amount_mismatch' whenever the
+     * amount received lies outside the band the invoice's CURRENT fee would
+     * accept — on the manual path that is an admin's deliberate override, and
+     * on any path it is a figure worth being able to find later. The outcome
+     * itself still says what happened to the invoice.
      */
     public function attribute(
         TronTransfer $transfer,
@@ -350,6 +516,8 @@ class TronWatcher
         $decimals = (int) ($intent?->decimals ?? $t['decimals']);
         $units = (string) $transfer->value_units;
         $expectedCents = $invoice->feeCents();
+        $expectedUnits = TronUnits::centsToUnits($expectedCents, $decimals);
+        $outsideBand = ! $this->insideBand($units, $expectedUnits, $decimals);
 
         // Deliberately the invoice's own USD figure, not the USDT amount
         // reinterpreted: if USDT ever depegs we under-record by the depeg rather
@@ -368,7 +536,9 @@ class TronWatcher
 
         $this->events->record([
             'provider' => 'tron',
-            'event_id' => $transfer->event_key,
+            'event_id' => $by === 'watcher'
+                ? $transfer->event_key
+                : self::attributionEventId($transfer->event_key),
             'external_id' => $transfer->tx_hash,
             'tx_hash' => $transfer->tx_hash,
             'invoice_id' => $invoice->id,
@@ -376,12 +546,26 @@ class TronWatcher
             'account_id' => $invoice->account_id,
             'outcome' => ! $settled ? 'already_paid' : ($paidUnits ? 'overpaid' : 'paid'),
             'provider_status' => $transfer->network,
+            'secondary_status' => $outsideBand ? 'amount_mismatch' : null,
             'amount' => $expectedCents / 100,
             'amount_currency' => 'USD',
             'expected_amount' => $expectedCents / 100,
             'crypto_currency' => $t['asset'],
             'crypto_amount' => TronUnits::format($units, $decimals),
-            'message' => sprintf('%s via %s on %s.', $settled ? 'Settled' : 'Already paid', $by, $transfer->network),
+            'message' => sprintf(
+                '%s via %s on %s.%s',
+                $settled ? 'Settled' : 'Already paid',
+                $by,
+                $transfer->network,
+                $outsideBand
+                    ? sprintf(
+                        ' Amount outside tolerance: received %s, expected %s %s.',
+                        TronUnits::format($units, $decimals),
+                        TronUnits::format($expectedUnits, $decimals),
+                        $t['asset'],
+                    )
+                    : '',
+            ),
         ]);
 
         if ($settled) {

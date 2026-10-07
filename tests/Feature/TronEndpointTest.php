@@ -3,9 +3,12 @@
 namespace Tests\Feature;
 
 use App\Models\Invoice;
+use App\Models\PaymentEvent;
 use App\Models\PaymentIntent;
 use App\Models\TronTransfer;
 use App\Services\Payments\PaymentEnvironment;
+use App\Services\Payments\TronGateway;
+use App\Services\Payments\TronWatcher;
 use Illuminate\Support\Facades\DB;
 
 /**
@@ -351,6 +354,190 @@ class TronEndpointTest extends PaymentTestCase
         )->assertStatus(422);
 
         $this->assertSame('pending', $second->fresh()->status);
+    }
+
+    // ---- manual attribution: network ------------------------------------
+
+    private function attribute(TronTransfer $transfer, Invoice $invoice, array $body = []): \Illuminate\Testing\TestResponse
+    {
+        return $this->postJson(
+            "/api/admin/tron-transfers/{$transfer->id}/attribute",
+            array_merge(['invoice_id' => $invoice->id], $body),
+            $this->userHeaders($this->devId),
+        );
+    }
+
+    /**
+     * THE ONE THAT MATTERS. Free testnet tokens must never mark a customer's
+     * real invoice as paid — and re-enable their trading on the strength of it.
+     * The invoice owner's role decides the network, through the same single
+     * call that decides which address they are quoted.
+     */
+    public function test_a_testnet_transfer_cannot_settle_a_customers_invoice(): void
+    {
+        $this->usePayments(PaymentEnvironment::PRODUCTION, [
+            'payments.tron.default_network.production' => 'mainnet',
+            'payments.tron.developer_network' => 'nile',
+        ]);
+        $this->makeIntent($this->traderInvoice);
+        $transfer = $this->seedTransfer(['value_raw' => '20000000', 'value_units' => '20000000']);
+
+        $response = $this->attribute($transfer, $this->traderInvoice, ['accept_amount' => true]);
+
+        $response->assertStatus(422)
+            ->assertJsonPath('error_code', 'NETWORK_MISMATCH')
+            ->assertJsonPath('transfer_network', 'nile')
+            ->assertJsonPath('invoice_network', 'mainnet');
+
+        $this->assertSame('pending', $this->traderInvoice->fresh()->status);
+        $this->assertSame(TronTransfer::STATUS_UNMATCHED, $transfer->fresh()->status);
+        // A refusal consumes nothing: the reservation is still open.
+        $this->assertSame(PaymentIntent::STATUS_OPEN, PaymentIntent::firstOrFail()->status);
+        $this->assertSame(0, PaymentEvent::where('provider', 'tron')->count());
+    }
+
+    public function test_a_mainnet_transfer_settles_a_customers_invoice(): void
+    {
+        $this->usePayments(PaymentEnvironment::PRODUCTION, [
+            'payments.tron.default_network.production' => 'mainnet',
+            'payments.tron.networks.mainnet.contract' => 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t',
+        ]);
+        $transfer = $this->seedTransfer([
+            'network' => 'mainnet',
+            'to_address' => $this->tronMainnetAddress,
+            'contract_address' => 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t',
+            'value_raw' => '20000000',
+            'value_units' => '20000000',
+        ]);
+
+        $this->attribute($transfer, $this->traderInvoice)->assertOk()->assertJsonPath('settled', true);
+
+        $this->assertSame('paid', $this->traderInvoice->fresh()->status);
+    }
+
+    /** A developer's invoice lives on the developer network, production included. */
+    public function test_a_developers_invoice_takes_a_testnet_transfer_on_production(): void
+    {
+        $this->usePayments(PaymentEnvironment::PRODUCTION, [
+            'payments.tron.default_network.production' => 'mainnet',
+            'payments.tron.developer_network' => 'nile',
+        ]);
+        $transfer = $this->seedTransfer();
+
+        $this->attribute($transfer, $this->invoice)->assertOk()->assertJsonPath('settled', true);
+
+        $this->assertSame('paid', $this->invoice->fresh()->status);
+    }
+
+    // ---- manual attribution: amount -------------------------------------
+
+    /**
+     * Outside the band the watcher itself would accept (floor 11.34, ceiling
+     * 12.957 on a $12.34 invoice). Not forbidden — wrong amounts are what the
+     * screen is for — but never silent: the figures come back for a confirm
+     * step, and nothing moves until the admin has seen them.
+     */
+    public function test_an_amount_outside_tolerance_is_refused_until_accepted(): void
+    {
+        $intent = $this->makeIntent($this->invoice);
+        $transfer = $this->seedTransfer(['value_raw' => '11000000', 'value_units' => '11000000']);
+
+        $response = $this->attribute($transfer, $this->invoice);
+
+        $response->assertStatus(422)
+            ->assertJsonPath('error_code', 'AMOUNT_MISMATCH')
+            ->assertJsonPath('expected_usd', 12.34)
+            ->assertJsonPath('difference', -1.34)
+            ->assertJsonPath('direction', 'short');
+        // Loose on purpose: a whole-number float round-trips through JSON as
+        // an int on some php.ini serialize_precision settings.
+        $this->assertEquals(11.0, $response->json('received_usdt'));
+        $this->assertStringContainsString('short by 1.340000', $response->json('message'));
+
+        // NOTHING settled, claimed or audited.
+        $this->assertSame('pending', $this->invoice->fresh()->status);
+        $this->assertSame(TronTransfer::STATUS_UNMATCHED, $transfer->fresh()->status);
+        $this->assertSame(PaymentIntent::STATUS_OPEN, $intent->fresh()->status);
+        $this->assertSame(0, PaymentEvent::where('provider', 'tron')->count());
+        $this->assertSame(0, (int) DB::table('binance_accounts')->find($this->accountId)->enabled);
+    }
+
+    public function test_an_overpayment_beyond_tolerance_reports_the_direction(): void
+    {
+        $transfer = $this->seedTransfer(['value_raw' => '13000000', 'value_units' => '13000000']);
+
+        $this->attribute($transfer, $this->invoice)
+            ->assertStatus(422)
+            ->assertJsonPath('error_code', 'AMOUNT_MISMATCH')
+            ->assertJsonPath('difference', 0.66)
+            ->assertJsonPath('direction', 'over');
+
+        $this->assertSame('pending', $this->invoice->fresh()->status);
+    }
+
+    /**
+     * With the flag it goes through — and the audit row says so. Driven
+     * through the real watcher first so the unmatched row exists under the
+     * transfer's event_key: before this change the attribution reused that id,
+     * lost to the unique index, and left no audit row at all.
+     */
+    public function test_an_accepted_mismatch_settles_and_leaves_its_own_audit_row(): void
+    {
+        $this->fakeTron([$this->tronPage([$this->tronItem(['value' => '11000000'])])]);
+        $this->artisan('payments:watch-tron', ['--network' => 'nile'])->assertSuccessful();
+
+        $transfer = TronTransfer::firstOrFail();
+        $this->assertSame(TronTransfer::STATUS_UNMATCHED, $transfer->status);
+        $this->assertSame(1, PaymentEvent::where('provider', 'tron')->count());
+
+        $this->attribute($transfer, $this->invoice, ['accept_amount' => true])
+            ->assertOk()
+            ->assertJsonPath('settled', true);
+
+        $invoice = $this->invoice->fresh();
+        $this->assertSame('paid', $invoice->status);
+        // The invoice's own figure, never the short amount received.
+        $this->assertEquals(12.34, (float) $invoice->paid_amount);
+        $this->assertSame('admin:'.$this->devId, $transfer->fresh()->settled_by);
+
+        $events = PaymentEvent::where('provider', 'tron')->orderBy('id')->get();
+        $this->assertCount(2, $events);
+
+        $unmatched = $events[0];
+        $this->assertSame($transfer->event_key, $unmatched->event_id);
+        $this->assertSame('tracking_unknown', $unmatched->outcome);
+
+        $attributed = $events[1];
+        $this->assertSame(TronWatcher::attributionEventId($transfer->event_key), $attributed->event_id);
+        $this->assertSame('paid', $attributed->outcome);
+        $this->assertSame('amount_mismatch', $attributed->secondary_status);
+        $this->assertSame($this->invoice->id, (int) $attributed->invoice_id);
+        $this->assertEquals(11.0, (float) $attributed->crypto_amount);
+        $this->assertStringContainsString('outside tolerance', $attributed->message);
+    }
+
+    /** Short by an exchange withdrawal fee: inside the band, so no confirm step. */
+    public function test_an_amount_inside_tolerance_needs_no_flag(): void
+    {
+        $transfer = $this->seedTransfer(['value_raw' => '11340000', 'value_units' => '11340000']);
+
+        $this->attribute($transfer, $this->invoice)->assertOk()->assertJsonPath('settled', true);
+
+        $this->assertSame('paid', $this->invoice->fresh()->status);
+        $event = PaymentEvent::where('provider', 'tron')->firstOrFail();
+        $this->assertSame(TronWatcher::attributionEventId($transfer->event_key), $event->event_id);
+        $this->assertNull($event->secondary_status);
+    }
+
+    public function test_the_listing_reports_a_stalled_page_budget(): void
+    {
+        TronGateway::markBudgetExhausted('nile');
+
+        $response = $this->getJson('/api/admin/tron-transfers', $this->userHeaders($this->devId))->assertOk();
+
+        $networks = collect($response->json('networks'));
+        $this->assertNotNull($networks->firstWhere('name', 'nile')['budget_exhausted_at']);
+        $this->assertNull($networks->firstWhere('name', 'mainnet')['budget_exhausted_at']);
     }
 
     public function test_ignoring_removes_a_transfer_from_the_queue(): void
