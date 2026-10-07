@@ -100,4 +100,64 @@ class EngineMarkOverdueTest extends EngineTestCase
         $this->assertSame('paid', $invoice->fresh()->status);
         $this->assertSame(1, (int) DB::table('binance_accounts')->find($accountId)->enabled);
     }
+
+    /** Paying one month must not resume trading while an older one is still owed. */
+    public function test_settle_keeps_the_account_off_while_another_invoice_is_overdue(): void
+    {
+        $user = $this->makeUser();
+        $accountId = $this->makeAccount($user);
+        $apiKey = DB::table('binance_accounts')->find($accountId)->api_key;
+        $june = $this->makeInvoice($accountId, $apiKey, $user, ['month_year' => '2026-06']);
+        $july = $this->makeInvoice($accountId, $apiKey, $user, [
+            'month_year' => '2026-07', 'due_date' => now()->subDay()->toDateString(),
+        ]);
+
+        $this->artisan('engine:mark-overdue')->assertSuccessful();
+        $this->assertSame('overdue', $june->fresh()->status);
+        $this->assertSame('overdue', $july->fresh()->status);
+        $this->assertSame(0, (int) DB::table('binance_accounts')->find($accountId)->enabled);
+
+        app(\App\Services\InvoiceService::class)->settle($june->fresh());
+        $this->assertSame('paid', $june->fresh()->status);
+        $this->assertSame(0, (int) DB::table('binance_accounts')->find($accountId)->enabled);
+
+        app(\App\Services\InvoiceService::class)->settle($july->fresh());
+        $this->assertSame(1, (int) DB::table('binance_accounts')->find($accountId)->enabled);
+    }
+
+    /**
+     * Ids repeat across the per-exchange tables: a MEXC invoice pauses MEXC
+     * account #N and settling it resumes MEXC account #N — never Binance #N.
+     */
+    public function test_an_overdue_mexc_invoice_pauses_the_mexc_account_not_binance(): void
+    {
+        $user = $this->makeUser();
+        $binanceId = $this->makeAccount($user);
+        $mexcId = $this->makeAccount($user, [], 'mexc');
+        $this->assertSame($binanceId, $mexcId, 'the test needs colliding ids to mean anything');
+        $mexcKey = DB::table('mexc_accounts')->find($mexcId)->api_key;
+        $invoice = $this->makeInvoice($mexcId, $mexcKey, $user, ['exchange' => 'mexc']);
+
+        $this->artisan('engine:mark-overdue')->assertSuccessful();
+
+        $this->assertSame('overdue', $invoice->fresh()->status);
+        $this->assertSame(0, (int) DB::table('mexc_accounts')->find($mexcId)->enabled);
+        $this->assertSame(1, (int) DB::table('binance_accounts')->find($binanceId)->enabled);
+
+        DB::table('binance_accounts')->where('id', $binanceId)->update(['enabled' => 0]);
+        app(\App\Services\InvoiceService::class)->settle($invoice->fresh());
+
+        $this->assertSame(1, (int) DB::table('mexc_accounts')->find($mexcId)->enabled);
+        $this->assertSame(0, (int) DB::table('binance_accounts')->find($binanceId)->enabled);
+    }
+
+    public function test_suspended_owner_accounts_are_disabled_on_every_venue(): void
+    {
+        $suspended = $this->makeUser(['status' => 'suspended']);
+        $mexcId = $this->makeAccount($suspended, [], 'mexc');
+
+        $this->artisan('engine:mark-overdue')->assertSuccessful();
+
+        $this->assertSame(0, (int) DB::table('mexc_accounts')->find($mexcId)->enabled);
+    }
 }

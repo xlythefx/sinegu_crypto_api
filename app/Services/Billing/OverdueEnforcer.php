@@ -3,9 +3,9 @@
 namespace App\Services\Billing;
 
 use App\Mail\PaymentReminder;
-use App\Models\BinanceAccount;
 use App\Models\Invoice;
 use App\Services\EngineCache;
+use App\Services\Exchanges\ExchangeSchema;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
@@ -19,10 +19,14 @@ use Illuminate\Support\Facades\DB;
  *   anything due BEFORE today (an engine that was down on the 4th).
  *
  * Pending invoices with a fee whose due date is on/before the cutoff become
- * 'overdue' and their Binance account is disabled (InvoiceService::settle
- * turns it back on when paid). Selecting status = 'pending' only makes it
- * exactly-once. The MASTER's account is never disabled (a sandbox rehearsal
- * left unpaid must not stop the house trading); its invoice still goes overdue.
+ * 'overdue' and the account they bill is disabled — on the invoice's OWN
+ * venue, resolved through ExchangeSchema, because ids repeat across the
+ * per-exchange tables and a MEXC invoice must never switch off Binance
+ * account #N (InvoiceService::settle turns it back on when paid, and
+ * ExchangeAccountController::store refuses to connect around it). Selecting
+ * status = 'pending' only makes it exactly-once. The MASTER's account is never
+ * disabled (a sandbox rehearsal left unpaid must not stop the house trading);
+ * its invoice still goes overdue.
  */
 class OverdueEnforcer
 {
@@ -54,10 +58,12 @@ class OverdueEnforcer
             if (in_array($invoice->user_id, $masterUniIds, true)) {
                 continue;
             }
-            if ($invoice->account_id && $invoice->exchange === 'binance') {
-                $disabled += BinanceAccount::whereKey($invoice->account_id)->update(['enabled' => 0]);
+            $exchange = (string) ($invoice->exchange ?: 'binance');
+            if ($invoice->account_id && ExchangeSchema::isSupported($exchange)) {
+                $disabled += ExchangeSchema::for($exchange)->accountQuery()
+                    ->whereKey($invoice->account_id)
+                    ->update(['enabled' => 0]);
             }
-            // bybit/mexc: disable path lands with their invoicing.
 
             // "Trading is paused — paying switches it back on." Sandbox
             // scratch rows are nobody's real invoice.

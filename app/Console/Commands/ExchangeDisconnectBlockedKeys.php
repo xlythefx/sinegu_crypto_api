@@ -2,20 +2,26 @@
 
 namespace App\Console\Commands;
 
-use App\Models\BinanceAccount;
+use App\Models\ExchangeAccount;
 use App\Services\Discord\DiscordRoleSync;
 use App\Services\EngineCache;
+use App\Services\Exchanges\ExchangeSchema;
 use Illuminate\Console\Command;
 
 /**
  * Disconnect accounts whose API key the exchange has refused for longer than
- * the grace period (BinanceAccount::KEY_GRACE_DAYS).
+ * the grace period (ExchangeAccount::KEY_GRACE_DAYS) — on every venue.
  *
- * The point is not tidiness — it is that the user can reconnect. One Binance
- * account per user is allowed, so a dead row silently occupies the slot: until
- * it goes, "Connect exchange" answers "you already have one connected" and the
- * person is stuck with an account that cannot trade. Soft-delete frees the slot
- * while keeping the history (invoices reference these rows).
+ * The point is not tidiness — it is that the user can reconnect. One account
+ * per user per exchange is allowed, so a dead row silently occupies the slot:
+ * until it goes, "Connect exchange" answers "you already have one connected"
+ * and the person is stuck with an account that cannot trade. Soft-delete frees
+ * the slot while keeping the history (invoices reference these rows).
+ *
+ * Every venue, not only Binance: until 2026-10-07 only binance_accounts was
+ * swept, so a MEXC key the exchange kept refusing stayed flagged for ever and
+ * its owner's slot was never freed. Ids repeat across the per-exchange tables,
+ * so each table is read through its own model.
  *
  * The clock runs from key_blocked_at, which only the transition into blocked
  * sets — so repeated reports of the same fault cannot extend it forever, and a
@@ -32,24 +38,34 @@ class ExchangeDisconnectBlockedKeys extends Command
 
     public function handle(EngineCache $engineCache, DiscordRoleSync $discordRoles): int
     {
-        $deadline = now()->subDays(BinanceAccount::KEY_GRACE_DAYS);
+        $deadline = now()->subDays(ExchangeAccount::KEY_GRACE_DAYS);
 
-        $expired = BinanceAccount::where('key_status', BinanceAccount::KEY_BLOCKED)
-            ->whereNotNull('key_blocked_at')
-            ->where('key_blocked_at', '<=', $deadline)
-            ->get();
+        /** @var list<array{0: string, 1: ExchangeAccount}> $expired */
+        $expired = [];
+        foreach (ExchangeSchema::supported() as $exchange) {
+            $rows = ExchangeSchema::for($exchange)->accountQuery()
+                ->where('key_status', ExchangeAccount::KEY_BLOCKED)
+                ->whereNotNull('key_blocked_at')
+                ->where('key_blocked_at', '<=', $deadline)
+                ->get();
 
-        if ($expired->isEmpty()) {
-            $this->info('No blocked keys past the '.BinanceAccount::KEY_GRACE_DAYS.'-day grace period.');
+            foreach ($rows as $account) {
+                $expired[] = [$exchange, $account];
+            }
+        }
+
+        if ($expired === []) {
+            $this->info('No blocked keys past the '.ExchangeAccount::KEY_GRACE_DAYS.'-day grace period.');
 
             return self::SUCCESS;
         }
 
-        foreach ($expired as $account) {
+        foreach ($expired as [$exchange, $account]) {
             $this->line(sprintf(
-                '%s %s (%s) — blocked since %s [%s]',
+                '%s %s (%s, %s) — blocked since %s [%s]',
                 $this->option('dry-run') ? 'WOULD DISCONNECT' : 'disconnecting',
                 $account->name,
+                $exchange,
                 $account->uni_id,
                 $account->key_blocked_at?->toDateTimeString(),
                 $account->key_error_code ?? '—',
@@ -63,15 +79,16 @@ class ExchangeDisconnectBlockedKeys extends Command
         if (! $this->option('dry-run')) {
             $engineCache->refreshAccounts();
             // Losing the last live account takes the Discord Trader role with it.
-            foreach ($expired->pluck('uni_id')->unique() as $uniId) {
-                $discordRoles->syncUniId((string) $uniId);
+            $owners = array_unique(array_map(fn ($pair) => (string) $pair[1]->uni_id, $expired));
+            foreach ($owners as $uniId) {
+                $discordRoles->syncUniId($uniId);
             }
         }
 
         $this->info(sprintf(
             '%s %d account(s).',
             $this->option('dry-run') ? 'Would disconnect' : 'Disconnected',
-            $expired->count(),
+            count($expired),
         ));
 
         return self::SUCCESS;

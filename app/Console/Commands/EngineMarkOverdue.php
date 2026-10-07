@@ -2,9 +2,9 @@
 
 namespace App\Console\Commands;
 
-use App\Models\BinanceAccount;
 use App\Services\Billing\OverdueEnforcer;
 use App\Services\EngineCache;
+use App\Services\Exchanges\ExchangeSchema;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\DB;
 
@@ -36,14 +36,21 @@ class EngineMarkOverdue extends Command
         $due = $result['overdue'];
         $disabled = $result['disabled'];
 
-        // 2) Suspended users must not keep trading even with paid invoices.
-        $suspendedDisabled = BinanceAccount::where('enabled', 1)
-            ->whereIn('uni_id', function ($query) {
-                $query->select('uni_id')
-                    ->from('user_credentials')
-                    ->where('status', 'suspended');
-            })
-            ->update(['enabled' => 0]);
+        // 2) Suspended users must not keep trading even with paid invoices —
+        // on every venue. Until 2026-10-07 only binance_accounts was swept, so
+        // a suspended owner's MEXC account stayed `enabled` (the accounts
+        // endpoint's own suspended filter was the only thing stopping it).
+        $suspendedDisabled = 0;
+        foreach (ExchangeSchema::supported() as $exchange) {
+            $suspendedDisabled += ExchangeSchema::for($exchange)->accountQuery()
+                ->where('enabled', 1)
+                ->whereIn('uni_id', function ($query) {
+                    $query->select('uni_id')
+                        ->from('user_credentials')
+                        ->where('status', 'suspended');
+                })
+                ->update(['enabled' => 0]);
+        }
 
         // Only when something actually changed — the daily run is usually a
         // no-op, and a no-op should not make the engine re-read anything.

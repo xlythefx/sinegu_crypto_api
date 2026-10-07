@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\BinanceAccount;
 use App\Models\Invoice;
+use App\Services\Exchanges\ExchangeSchema;
 use App\Services\Pnl\BinancePnlSource;
 use App\Services\Pnl\PnlSource;
 use Illuminate\Support\Carbon;
@@ -304,8 +305,26 @@ class InvoiceService
             $locked->paid_amount = $paid ?? $locked->feeCents() / 100;
             $locked->save();
 
-            if ($locked->account_id) {
-                BinanceAccount::whereKey($locked->account_id)->update(['enabled' => 1]);
+            // Paying switches the account back on — but only when nothing else
+            // is owed on it. Until 2026-10-07 this re-enabled unconditionally,
+            // so settling one month resumed trading while an older month was
+            // still overdue, and it always flipped the BINANCE row with this
+            // account_id, whatever venue the invoice was for (ids repeat across
+            // the per-exchange tables).
+            $exchange = (string) ($locked->exchange ?: 'binance');
+            if ($locked->account_id && ExchangeSchema::isSupported($exchange)) {
+                $stillOwing = Invoice::query()
+                    ->where('exchange', $exchange)
+                    ->where('account_id', $locked->account_id)
+                    ->whereKeyNot($locked->getKey())
+                    ->unpaidPastDue()
+                    ->exists();
+
+                if (! $stillOwing) {
+                    ExchangeSchema::for($exchange)->accountQuery()
+                        ->whereKey($locked->account_id)
+                        ->update(['enabled' => 1]);
+                }
             }
 
             return true;

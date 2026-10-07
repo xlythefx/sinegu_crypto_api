@@ -4,11 +4,13 @@ namespace App\Http\Controllers;
 
 use App\Http\Middleware\EnsureAdmin;
 use App\Models\ExchangeAccount;
+use App\Models\Invoice;
 use App\Services\Discord\DiscordRoleSync;
 use App\Services\EngineCache;
 use App\Services\Exchanges\ExchangeSchema;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Validation\Rule;
 
@@ -119,6 +121,24 @@ class ExchangeAccountController extends Controller
                 'success' => false,
                 'error_code' => 'ALREADY_CONNECTED',
                 'message' => "You already have a {$label} account connected. Disconnect it first to connect a different one.",
+            ], 422);
+        }
+
+        // Paused for non-payment means paused. The overdue sweep switches the
+        // account off and InvoiceService::settle switches it back on — and
+        // NOTHING else may: until 2026-10-07 a disconnect followed by a
+        // connect (the same key revived, or a fresh one) came back `enabled`
+        // without a look at the invoices, so the pause could be undone in two
+        // clicks. The gate is on the USER, not the venue, because an unpaid
+        // Binance invoice is no reason to start trading on MEXC instead.
+        if ($blocking = Invoice::blockingFor($request->user()->uni_id)) {
+            $month = Carbon::createFromFormat('!Y-m', (string) $blocking->month_year)->format('F Y');
+
+            return response()->json([
+                'success' => false,
+                'error_code' => 'INVOICE_OVERDUE',
+                'message' => "Your {$month} invoice is unpaid and past due. Pay it to resume trading — connecting an account does not lift a pause.",
+                'invoice_id' => (string) $blocking->id,
             ], 422);
         }
 

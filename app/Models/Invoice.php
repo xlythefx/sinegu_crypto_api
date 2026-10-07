@@ -4,6 +4,7 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\DB;
 
 /**
  * A monthly billing period for one exchange account. One row per
@@ -68,6 +69,54 @@ class Invoice extends Model
     public function scopeForUser($query, string $uniId)
     {
         return $query->where('user_id', $uniId);
+    }
+
+    /**
+     * Unpaid money past its due date — the state that pauses an account. One
+     * rule, read three ways like ReferralService::statusesFor reads it: a
+     * 'pending' row whose due date has passed, or a row already marked
+     * 'overdue' / 'failed' by the sweep. A $0 row never counts — nothing is
+     * owed on it.
+     */
+    public function scopeUnpaidPastDue($query)
+    {
+        return $query
+            ->where('total_fee', '>', 0)
+            ->where(function ($q) {
+                $q->where(function ($qq) {
+                    $qq->where('status', 'pending')
+                        ->whereNotNull('due_date')
+                        ->whereDate('due_date', '<', today());
+                })->orWhereIn('status', ['overdue', 'failed']);
+            });
+    }
+
+    /**
+     * The invoice that keeps this user from connecting or reconnecting an
+     * exchange account, or null when nothing blocks them.
+     *
+     * The two exemptions are OverdueEnforcer's own, so the gate on the way in
+     * and the off switch agree: the MASTER is never paused (a sandbox
+     * rehearsal left unpaid must not stop the house trading), and a scenario
+     * scratch row (`SBXINV-`) is nobody's real invoice. Oldest due first, so
+     * the message names the one that has been owed longest.
+     */
+    public static function blockingFor(string $uniId): ?self
+    {
+        $type = DB::table('user_credentials')->where('uni_id', $uniId)->value('type');
+        if ($type === 'master') {
+            return null;
+        }
+
+        return static::query()
+            ->forUser($uniId)
+            ->unpaidPastDue()
+            ->where(function ($q) {
+                $q->whereNull('api_key')->orWhere('api_key', 'not like', 'SBXINV-%');
+            })
+            ->orderBy('due_date')
+            ->orderBy('id')
+            ->first();
     }
 
     /** Owning exchange account (may be soft-deleted). */

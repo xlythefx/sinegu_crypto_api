@@ -226,6 +226,22 @@ class BlockedApiKeyTest extends PaymentTestCase
         $this->assertNotSoftDeleted('binance_accounts', ['id' => $id]);
     }
 
+    /** Every venue is swept — a refused MEXC key must free its owner's slot too. */
+    public function test_a_blocked_mexc_key_is_disconnected_as_well(): void
+    {
+        Http::fake();
+        $uniId = $this->makeUser();
+        $id = $this->makeAccount($uniId, [
+            'api_key' => 'blocked-mexc-key',
+            'key_status' => BinanceAccount::KEY_BLOCKED,
+            'key_blocked_at' => now()->subDays(BinanceAccount::KEY_GRACE_DAYS + 1),
+        ], 'mexc');
+
+        $this->artisan('exchange:disconnect-blocked-keys')->assertExitCode(0);
+
+        $this->assertSoftDeleted('mexc_accounts', ['id' => $id]);
+    }
+
     public function test_dry_run_changes_nothing(): void
     {
         Http::fake();
