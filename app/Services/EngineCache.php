@@ -35,6 +35,24 @@ class EngineCache
 
     private const TRADED_KEY = 'engine:traded-exchanges';
 
+    /**
+     * The token the engine's /admin/* routes take as X-Admin-Secret.
+     *
+     * ENGINE_ADMIN_SECRET is the engine's OWN admin token (BINANCE_ABCD_ADMIN_SECRET
+     * there): box-local, written by the deploy script, never the TradingView
+     * webhook secret that also sits at TradingView and in every developer's
+     * .env. Until the key exists on a box the engine accepts its webhook
+     * secret for /admin/*, and so do we — the same fallback on both sides, so
+     * either half can roll out first. Empty = no engine is configured here,
+     * and callers send nothing.
+     */
+    public static function adminSecret(): string
+    {
+        $own = (string) (config('services.engine.admin_secret') ?? '');
+
+        return $own !== '' ? $own : (string) (config('services.engine.webhook_secrets.binance') ?? '');
+    }
+
     /** Who may trade changed: connected, disconnected, enabled, suspended. */
     public function refreshAccounts(): bool
     {
@@ -101,7 +119,7 @@ class EngineCache
     public function ledger(string $apiKey, int $timeout = 90): array
     {
         $base = rtrim((string) config('services.engine.targets.local', 'http://127.0.0.1:5010'), '/');
-        $secret = (string) (config('services.engine.webhook_secrets.binance') ?? '');
+        $secret = self::adminSecret();
         if ($secret === '') {
             return ['ledger' => null, 'exchange' => null, 'error' => 'The trading engine is not configured on this server.'];
         }
@@ -140,7 +158,7 @@ class EngineCache
     public function closePositions(array $positions, int $timeout = 55): array
     {
         $base = rtrim((string) config('services.engine.targets.local', 'http://127.0.0.1:5010'), '/');
-        $secret = (string) (config('services.engine.webhook_secrets.binance') ?? '');
+        $secret = self::adminSecret();
         if ($secret === '') {
             return ['status' => null, 'body' => null, 'error' => 'The trading engine is not configured on this server.'];
         }
@@ -217,7 +235,7 @@ class EngineCache
     private function ping(string $path, array $body = [], ?int $timeout = null): bool
     {
         $base = rtrim((string) config('services.engine.targets.local', 'http://127.0.0.1:5010'), '/');
-        $secret = (string) (config('services.engine.webhook_secrets.binance') ?? '');
+        $secret = self::adminSecret();
 
         if ($secret === '') {
             // Not an error worth shouting about on a box without the engine.

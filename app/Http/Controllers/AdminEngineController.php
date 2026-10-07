@@ -279,7 +279,7 @@ class AdminEngineController extends Controller
         ]);
 
         $base = rtrim((string) config('services.engine.targets.local', 'http://127.0.0.1:5010'), '/');
-        $secret = (string) (config('services.engine.webhook_secrets.binance') ?? '');
+        $secret = EngineCache::adminSecret();
         if ($secret === '') {
             return response()->json([
                 'success' => false,

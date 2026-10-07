@@ -4,6 +4,7 @@ namespace Tests\Feature;
 
 use App\Models\Asset;
 use App\Models\UserCredential;
+use App\Services\EngineCache;
 use Illuminate\Support\Facades\Http;
 
 /**
@@ -23,6 +24,10 @@ class EngineCacheInvalidationTest extends PaymentTestCase
         config([
             'services.engine.targets.local' => self::ENGINE,
             'services.engine.webhook_secrets.binance' => 'engine-hook-secret',
+            // No engine admin token: every test below runs on the FALLBACK
+            // (webhook secret) unless it says otherwise, and a developer's
+            // .env setting ENGINE_ADMIN_SECRET must not change that.
+            'services.engine.admin_secret' => null,
         ]);
     }
 
@@ -273,6 +278,63 @@ class EngineCacheInvalidationTest extends PaymentTestCase
         ])->assertStatus(201);
 
         Http::assertNothingSent();
+    }
+
+    // ---- which token the engine is shown ---------------------------------
+
+    /**
+     * ENGINE_ADMIN_SECRET is the engine's own /admin/* token; once it exists
+     * the TradingView webhook secret must no longer be what we send.
+     */
+    public function test_the_engine_admin_secret_is_sent_when_configured(): void
+    {
+        config(['services.engine.admin_secret' => 'engine-admin-token']);
+        $this->assertSame('engine-admin-token', EngineCache::adminSecret());
+        Http::fake([self::ENGINE.'/*' => Http::response(['success' => true], 200)]);
+        [, $headers] = $this->traderHeaders();
+
+        $this->withHeaders($headers)->postJson('/api/exchange/binance', [
+            'name' => 'Admin Token Account',
+            'api_key' => 'admin-token-key-'.uniqid(),
+            'secret_key' => 'admin-token-secret',
+        ])->assertStatus(201);
+
+        Http::assertSent(fn ($request) => $request->url() === self::ENGINE.'/admin/refresh-accounts'
+            && $request->hasHeader('X-Admin-Secret', 'engine-admin-token'));
+    }
+
+    /** A box deployed before the key existed keeps flushing with the webhook secret. */
+    public function test_without_an_admin_secret_the_webhook_secret_is_sent(): void
+    {
+        config(['services.engine.admin_secret' => '']);
+        $this->assertSame('engine-hook-secret', EngineCache::adminSecret());
+        Http::fake([self::ENGINE.'/*' => Http::response(['success' => true], 200)]);
+        [, $headers] = $this->traderHeaders();
+
+        $this->withHeaders($headers)->postJson('/api/exchange/binance', [
+            'name' => 'Fallback Token Account',
+            'api_key' => 'fallback-key-'.uniqid(),
+            'secret_key' => 'fallback-secret',
+        ])->assertStatus(201);
+
+        // pings() asserts the header is the webhook secret.
+        $this->assertSame(1, $this->pings('refresh-accounts'));
+    }
+
+    /** Every /admin/* call site resolves the token the same way — the recap preview too. */
+    public function test_the_recap_preview_sends_the_same_admin_token(): void
+    {
+        config(['services.engine.admin_secret' => 'engine-admin-token']);
+        Http::fake([
+            self::ENGINE.'/admin/reports/preview' => Http::response(['success' => true, 'kind' => 'daily', 'messages' => []], 200),
+        ]);
+
+        $this->withHeaders($this->adminHeaders())
+            ->postJson('/api/admin/engine/reports/preview', ['kind' => 'daily'])
+            ->assertOk();
+
+        Http::assertSent(fn ($request) => $request->url() === self::ENGINE.'/admin/reports/preview'
+            && $request->hasHeader('X-Admin-Secret', 'engine-admin-token'));
     }
 
     /** Guard against a stray import of the UserCredential model breaking. */

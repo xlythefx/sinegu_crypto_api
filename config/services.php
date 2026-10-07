@@ -80,6 +80,12 @@ return [
     //                     a key, never a URL, so no arbitrary host can be reached.
     'engine' => [
         'secret' => env('ENGINE_SECRET'),
+        // API -> engine /admin/* auth (X-Admin-Secret): the engine's OWN
+        // box-local token, BINANCE_ABCD_ADMIN_SECRET on its side, written by
+        // the deploy script. Null falls back to webhook_secrets.binance
+        // (EngineCache::adminSecret) — the same fallback the engine applies
+        // while its key is unset, so either side can roll out first.
+        'admin_secret' => env('ENGINE_ADMIN_SECRET'),
         // systemd unit name for the local engine service (AdminEngineController).
         'service' => env('ENGINE_SERVICE', 'sinegualerts-engine'),
         // null = auto-detect (Linux only); tests override to fake availability.
