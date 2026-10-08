@@ -4,7 +4,6 @@ namespace App\Services\Payments;
 
 use App\Models\Invoice;
 use App\Models\PaymentIntent;
-use Illuminate\Database\QueryException;
 use Illuminate\Support\Collection;
 use RuntimeException;
 
@@ -149,10 +148,17 @@ class TronIntentService
     }
 
     /**
-     * Insert the reservation, letting the UNIQUE index arbitrate rather than
-     * checking first — a check-then-insert loses to a concurrent request, and
-     * this index is the only thing standing between two invoices and the same
-     * expected amount.
+     * Insert the reservation.
+     *
+     * NEVER REFUSES ANY MORE (2026-10-08). Two invoices may now wait for the
+     * same figure at once: a payment either of them could own is held by the
+     * watcher and both customers are asked for their transaction ID
+     * (TronPaymentClaims). Refusing the second one locked a customer out of
+     * paying for up to an hour because a stranger owed the same sum.
+     *
+     * With a fingerprint configured it still TRIES for a figure nobody holds,
+     * so the common case stays automatic — best effort, since a collision is
+     * no longer unsafe, only slower.
      */
     private function mint(Invoice $invoice, array $t): PaymentIntent
     {
@@ -164,56 +170,49 @@ class TronIntentService
         $attempts = max(1, (int) config('payments.tron.fingerprint_attempts', 8));
         $ttl = (int) config('payments.tron.intent_ttl', 3600);
 
-        // With the fingerprint off (the current posture) there is exactly one
-        // candidate figure, so a collision is final rather than retryable —
-        // which is the honest answer. Handing out a near-identical amount
-        // instead would only turn a clean refusal now into a payment that
-        // arrives later and cannot be attributed to either invoice, because the
-        // tolerance bands overlap.
-        $tries = $fingerprintMax > 0 ? $attempts : 1;
-
-        for ($attempt = 0; $attempt < $tries; $attempt++) {
-            $units = $fingerprintMax > 0
-                ? bcadd($base, (string) random_int(1, $fingerprintMax), 0)
-                : $base;
-
-            $band = $this->bandFor($units, $decimals);
-
-            try {
-                $intent = PaymentIntent::create([
-                    'provider' => 'tron',
-                    'network' => $t['network'],
-                    'invoice_id' => $invoice->id,
-                    'user_id' => $invoice->user_id,
-                    'account_id' => $invoice->account_id,
-                    'address' => $t['address'],
-                    'contract_address' => $t['contract'],
-                    'asset' => $t['asset'],
-                    'decimals' => $decimals,
-                    'expected_units' => $units,
-                    'expected_usd' => $cents / 100,
-                    'shortfall_units' => $band['shortfall'],
-                    'overpay_units' => $band['overpay'],
-                    'open_units' => $units,
-                    'status' => PaymentIntent::STATUS_OPEN,
-                    'expires_at' => now()->addSeconds($ttl),
-                ]);
-            } catch (QueryException $e) {
-                if (! $this->isUniqueViolation($e)) {
-                    throw $e;
+        $units = $base;
+        if ($fingerprintMax > 0) {
+            for ($attempt = 0; $attempt < $attempts; $attempt++) {
+                $units = bcadd($base, (string) random_int(1, $fingerprintMax), 0);
+                if (! $this->figureIsHeld($t, $units)) {
+                    break;
                 }
-
-                continue;
             }
-
-            $intent->reused = false;
-
-            return $intent;
         }
 
-        // Someone else holds this figure. It frees itself when their intent
-        // expires; the controller turns this into a 409 that says so.
-        throw new RuntimeException('TRON_AMOUNT_UNAVAILABLE');
+        $band = $this->bandFor($units, $decimals);
+
+        $intent = PaymentIntent::create([
+            'provider' => 'tron',
+            'network' => $t['network'],
+            'invoice_id' => $invoice->id,
+            'user_id' => $invoice->user_id,
+            'account_id' => $invoice->account_id,
+            'address' => $t['address'],
+            'contract_address' => $t['contract'],
+            'asset' => $t['asset'],
+            'decimals' => $decimals,
+            'expected_units' => $units,
+            'expected_usd' => $cents / 100,
+            'shortfall_units' => $band['shortfall'],
+            'overpay_units' => $band['overpay'],
+            'open_units' => $units,
+            'status' => PaymentIntent::STATUS_OPEN,
+            'expires_at' => now()->addSeconds($ttl),
+        ]);
+
+        $intent->reused = false;
+
+        return $intent;
+    }
+
+    private function figureIsHeld(array $t, string $units): bool
+    {
+        return PaymentIntent::forNetwork($t['network'])
+            ->open()
+            ->where('address', $t['address'])
+            ->where('open_units', $units)
+            ->exists();
     }
 
     /**
@@ -236,18 +235,6 @@ class TronIntentService
         $shortfall = bccomp($pct, $flat, 0) >= 0 ? $pct : $flat;
 
         return bccomp($shortfall, $units, 0) > 0 ? $units : $shortfall;
-    }
-
-    /** MySQL 1062 / SQLite 19 — the same duplicate-key answer in two dialects. */
-    private function isUniqueViolation(QueryException $e): bool
-    {
-        $sqlState = (string) ($e->errorInfo[0] ?? '');
-        $driverCode = (string) ($e->errorInfo[1] ?? '');
-
-        return $sqlState === '23000'
-            || $sqlState === '23505'
-            || $driverCode === '1062'
-            || $driverCode === '19';
     }
 
     /**
@@ -304,6 +291,74 @@ class TronIntentService
     }
 
     /**
+     * Who could own a payment of $units, ONE INTENT PER INVOICE — what the
+     * watcher decides on.
+     *
+     * Open reservations, as before, PLUS reservations that expired within
+     * `late_match_hours` on an invoice that is still unpaid. That second half
+     * is the whole fix for late payments: until 2026-10-08 a timer running out
+     * made the system forget its customer was paying, so their withdrawal,
+     * clearing after it, settled whoever else was waiting for a similar
+     * amount. Now it makes the payment ambiguous instead, and the watcher holds
+     * it for the transaction-ID question.
+     *
+     * One entry per invoice, the open intent preferred: two tabs, or a renew
+     * after expiry, give one invoice several intents, and an invoice must never
+     * read as ambiguous against itself.
+     *
+     * @return Collection<int, PaymentIntent>
+     */
+    public function matchCandidates(string $network, string $address, string $units): Collection
+    {
+        $lateHours = max(0, (int) config('payments.tron.late_match_hours', 24));
+
+        $inBand = fn (PaymentIntent $intent) => bccomp($units, $intent->floorUnits(), 0) >= 0
+            && bccomp($units, $intent->ceilingUnits(), 0) <= 0;
+
+        $open = $this->candidatesFor($network, $address, $units);
+
+        $late = $lateHours === 0 ? collect() : PaymentIntent::forNetwork($network)
+            ->where('address', $address)
+            ->where('status', PaymentIntent::STATUS_EXPIRED)
+            ->where('expires_at', '>=', now()->subHours($lateHours))
+            ->orderByDesc('id')
+            ->get()
+            ->filter($inBand);
+
+        if ($late->isNotEmpty()) {
+            // A reservation that expired on an invoice since paid another way
+            // is nobody waiting.
+            $paid = Invoice::whereIn('id', $late->pluck('invoice_id')->unique()->all())
+                ->get()
+                ->filter(fn (Invoice $invoice) => $invoice->isPaid())
+                ->pluck('id')
+                ->all();
+            $late = $late->reject(fn (PaymentIntent $i) => in_array($i->invoice_id, $paid));
+        }
+
+        return $open->concat($late)
+            ->unique('invoice_id')   // open intents come first, so they win
+            ->values();
+    }
+
+    /**
+     * Close every other open reservation of an invoice that has just been
+     * paid, so a leftover one (a second tab, a renew) cannot make a stranger's
+     * payment ambiguous later.
+     */
+    public function releaseSiblings(int $invoiceId, ?int $keepId = null): void
+    {
+        PaymentIntent::open()
+            ->where('invoice_id', $invoiceId)
+            ->when($keepId !== null, fn ($q) => $q->whereKeyNot($keepId))
+            ->update([
+                'status' => PaymentIntent::STATUS_CANCELLED,
+                'open_units' => null,
+                'updated_at' => now(),
+            ]);
+    }
+
+    /**
      * Take ownership of an intent for a specific transfer.
      *
      * A conditional UPDATE, not a read-then-write: the scheduled watcher and a
@@ -312,11 +367,19 @@ class TronIntentService
      * the writer whose UPDATE actually changed a row proceeds — the same "first
      * writer owns provenance" rule InvoiceService::settle() applies one level
      * down.
+     *
+     * `$allowExpired` is for a customer confirming a LATE payment with its
+     * transaction ID: their reservation ran out before the money arrived, and
+     * it is still theirs.
      */
-    public function claim(PaymentIntent $intent, string $txHash, string $receivedUnits): bool
+    public function claim(PaymentIntent $intent, string $txHash, string $receivedUnits, bool $allowExpired = false): bool
     {
+        $statuses = $allowExpired
+            ? [PaymentIntent::STATUS_OPEN, PaymentIntent::STATUS_EXPIRED]
+            : [PaymentIntent::STATUS_OPEN];
+
         $affected = PaymentIntent::whereKey($intent->getKey())
-            ->where('status', PaymentIntent::STATUS_OPEN)
+            ->whereIn('status', $statuses)
             ->update([
                 'status' => PaymentIntent::STATUS_SETTLED,
                 'open_units' => null,

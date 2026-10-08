@@ -23,9 +23,12 @@ use Illuminate\Support\Facades\Log;
  *   - the recipient is the address we configured, compared as exact base58.
  *   - the transfer is confirmed (TronGrid's `only_confirmed`, which is TRON's
  *     own finality rule — solidified blocks cannot be rolled back by a fork).
- *   - the amount resolves to EXACTLY ONE open intent. Zero or several and
- *     nothing settles; a human decides on the admin screen. Guessing here would
- *     mean paying off the wrong customer's invoice.
+ *   - the amount resolves to EXACTLY ONE invoice, and that invoice's
+ *     reservation is still open. Several possible owners — including one whose
+ *     reservation expired in the last `late_match_hours` — and nothing settles:
+ *     the payment is held, each possible owner's pay sheet asks for the
+ *     transaction ID (TronPaymentClaims), and an admin can still place it.
+ *     Guessing here would mean paying off the wrong customer's invoice.
  */
 class TronWatcher
 {
@@ -304,21 +307,44 @@ class TronWatcher
     private function match(TronTransfer $transfer, array $t): string
     {
         $units = (string) $transfer->value_units;
-        $candidates = $this->intents->candidatesFor($transfer->network, $t['address'], $units);
-
-        if ($candidates->count() > 1) {
-            $this->recordUnmatched($transfer, $t, 'tracking_unknown', sprintf(
-                'Ambiguous: %d open intents accept %s %s.',
-                $candidates->count(),
-                TronUnits::format($units, (int) $t['decimals']),
-                $t['asset'],
-            ));
-
-            return 'ambiguous';
-        }
+        $amount = TronUnits::format($units, (int) $t['decimals']);
+        // One per invoice: open reservations plus ones that expired recently on
+        // a still-unpaid invoice (TronIntentService::matchCandidates).
+        $candidates = $this->intents->matchCandidates($transfer->network, $t['address'], $units);
 
         if ($candidates->isEmpty()) {
             $this->recordUnmatched($transfer, $t, ...$this->missReason($transfer, $t, $units));
+
+            return 'unmatched';
+        }
+
+        // HELD, not guessed: more than one invoice could own it, or the only
+        // one is a reservation whose timer ran out. Every possible owner's pay
+        // sheet now asks for the transaction ID (TronPaymentClaims), and an
+        // admin can still place it by hand.
+        if ($candidates->count() > 1 || ! $candidates->first()->isOpen()) {
+            $transfer->forceFill([
+                'candidate_invoice_ids' => $candidates->pluck('invoice_id')->map(fn ($id) => (int) $id)->values()->all(),
+            ])->save();
+
+            if ($candidates->count() > 1) {
+                $this->recordUnmatched($transfer, $t, 'tracking_unknown', sprintf(
+                    'Ambiguous: %d invoices (%s) could own %s %s. Waiting for a customer to confirm the transaction ID.',
+                    $candidates->count(),
+                    $candidates->pluck('invoice_id')->map(fn ($id) => '#'.$id)->implode(', '),
+                    $amount,
+                    $t['asset'],
+                ));
+
+                return 'ambiguous';
+            }
+
+            $this->recordUnmatched($transfer, $t, 'tracking_unknown', sprintf(
+                'Late: %s %s arrived after the reservation for invoice #%d expired. Waiting for the customer to confirm the transaction ID.',
+                $amount,
+                $t['asset'],
+                $candidates->first()->invoice_id,
+            ));
 
             return 'unmatched';
         }
@@ -569,6 +595,8 @@ class TronWatcher
         ]);
 
         if ($settled) {
+            $this->intents->releaseSiblings($invoice->id, $intent?->id);
+
             Log::info('Invoice settled from a TRON transfer.', [
                 'invoice_id' => $invoice->id,
                 'network' => $transfer->network,

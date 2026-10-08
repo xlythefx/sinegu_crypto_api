@@ -6,6 +6,7 @@ use App\Models\BinanceAccount;
 use App\Models\ExchangeAccount;
 use App\Models\Invoice;
 use App\Models\TradeLog;
+use App\Models\TronPaymentClaim;
 use App\Models\TronTransfer;
 use App\Models\UserCredential;
 use App\Services\Exchanges\ExchangeSchema;
@@ -95,6 +96,10 @@ class AdminInsights
                     'amount' => round((float) $unpaid->sum('total_fee'), 2),
                 ],
                 'unmatched_transfers' => TronTransfer::where('status', TronTransfer::STATUS_UNMATCHED)->count(),
+                // Two customers saying the same crypto payment is theirs — the
+                // Overview's caution strip (TronPaymentClaims). Cache-busted by
+                // the claim that opens one and the admin action that closes it.
+                'disputed_payments' => TronPaymentClaim::openDisputes()->distinct()->count('tron_transfer_id'),
                 'signals_today' => [
                     'signals' => $signalsToday->count(),
                     'with_problems' => $signalsToday->where('success', false)->count(),

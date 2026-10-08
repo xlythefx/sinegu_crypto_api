@@ -30,7 +30,7 @@ class TronTransfer extends Model
         'network', 'event_key', 'tx_hash', 'contract_address',
         'token_symbol', 'token_decimals', 'from_address', 'to_address',
         'value_raw', 'value_units', 'block_timestamp', 'confirmed',
-        'status', 'reject_reason', 'intent_id', 'invoice_id',
+        'status', 'reject_reason', 'intent_id', 'invoice_id', 'candidate_invoice_ids',
         'settled_by', 'settled_at', 'note', 'payload',
     ];
 
@@ -38,6 +38,7 @@ class TronTransfer extends Model
     {
         return [
             'confirmed' => 'boolean',
+            'candidate_invoice_ids' => 'array',
             'settled_at' => 'datetime',
             'created_at' => 'datetime',
             'updated_at' => 'datetime',
@@ -81,6 +82,17 @@ class TronTransfer extends Model
     public function isCredible(): bool
     {
         return $this->reject_reason === null;
+    }
+
+    /** Could this invoice own this held payment? (Its pay sheet asks for the TXID.) */
+    public function hasCandidate(int $invoiceId): bool
+    {
+        return in_array($invoiceId, array_map('intval', (array) ($this->candidate_invoice_ids ?? [])), true);
+    }
+
+    public function claims()
+    {
+        return $this->hasMany(TronPaymentClaim::class, 'tron_transfer_id');
     }
 
     public function intent()

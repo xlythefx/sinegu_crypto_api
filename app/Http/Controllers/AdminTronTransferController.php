@@ -4,10 +4,12 @@ namespace App\Http\Controllers;
 
 use App\Models\Invoice;
 use App\Models\PaymentIntent;
+use App\Models\TronPaymentClaim;
 use App\Models\TronTransfer;
 use App\Models\UserCredential;
 use App\Services\Payments\PaymentEnvironment;
 use App\Services\Payments\TronGateway;
+use App\Services\Payments\TronPaymentClaims;
 use App\Services\Payments\TronUnits;
 use App\Services\Payments\TronWatcher;
 use Illuminate\Http\JsonResponse;
@@ -46,20 +48,35 @@ class AdminTronTransferController extends Controller
      */
     public function index(Request $request): JsonResponse
     {
+        $status = $request->query('status');
+
+        // `disputed` is not a transfer status but a filter: transfers with an
+        // open "two customers claim it" row (TronPaymentClaims).
+        $disputedIds = TronPaymentClaim::openDisputes()->pluck('tron_transfer_id')->unique()->all();
+
         $rows = TronTransfer::query()
             ->when($request->query('network'), fn ($q, $n) => $q->where('network', $n))
-            ->when($request->query('status'), fn ($q, $s) => $q->where('status', $s))
+            ->when($status === 'disputed', fn ($q) => $q->whereIn('id', $disputedIds))
+            ->when($status && $status !== 'disputed', fn ($q) => $q->where('status', $status))
             ->orderByDesc('block_timestamp')
             ->limit(self::PER_PAGE_MAX)
             ->get();
 
-        $built = $rows->map(fn (TronTransfer $t) => $this->row($t))->all();
+        $claims = TronPaymentClaim::whereIn('tron_transfer_id', $rows->pluck('id')->all())
+            ->orderBy('id')
+            ->get()
+            ->groupBy('tron_transfer_id');
 
-        // Owners come from the SUGGESTIONS, not from the transfers' invoice_id:
-        // an unmatched transfer has no invoice yet, and naming the customer a
-        // suggestion points at is the entire value of the hint.
+        $built = $rows->map(fn (TronTransfer $t) => $this->row($t, $claims->get($t->id, collect())->all()))->all();
+
+        // Owners come from the SUGGESTIONS and the CLAIMS, not from the
+        // transfers' invoice_id: an unmatched transfer has no invoice yet, and
+        // naming the customer a hint points at is the entire value of it.
         $userIds = collect($built)
-            ->flatMap(fn (array $row) => array_column($row['suggestions'], 'user_id'))
+            ->flatMap(fn (array $row) => array_merge(
+                array_column($row['suggestions'], 'user_id'),
+                array_column($row['claims'], 'user_id'),
+            ))
             ->filter()
             ->unique()
             ->all();
@@ -68,17 +85,20 @@ class AdminTronTransferController extends Controller
             ->get(['uni_id', 'name', 'email'])
             ->keyBy('uni_id');
 
-        $built = array_map(function (array $row) use ($owners) {
-            $row['suggestions'] = array_map(function (array $s) use ($owners) {
-                $owner = $owners->get($s['user_id'] ?? '');
-                $s['owner'] = $owner === null ? null : [
-                    'uni_id' => $owner->uni_id,
-                    'name' => $owner->name,
-                    'email' => $owner->email,
-                ];
+        $withOwner = function (array $item) use ($owners) {
+            $owner = $owners->get($item['user_id'] ?? '');
+            $item['owner'] = $owner === null ? null : [
+                'uni_id' => $owner->uni_id,
+                'name' => $owner->name,
+                'email' => $owner->email,
+            ];
 
-                return $s;
-            }, $row['suggestions']);
+            return $item;
+        };
+
+        $built = array_map(function (array $row) use ($withOwner) {
+            $row['suggestions'] = array_map($withOwner, $row['suggestions']);
+            $row['claims'] = array_map($withOwner, $row['claims']);
 
             return $row;
         }, $built);
@@ -96,8 +116,48 @@ class AdminTronTransferController extends Controller
                 'settled' => (int) ($counts[TronTransfer::STATUS_SETTLED] ?? 0),
                 'ignored' => (int) ($counts[TronTransfer::STATUS_IGNORED] ?? 0),
                 'rejected' => (int) ($counts[TronTransfer::STATUS_REJECTED] ?? 0),
+                'disputed' => count($disputedIds),
             ],
             'transfers' => $built,
+        ]);
+    }
+
+    /**
+     * POST /api/admin/tron-transfers/claims/{claimId}/resolve
+     * Body: { note?: string }
+     *
+     * Close a "two customers claim the same payment" alarm. The fix itself —
+     * un-paying one invoice, attributing the payment to the other — is done
+     * with the tools that already exist; this records that a human looked and
+     * what they decided, and clears the Overview's caution strip.
+     */
+    public function resolveClaim(Request $request, int $claimId, TronPaymentClaims $claims): JsonResponse
+    {
+        $data = $request->validate([
+            'note' => ['nullable', 'string', 'max:255'],
+        ]);
+
+        $claim = TronPaymentClaim::find($claimId);
+        if (! $claim) {
+            return $this->notFound('CLAIM_NOT_FOUND', 'Claim not found.');
+        }
+        if ($claim->outcome !== TronPaymentClaim::OUTCOME_DISPUTED) {
+            return $this->refused('Only a disputed claim needs resolving.');
+        }
+        if ($claim->resolved_at !== null) {
+            return $this->refused('This dispute has already been resolved.');
+        }
+
+        $claims->resolve($claim, $request->user()->uni_id, $data['note'] ?? null);
+
+        $transfer = TronTransfer::find($claim->tron_transfer_id);
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Dispute marked as resolved.',
+            'transfer' => $transfer
+                ? $this->row($transfer, TronPaymentClaim::where('tron_transfer_id', $transfer->id)->orderBy('id')->get()->all())
+                : null,
         ]);
     }
 
@@ -258,12 +318,14 @@ class AdminTronTransferController extends Controller
     }
 
     /**
-     * One listing row. Owner details are grafted onto the suggestions afterwards
-     * by index(), in one query for the whole page rather than one per row.
+     * One listing row. Owner details are grafted onto the suggestions and
+     * claims afterwards by index(), in one query for the whole page rather than
+     * one per row.
      *
+     * @param  list<TronPaymentClaim>  $claims
      * @return array<string, mixed>
      */
-    private function row(TronTransfer $t): array
+    private function row(TronTransfer $t, array $claims = []): array
     {
         $tron = $this->env->tron($t->network);
         $decimals = (int) $tron['decimals'];
@@ -300,6 +362,22 @@ class AdminTronTransferController extends Controller
             'attributable' => $blocked === null,
             'attribution_blocked_reason' => $blocked,
             'suggestions' => $suggestions,
+            // Invoices whose pay sheet is asking for this payment's TXID.
+            'candidate_invoice_ids' => array_map('intval', (array) ($t->candidate_invoice_ids ?? [])),
+            'claims' => array_map(fn (TronPaymentClaim $c) => [
+                'id' => $c->id,
+                'invoice_id' => $c->invoice_id,
+                'user_id' => $c->user_id,
+                'outcome' => $c->outcome,
+                'against_invoice_id' => $c->against_invoice_id,
+                'created_at' => $c->created_at?->toIso8601String(),
+                'resolved_at' => $c->resolved_at?->toIso8601String(),
+                'resolved_by' => $c->resolved_by,
+                'resolution_note' => $c->resolution_note,
+            ], $claims),
+            'disputed' => collect($claims)->contains(
+                fn (TronPaymentClaim $c) => $c->outcome === TronPaymentClaim::OUTCOME_DISPUTED && $c->resolved_at === null
+            ),
         ];
     }
 

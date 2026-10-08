@@ -33,7 +33,7 @@ class AdminInsightsController extends Controller
     public const LIMITED_HIDDEN_OVERVIEW_KEYS = [
         'attention' => [
             'blocked_keys', 'blocked_keys_count', 'overdue_invoices', 'unpaid_invoices',
-            'unmatched_transfers', 'paused_for_payment',
+            'unmatched_transfers', 'disputed_payments', 'paused_for_payment',
         ],
         'headline' => ['collected_this_month'],
     ];

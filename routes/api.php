@@ -161,6 +161,12 @@ Route::middleware(['auth:sanctum', 'account.active', 'email.verified'])->group(f
         Route::get('/tron/intent/{invoiceId}', [PaymentController::class, 'tronIntentStatus'])
             ->whereNumber('invoiceId')
             ->middleware('throttle:60,1');
+        // "That held payment is mine" — the customer's transaction ID settles
+        // a payment the watcher could not place, or opens a dispute when it is
+        // already on someone else's invoice (TronPaymentClaims).
+        Route::post('/tron/intent/{invoiceId}/claim', [PaymentController::class, 'tronClaim'])
+            ->whereNumber('invoiceId')
+            ->middleware('throttle:10,1');
         // Settles an invoice WITHOUT money — the developer test button. Two
         // independent gates: this middleware (role === 'developer' exactly,
         // NOT satisfied by admin or master) and, in the controller,
@@ -299,6 +305,9 @@ Route::middleware(['auth:sanctum', 'account.active', 'email.verified'])->group(f
             ->whereNumber('id');
         Route::post('/tron-transfers/{id}/ignore', [AdminTronTransferController::class, 'ignore'])
             ->whereNumber('id');
+        // Close a "two customers claim the same payment" alarm, with a note.
+        Route::post('/tron-transfers/claims/{claimId}/resolve', [AdminTronTransferController::class, 'resolveClaim'])
+            ->whereNumber('claimId');
 
         Route::prefix('affiliate')->group(function () {
             Route::get('/overview', [AdminReferralController::class, 'overview']);

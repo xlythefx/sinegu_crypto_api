@@ -68,20 +68,20 @@ class TronIntentTest extends PaymentTestCase
     }
 
     /**
-     * With the fingerprint off there is exactly one candidate figure, so a
-     * clash is final. Handing out a near-identical amount instead would turn a
-     * clean refusal now into a payment that arrives later and matches neither
-     * invoice, because the tolerance bands overlap.
+     * Two invoices may wait for the same figure at once (2026-10-08). The
+     * second used to be refused for up to an hour; a payment either could own
+     * is now held by the watcher and both customers are asked for the TXID.
      */
-    public function test_a_second_invoice_wanting_the_same_figure_is_refused(): void
+    public function test_a_second_invoice_may_wait_for_the_same_figure(): void
     {
         $other = $this->makeInvoice($this->accountId, $this->uniId, ['month_year' => '2026-05']);
 
-        $this->intents->openFor($this->invoice, 'nile');
+        $first = $this->intents->openFor($this->invoice, 'nile');
+        $second = $this->intents->openFor($other, 'nile');
 
-        $this->expectException(RuntimeException::class);
-        $this->expectExceptionMessage('TRON_AMOUNT_UNAVAILABLE');
-        $this->intents->openFor($other, 'nile');
+        $this->assertNotSame($first->id, $second->id);
+        $this->assertSame((string) $first->expected_units, (string) $second->expected_units);
+        $this->assertSame(2, PaymentIntent::open()->count());
     }
 
     /** Once the first reservation lapses its figure is available again. */

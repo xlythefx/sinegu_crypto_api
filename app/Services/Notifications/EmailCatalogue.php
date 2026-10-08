@@ -11,6 +11,7 @@ use App\Mail\InvoicePaidNotice;
 use App\Mail\InvoiceUnpaidNotice;
 use App\Mail\NewRegistrationNotice;
 use App\Mail\PasswordResetCode;
+use App\Mail\PaymentDisputedNotice;
 use App\Mail\PaymentReceived;
 use App\Mail\PaymentReminder;
 use App\Mail\PixelMail;
@@ -258,6 +259,32 @@ class EmailCatalogue
                     method: 'USDT (TRC-20)',
                     reference: $tx,
                     paidAt: '3 Oct 2026, 14:22 UTC',
+                ),
+            ],
+            [
+                'slug' => 'team-payment-disputed',
+                'audience' => self::AUDIENCE_TEAM,
+                'title' => 'Disputed crypto payment',
+                'trigger' => 'When a customer enters a transaction ID that is already paying someone else\'s invoice — two customers saying the same payment is theirs.',
+                'to' => $team,
+                'live' => true,
+                'note' => 'Sent once per dispute. The Admin Overview shows a caution strip until it is marked resolved on Crypto Transfers.',
+                'mail' => new PaymentDisputedNotice(
+                    amount: '31.32',
+                    asset: 'USDT',
+                    network: 'TRON mainnet',
+                    txHash: $tx,
+                    receivedAt: '3 Oct 2026, 14:22 UTC',
+                    holderName: 'Priya Natarajan',
+                    holderEmail: 'priya.natarajan@example.com',
+                    holderInvoiceId: 1038,
+                    holderPeriod: $inv['period'],
+                    firstVia: 'the automatic matcher',
+                    claimantName: $customer['name'],
+                    claimantEmail: $customer['email'],
+                    claimantInvoiceId: $inv['id'],
+                    claimantPeriod: $inv['period'],
+                    claimedAt: '3 Oct 2026, 14:41 UTC',
                 ),
             ],
         ];

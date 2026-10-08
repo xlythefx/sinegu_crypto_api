@@ -256,6 +256,22 @@ return [
         'intent_ttl' => (int) env('TRON_INTENT_TTL', 3600),
 
         /*
+        | How long an EXPIRED reservation still counts as "someone was paying
+        | this". A payment arriving inside this window that fits both an open
+        | reservation and a recently expired one is NOT handed to the open one:
+        | it is held, and both customers are asked for their transaction ID.
+        | Without it, a withdrawal that cleared after its payer's timer ran out
+        | settled whoever happened to be waiting for a similar amount.
+        */
+        'late_match_hours' => (int) env('TRON_LATE_MATCH_HOURS', 24),
+
+        /*
+        | How long a held payment keeps asking its possible owners for their
+        | transaction ID on the pay sheet. After this only an admin places it.
+        */
+        'claim_window_days' => (int) env('TRON_CLAIM_WINDOW_DAYS', 14),
+
+        /*
         | Accepted shortfall — deliberately generous, and floored at an absolute
         | amount rather than being purely proportional.
         |

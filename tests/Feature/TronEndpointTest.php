@@ -203,14 +203,15 @@ class TronEndpointTest extends PaymentTestCase
         $this->assertSame('Direct crypto payments are not available on this server yet.', $response->json('message'));
     }
 
-    public function test_a_reserved_figure_is_refused_with_a_recoverable_error(): void
+    /** Nobody is locked out of paying because someone else owes the same sum. */
+    public function test_a_figure_another_invoice_is_waiting_for_is_still_quoted(): void
     {
         $other = $this->makeInvoice($this->accountId, $this->devId, ['month_year' => '2026-05']);
         $this->intentFor($this->devId)->assertOk();
 
         $this->postJson('/api/payments/tron/intent', ['invoice_id' => $other->id], $this->userHeaders($this->devId))
-            ->assertStatus(409)
-            ->assertJsonPath('error_code', 'TRON_AMOUNT_UNAVAILABLE');
+            ->assertOk()
+            ->assertJsonPath('amount', '12.340000');
     }
 
     // ---- polling ---------------------------------------------------------

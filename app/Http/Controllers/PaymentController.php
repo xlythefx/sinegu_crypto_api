@@ -11,6 +11,7 @@ use App\Services\Payments\PaymentEventRecorder;
 use App\Services\Payments\StripeGateway;
 use App\Services\Payments\TronGateway;
 use App\Services\Payments\TronIntentService;
+use App\Services\Payments\TronPaymentClaims;
 use App\Services\Payments\TronUnits;
 use App\Services\Payments\TronWatcher;
 use Illuminate\Http\JsonResponse;
@@ -54,7 +55,6 @@ class PaymentController extends Controller
         'INVOICE_NOT_FOUND' => 'The invoice exists or not, but it is not this uni_id\'s — lookups are scoped to the caller on purpose.',
         'TRON_NOT_CONFIGURED' => 'This network has no receiving address, no token contract, or no base URL. The diagnostics below say which; set TRON_{NETWORK}_ADDRESS / _USDT_CONTRACT and clear the config cache.',
         'TRON_BAD_ADDRESS' => 'The configured address is present but FAILED ITS BASE58 CHECKSUM — a typo. It was refused rather than shown, because money sent to a mistyped address is unrecoverable and nothing downstream would notice.',
-        'TRON_AMOUNT_UNAVAILABLE' => 'Another open intent already reserves this exact figure, and the amount fingerprint is off (payments.tron.fingerprint_units = 0), so there is no second figure to offer. It frees itself when that intent expires — see payments.tron.intent_ttl.',
         'TRON_NETWORK_UNKNOWN' => 'No such entry under payments.tron.networks.',
     ];
 
@@ -420,12 +420,12 @@ class PaymentController extends Controller
 
             // 503 for configuration faults, never 502/504: Cloudflare replaces
             // an origin 502 body with its own page and the envelope is lost.
+            // A figure another invoice is waiting for is no longer refused —
+            // see TronIntentService::mint and TronPaymentClaims.
             return $this->fail(
                 $code,
-                $code === 'TRON_AMOUNT_UNAVAILABLE'
-                    ? 'This amount is temporarily reserved. Please try again in a few minutes.'
-                    : 'Direct crypto payments are not available on this server yet.',
-                $code === 'TRON_AMOUNT_UNAVAILABLE' ? 409 : 503,
+                'Direct crypto payments are not available on this server yet.',
+                503,
                 ['provider' => 'tron', 'tron' => $this->tron->diagnostics($network)]
             );
         }
@@ -443,7 +443,7 @@ class PaymentController extends Controller
      * observe. It answers 200 for a paid invoice and 404 only when the invoice
      * is not this caller's.
      */
-    public function tronIntentStatus(Request $request, int $invoiceId): JsonResponse
+    public function tronIntentStatus(Request $request, int $invoiceId, TronPaymentClaims $claims): JsonResponse
     {
         $isDeveloper = $this->applyRoleOverrides($request);
 
@@ -490,7 +490,50 @@ class PaymentController extends Controller
             // money; this is how that failure becomes visible.
             'last_scan_at' => TronGateway::lastScanAt($network)?->toIso8601String(),
             'scan_stale' => TronGateway::scanIsStale($network),
+            // Non-null only when a HELD payment could be this invoice's: the
+            // sheet then asks for the transaction ID. Never carries the ID.
+            'claim' => $claims->promptFor($invoice, $network),
         ]);
+    }
+
+    /**
+     * POST /api/payments/tron/intent/{invoiceId}/claim
+     * Body: { tx_hash: string }  (a bare TXID or a Tronscan link)
+     *
+     * "That held payment is mine." Settles the invoice from the transfer the ID
+     * names, or records a dispute when that payment is already on someone
+     * else's invoice. The network is the caller's, never the request's, for
+     * the reason every TRON endpoint gives.
+     */
+    public function tronClaim(Request $request, int $invoiceId, TronPaymentClaims $claims): JsonResponse
+    {
+        $data = $request->validate([
+            'tx_hash' => ['required', 'string', 'max:300'],
+        ]);
+
+        $isDeveloper = $this->applyRoleOverrides($request);
+
+        if (! $isDeveloper && ! $this->env->tronIsPublic()) {
+            return response()->json(['success' => false, 'message' => 'Not found.'], 404);
+        }
+
+        $invoice = Invoice::forUser($request->user()->uni_id)->find($invoiceId);
+        if (! $invoice) {
+            return $this->fail('INVOICE_NOT_FOUND', 'Invoice not found.', 404);
+        }
+
+        $network = $this->env->tronNetworkFor($isDeveloper);
+        $result = $claims->claim($invoice, $network, (string) $data['tx_hash'], $request->user()->uni_id);
+
+        return response()->json([
+            'success' => $result['ok'],
+            'error_code' => $result['ok'] ? null : $result['code'],
+            'code' => $result['code'],
+            'message' => $result['message'],
+            'settled' => $result['settled'] ?? false,
+            'invoice_status' => $invoice->fresh()->isPaid() ? 'paid' : 'pending',
+            'claim' => $claims->promptFor($invoice->fresh(), $network),
+        ], $result['status']);
     }
 
     /**
