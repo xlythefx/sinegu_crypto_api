@@ -187,6 +187,19 @@ class SignalHealthTest extends EngineTestCase
             ->assertJsonPath('health.master_missed', 1);
     }
 
+    /** A manual close narrowed to customers leaves the master out on purpose. */
+    public function test_a_master_left_out_of_the_fan_out_or_with_nothing_to_close_is_not_a_miss(): void
+    {
+        $this->signal([$this->filled('A')], ['action' => 'EXIT_LONG']);   // is_master false on every row
+        $this->signal([['account' => 'Master', 'status' => 'skipped', 'reason' => 'no long position to close', 'is_master' => true]],
+            ['action' => 'EXIT_LONG']);
+
+        $this->getJson('/api/admin/trade-logs/health', $this->headers())
+            ->assertOk()
+            ->assertJsonPath('health.master_missed', 0)
+            ->assertJsonPath('health.status', 'normal');
+    }
+
     public function test_health_is_quiet_without_signals_and_ignores_old_ones(): void
     {
         $this->signal([$this->failed('Broken', 'no response')], ['ts' => now()->subDays(3)->toDateTimeString()]);

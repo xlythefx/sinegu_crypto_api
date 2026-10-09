@@ -145,11 +145,13 @@ final class SignalHealth
                     $normal++;
                 }
             }
-            $master = self::masterOutcome($log);
-            if ($master !== null && $master !== 'filled' && $log->category !== 'rejected') {
-                $masterDetail = collect((array) $log->details)->first(fn ($d) => is_array($d) && ! empty($d['is_master']));
-                $c = $masterDetail ? self::classify($masterDetail, $log->category) : null;
-                if ($c === null || $c['severity'] === self::PROBLEM) {
+            // The master missed it only when it WAS in the fan-out and its
+            // outcome is a problem. Absent is not a miss: a manual close
+            // narrowed to customers, or a venue the master has no account on.
+            $masterDetail = collect((array) $log->details)->first(fn ($d) => is_array($d) && ! empty($d['is_master']));
+            if ($masterDetail && $log->category !== 'rejected') {
+                $c = self::classify($masterDetail, $log->category);
+                if ($c !== null && $c['severity'] === self::PROBLEM) {
                     $masterMissed++;
                 }
             }
