@@ -11,6 +11,7 @@ use App\Mail\InvoicePaidNotice;
 use App\Mail\InvoiceUnpaidNotice;
 use App\Mail\NewRegistrationNotice;
 use App\Mail\PasswordResetCode;
+use App\Mail\AssetKillSwitchNotice;
 use App\Mail\PaymentDisputedNotice;
 use App\Mail\PaymentReceived;
 use App\Mail\PaymentReminder;
@@ -285,6 +286,22 @@ class EmailCatalogue
                     claimantInvoiceId: $inv['id'],
                     claimantPeriod: $inv['period'],
                     claimedAt: '3 Oct 2026, 14:41 UTC',
+                ),
+            ],
+            [
+                'slug' => 'team-kill-switch',
+                'audience' => self::AUDIENCE_TEAM,
+                'title' => 'Kill switch turned a coin off',
+                'trigger' => 'When the master account loses as many trades in a row on a coin as that asset\'s kill switch allows — the coin is switched off for everyone.',
+                'to' => $team,
+                'live' => true,
+                'note' => 'Sent once per trip. The Admin Overview shows a caution strip and the admin Telegram group gets a message until the coin is turned back on in Trading Assets.',
+                'mail' => new AssetKillSwitchNotice(
+                    ticker: 'LTCUSDT',
+                    broker: 'Binance',
+                    losses: 3,
+                    reason: 'The master lost 3 trades in a row on LTCUSDT.',
+                    trippedAt: '9 Oct 2026, 14:05 UTC',
                 ),
             ],
         ];

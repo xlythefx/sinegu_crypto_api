@@ -100,6 +100,21 @@ class AdminInsights
                 // Overview's caution strip (TronPaymentClaims). Cache-busted by
                 // the claim that opens one and the admin action that closes it.
                 'disputed_payments' => TronPaymentClaim::openDisputes()->distinct()->count('tron_transfer_id'),
+                // Coins the kill switch switched off and nobody has turned back
+                // on (App\Services\Assets\KillSwitch) — the Overview's other
+                // caution strip. Cache-busted by the trip and by the re-enable.
+                'killed_assets' => \App\Models\Asset::where('enabled', false)
+                    ->whereNotNull('killed_at')
+                    ->orderByDesc('killed_at')
+                    ->get(['asset_id', 'ticker', 'broker', 'kill_switch_losses', 'killed_at', 'killed_reason'])
+                    ->map(fn ($a) => [
+                        'asset_id' => $a->asset_id,
+                        'ticker' => $a->ticker,
+                        'broker' => $a->broker,
+                        'losses' => $a->kill_switch_losses,
+                        'killed_at' => $this->iso($a->killed_at),
+                        'reason' => $a->killed_reason,
+                    ])->values(),
                 'signals_today' => [
                     'signals' => $signalsToday->count(),
                     'with_problems' => $signalsToday->where('success', false)->count(),

@@ -22,6 +22,7 @@ class Asset extends Model
         'max_increments',
         'base_size',
         'streak_sizing_enabled',
+        'kill_switch_losses',
         'enabled',
     ];
 
@@ -31,8 +32,41 @@ class Asset extends Model
             'max_increments' => 'float',
             'base_size' => 'float',
             'streak_sizing_enabled' => 'boolean',
+            'kill_switch_losses' => 'integer',
+            'kill_switch_armed_at' => 'datetime',
+            'killed_at' => 'datetime',
             'enabled' => 'boolean',
         ];
+    }
+
+    /**
+     * The kill switch's two lifecycle rules, wherever the write comes from
+     * (asset form, card toggle, the Streak Sizing Settings tab):
+     * - configuring or changing it re-arms it: only master losses from now on
+     *   count, never the run that was already on the books;
+     * - turning the coin back ON clears a trip and re-arms it, so the losing
+     *   run that switched it off cannot switch it off again on the next sync.
+     * A trip itself (App\Services\Assets\KillSwitch::trip) is a direct query
+     * update and never passes through here.
+     */
+    protected static function booted(): void
+    {
+        static::saving(function (Asset $asset) {
+            if ($asset->isDirty('kill_switch_losses')) {
+                $asset->kill_switch_armed_at = now();
+            }
+            if ($asset->exists && $asset->isDirty('enabled') && $asset->enabled) {
+                $asset->killed_at = null;
+                $asset->killed_reason = null;
+                $asset->kill_switch_armed_at = now();
+            }
+        });
+    }
+
+    /** Switched off by the kill switch and not turned back on yet. */
+    public function isKilled(): bool
+    {
+        return ! $this->enabled && $this->killed_at !== null;
     }
 
     /** The streak ladder — loss and win steps (App\Services\Assets\StreakSizing). */

@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Http\Controllers\Concerns\GuardsEngineExchange;
 use App\Models\ExchangeAccount;
+use App\Services\Assets\KillSwitch;
 use App\Services\EngineCache;
 use App\Services\Exchanges\TransferLedger;
 use App\Services\Pnl\FeeRebase;
@@ -353,6 +354,12 @@ class EngineSyncController extends Controller
             }
         }
 
+        // The master's close (or its P&L, which can arrive a sync later) may
+        // complete a losing run that switches a coin off. Never throws.
+        $killed = $inserted + $updated > 0
+            ? app(KillSwitch::class)->checkAfterSync($exchange, $data['rows'])
+            : [];
+
         return response()->json([
             'success' => true,
             'inserted' => $inserted,
@@ -360,6 +367,8 @@ class EngineSyncController extends Controller
             'skipped' => $skipped,
             // Rows for a key with no account on this exchange — not written.
             'unknown' => $unknown,
+            // Tickers the kill switch switched off because of this batch.
+            'kill_switch' => $killed,
         ]);
     }
 

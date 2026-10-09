@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\Asset;
+use App\Services\Assets\KillSwitch;
 use App\Services\Assets\StreakSizing;
 use App\Services\EngineCache;
 use App\Services\Exchanges\ExchangeSchema;
@@ -134,6 +135,11 @@ class AssetController extends Controller
                 $this->streakSizing->replace($asset, $ladder['enabled'], $ladder['steps']);
             }
         });
+        // Turning a kill-switched coin back on clears the trip (Asset::booted);
+        // the Overview's caution strip must not linger for its cache minute.
+        if ($asset->wasChanged('killed_at')) {
+            KillSwitch::forgetOverview();
+        }
         $this->engineCache->refreshAssets();
 
         return response()->json([
@@ -150,8 +156,17 @@ class AssetController extends Controller
      */
     public function updateStreakSizing(Request $request, Asset $asset): JsonResponse
     {
-        $data = $request->validate(StreakSizing::rules());
-        $this->streakSizing->replace($asset, (bool) $data['streak_sizing_enabled'], $data['streak_sizes'] ?? []);
+        $data = $request->validate(StreakSizing::rules() + [
+            // The kill switch lives on the same card: absent = unchanged, null = off.
+            'kill_switch_losses' => ['sometimes', 'nullable', 'integer', 'between:1,'.StreakSizing::MAX_STEPS],
+        ]);
+        StreakSizing::validateDistinct($data['streak_sizes'] ?? []);
+        DB::transaction(function () use ($asset, $data, $request) {
+            $this->streakSizing->replace($asset, (bool) $data['streak_sizing_enabled'], $data['streak_sizes'] ?? []);
+            if ($request->exists('kill_switch_losses')) {
+                $asset->update(['kill_switch_losses' => $data['kill_switch_losses'] ?? null]);
+            }
+        });
         $this->engineCache->refreshAssets();
 
         return response()->json([
@@ -273,6 +288,8 @@ class AssetController extends Controller
             'max_increments' => ['required', 'numeric', 'min:0.001'],
             'base_size' => ['required', 'numeric', 'gt:0'],
             'enabled' => ['required', 'boolean'],
+            // Kill switch (KillSwitch): absent = unchanged, '' / null = off.
+            'kill_switch_losses' => ['sometimes', 'nullable', 'integer', 'between:1,'.StreakSizing::MAX_STEPS],
             'asset_image' => ['nullable', 'image', 'mimes:jpeg,jpg,png,gif,webp,svg', 'max:2048'],
         ]);
 

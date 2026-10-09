@@ -66,6 +66,21 @@ class EngineCache
     }
 
     /**
+     * Ask the engine to tell the admin Telegram group that the kill switch
+     * switched a coin off (App\Services\Assets\KillSwitch). The engine owns
+     * the bot token and the admin chat; this API never talks to Telegram.
+     */
+    public function killSwitchTripped(string $exchange, string $ticker, int $losses, string $reason): bool
+    {
+        return $this->ping('kill-switch', [
+            'exchange' => $exchange,
+            'ticker' => $ticker,
+            'losses' => $losses,
+            'reason' => $reason,
+        ]);
+    }
+
+    /**
      * Sync balances for specific accounts NOW, instead of at the poller's next
      * tick. Scoped by api_key on purpose: one trader pressing "Refresh balance"
      * must cost one Binance call, not one per account on the platform.
