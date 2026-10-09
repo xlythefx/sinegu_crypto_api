@@ -173,7 +173,9 @@ final class SignalHealth
             'normal_skips' => $normal,
             'problems' => $problems,
             'master_missed' => $masterMissed,
-            'last_signal_at' => optional($logs->first()?->ts)->toIso8601String(),
+            // Read outside the window: a quiet day must still say when the last
+            // signal arrived, or "no signals" cannot be told from "engine down".
+            'last_signal_at' => optional(TradeLog::orderByDesc('ts')->first()?->ts)->toIso8601String(),
             'issues' => array_slice($issues, 0, 5),
             'issues_total' => count($issues),
         ];

@@ -204,9 +204,12 @@ class SignalHealthTest extends EngineTestCase
     {
         $this->signal([$this->failed('Broken', 'no response')], ['ts' => now()->subDays(3)->toDateTimeString()]);
 
-        $this->getJson('/api/admin/trade-logs/health', $this->headers())
+        $health = $this->getJson('/api/admin/trade-logs/health', $this->headers())
             ->assertOk()
-            ->assertJsonPath('health.status', 'quiet');
+            ->assertJsonPath('health.status', 'quiet')
+            ->json('health');
+
+        $this->assertNotNull($health['last_signal_at']);   // when the last one came, even outside the window
     }
 
     public function test_a_rejected_signal_is_a_problem_grouped_by_coin(): void
