@@ -7,6 +7,7 @@ use App\Models\Asset;
 use App\Models\ExchangeAccount;
 use App\Models\OpenStrategy;
 use App\Models\TradeLog;
+use App\Services\Assets\LossSizing;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -140,7 +141,7 @@ class EngineController extends Controller
             return $guard;
         }
 
-        $query = Asset::where('enabled', 1);
+        $query = Asset::with('lossSizes')->where('enabled', 1);
         if ($broker = $request->query('broker')) {
             $query->where('broker', $broker);
         }
@@ -154,7 +155,39 @@ class EngineController extends Controller
                 'base_size' => (float) $a->base_size,
                 'max_increments' => (float) $a->max_increments,
                 'enabled' => (bool) $a->enabled,
+                // Loss-streak sizing (LossSizing). A list, not a {losses: size}
+                // map: PHP encodes an empty map as [] and the engine would have
+                // to guess which shape it got.
+                'loss_sizing_enabled' => (bool) $a->loss_sizing_enabled,
+                'loss_sizes' => LossSizing::ladder($a),
             ])->values(),
+        ]);
+    }
+
+    /**
+     * GET /api/engine/{exchange}/loss-streaks?symbol=&depth= — every account's
+     * current losing streak on one coin, in one read, for the entry fan-out
+     * (the same batching as positions/check). `streaks` maps api_key → losses
+     * in a row, capped at depth; an account absent from it has no known close
+     * on the coin and trades base size. Always a JSON object, never [].
+     */
+    public function lossStreaks(string $exchange, Request $request, LossSizing $lossSizing): JsonResponse
+    {
+        if ($guard = $this->guardExchange($exchange)) {
+            return $guard;
+        }
+
+        $data = $request->validate([
+            'symbol' => ['required', 'string', 'max:32'],
+            'depth' => ['nullable', 'integer', 'between:1,'.LossSizing::MAX_STEPS],
+        ]);
+        $depth = (int) ($data['depth'] ?? LossSizing::MAX_STEPS);
+
+        return response()->json([
+            'success' => true,
+            'symbol' => $data['symbol'],
+            'depth' => $depth,
+            'streaks' => (object) $lossSizing->streaks($exchange, $data['symbol'], $depth),
         ]);
     }
 

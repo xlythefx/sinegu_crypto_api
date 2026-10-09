@@ -179,6 +179,41 @@ class AdminTradeLogTest extends EngineTestCase
      * A deposit-gated skip writes a partial sizing block (no base_size, no
      * quantity). It must survive the mapper without inventing zeros.
      */
+    /** Loss-streak sizing rides in the same block, and is null on every other row. */
+    public function test_the_loss_streak_step_survives_the_round_trip(): void
+    {
+        $admin = $this->makeUser(['type' => 'admin']);
+        TradeLog::create([
+            'exchange' => 'binance', 'action' => 'BUY', 'ticker' => 'LTCUSDT',
+            'success' => true, 'category' => 'signal', 'target_count' => 1,
+            'filled' => 1, 'failed' => 0, 'skipped' => 0,
+            'ts' => '2026-10-09 10:00:00',
+            'details' => [[
+                'account' => 'On a streak',
+                'status' => 'filled',
+                'quantity' => 100.0,
+                'sizing' => [
+                    'balance' => 2500.0, 'base_size' => 50.0, 'reference_balance' => 1000.0,
+                    'coarse_step' => false, 'quantity' => 100.0, 'size_multiple' => 2.5,
+                    'stacks_now' => 0.0, 'max_increments' => 3.0,
+                    'loss_streak' => 2, 'streak_known' => true, 'streak_step' => 1, 'streak_size' => 40.0,
+                ],
+            ]],
+        ]);
+        $this->seedEntryLog($admin);
+
+        $logs = $this->getJson('/api/admin/trade-logs', $this->headersFor($admin))->assertOk()->json('logs');
+        $streak = collect($logs)->firstWhere('ticker', 'LTCUSDT')['details'][0]['sizing'];
+        $plain = collect($logs)->firstWhere('ticker', 'BTCUSDT')['details'][0]['sizing'];
+
+        $this->assertSame(2, $streak['loss_streak']);
+        $this->assertTrue($streak['streak_known']);
+        $this->assertSame(1, $streak['streak_step']);
+        $this->assertSame(40.0, (float) $streak['streak_size']);
+        $this->assertNull($plain['loss_streak']);
+        $this->assertNull($plain['streak_size']);
+    }
+
     public function test_a_deposit_gated_skip_maps_its_partial_sizing(): void
     {
         $admin = $this->makeUser(['type' => 'admin']);

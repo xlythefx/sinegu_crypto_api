@@ -4,6 +4,7 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Support\Facades\Storage;
 
 class Asset extends Model
@@ -20,6 +21,7 @@ class Asset extends Model
         'asset_image',
         'max_increments',
         'base_size',
+        'loss_sizing_enabled',
         'enabled',
     ];
 
@@ -28,8 +30,15 @@ class Asset extends Model
         return [
             'max_increments' => 'float',
             'base_size' => 'float',
+            'loss_sizing_enabled' => 'boolean',
             'enabled' => 'boolean',
         ];
+    }
+
+    /** The loss-streak ladder, shallowest step first (App\Services\Assets\LossSizing). */
+    public function lossSizes(): HasMany
+    {
+        return $this->hasMany(AssetLossSize::class, 'asset_id', 'asset_id')->orderBy('losses');
     }
 
     /**
