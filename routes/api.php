@@ -288,6 +288,9 @@ Route::middleware(['auth:sanctum', 'account.active', 'email.verified'])->group(f
         // Engine signal log (read-only) — what the engine did per signal, incl.
         // the balance-proportional sizing decision per account.
         Route::get('/trade-logs', [AdminTradeLogController::class, 'index']);
+        // Health banner + problems grouped by cause (SignalHealth). Before {id}.
+        Route::get('/trade-logs/health', [AdminTradeLogController::class, 'health']);
+        Route::get('/trade-logs/issues', [AdminTradeLogController::class, 'issues']);
         Route::get('/trade-logs/{id}', [AdminTradeLogController::class, 'show']);
 
         Route::get('/invoices', [AdminInvoiceController::class, 'index']);

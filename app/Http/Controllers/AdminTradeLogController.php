@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\TradeLog;
+use App\Services\Admin\SignalHealth;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -21,8 +22,145 @@ class AdminTradeLogController extends Controller
     /** Hard ceiling so a bad `limit` can never table-scan the whole log. */
     private const MAX_LIMIT = 200;
 
-    /** GET /api/admin/trade-logs — filtered, paginated signal log. */
+    /**
+     * GET /api/admin/trade-logs — filtered, paginated signal log.
+     *
+     * Signal filters (exchange, action, ticker, category, strategy, result,
+     * from/to) run in SQL. ACCOUNT filters look inside each signal's fan-out
+     * and run in PHP over at most SignalHealth::SCAN_LIMIT signals — the log is
+     * a few signals a day, and `details` is JSON:
+     * - outcome = filled | skipped | failed | problem (any account outcome
+     *   SignalHealth calls a problem);
+     * - reason  = a SignalHealth reason key;
+     * - account = text matched against the account name and its owner's name.
+     * A signal is listed when at least one account matches; every account row
+     * then carries `match` so the page can show just those.
+     */
     public function index(Request $request): JsonResponse
+    {
+        $query = $this->baseQuery($request);
+        $limit = min(max((int) $request->query('limit', 50), 1), self::MAX_LIMIT);
+        $offset = max((int) $request->query('offset', 0), 0);
+
+        $outcome = (string) $request->query('outcome', '');
+        $reason = (string) $request->query('reason', '');
+        $account = trim((string) $request->query('account', ''));
+        $accountFilter = $outcome !== '' || $reason !== '' || $account !== '';
+
+        // The window every reason count and account filter reads.
+        $window = (clone $query)->orderByDesc('ts')->orderByDesc('id')->limit(SignalHealth::SCAN_LIMIT)->get();
+        $names = $this->userNames($window);
+        $reasonCounts = $this->reasonCounts($window);
+
+        if ($accountFilter) {
+            $matcher = fn (array $d, TradeLog $log) => $this->detailMatches($d, $log, $outcome, $reason, $account, $names);
+            $matched = $window->filter(function (TradeLog $log) use ($matcher) {
+                foreach ((array) $log->details as $d) {
+                    if (is_array($d) && $matcher($d, $log)) {
+                        return true;
+                    }
+                }
+
+                return false;
+            })->values();
+            $page = $matched->slice($offset, $limit)->values();
+            $summary = [
+                'signals' => $matched->count(),
+                'clean_signals' => $matched->where('success', true)->count(),
+                'filled' => (int) $matched->sum('filled'),
+                'failed' => (int) $matched->sum('failed'),
+                'skipped' => (int) $matched->sum('skipped'),
+            ];
+            $logs = $page->map(fn (TradeLog $log) => $this->mapLog($log, $names, $matcher));
+        } else {
+            // Summary reflects the filters but NOT the page window.
+            $row = (clone $query)
+                ->selectRaw('COUNT(*) AS signals')
+                ->selectRaw('COALESCE(SUM(filled), 0) AS filled')
+                ->selectRaw('COALESCE(SUM(failed), 0) AS failed')
+                ->selectRaw('COALESCE(SUM(skipped), 0) AS skipped')
+                ->selectRaw('COALESCE(SUM(success = 1), 0) AS clean_signals')
+                ->first();
+            $summary = [
+                'signals' => (int) ($row->signals ?? 0),
+                'clean_signals' => (int) ($row->clean_signals ?? 0),
+                'filled' => (int) ($row->filled ?? 0),
+                'failed' => (int) ($row->failed ?? 0),
+                'skipped' => (int) ($row->skipped ?? 0),
+            ];
+            $page = (clone $query)->orderByDesc('ts')->orderByDesc('id')->offset($offset)->limit($limit)->get();
+            $logs = $page->map(fn (TradeLog $log) => $this->mapLog($log, $this->userNames($page) + $names));
+        }
+
+        $problemDetails = 0;
+        $normalDetails = 0;
+        foreach ($reasonCounts as $r) {
+            $r['severity'] === SignalHealth::PROBLEM ? $problemDetails += $r['count'] : $normalDetails += $r['count'];
+        }
+
+        return response()->json([
+            'success' => true,
+            'logs' => $logs->values(),
+            'summary' => $summary + [
+                // Account outcomes in the window, split the SignalHealth way.
+                'problem_accounts' => $problemDetails,
+                'normal_skips' => $normalDetails,
+            ],
+            'pagination' => [
+                'limit' => $limit,
+                'offset' => $offset,
+                'total' => $summary['signals'],
+            ],
+            // Drives the frontend filter chips without a second round trip.
+            'filters' => [
+                'tickers' => TradeLog::distinct()->orderBy('ticker')->pluck('ticker'),
+                'strategies' => TradeLog::whereNotNull('strategy')
+                    ->distinct()->orderBy('strategy')->pluck('strategy'),
+                'reasons' => array_values($reasonCounts),
+            ],
+        ]);
+    }
+
+    /**
+     * GET /api/admin/trade-logs/health?hours=24 — the banner: how the last
+     * day of signals went (healthy | normal | attention | quiet) and the top
+     * problems grouped by cause. Ignores the page's filters on purpose: it
+     * answers "is anything wrong right now", whatever the admin is browsing.
+     */
+    public function health(Request $request, SignalHealth $health): JsonResponse
+    {
+        $hours = min(max((int) $request->query('hours', 24), 1), 24 * 30);
+
+        return response()->json(['success' => true, 'health' => $health->health($hours)]);
+    }
+
+    /**
+     * GET /api/admin/trade-logs/issues — every problem in the filtered window
+     * grouped by cause (one row per reason + account), most recent first.
+     * Takes the same signal filters as the list; with no dates it reads the
+     * last 7 days.
+     */
+    public function issues(Request $request, SignalHealth $health): JsonResponse
+    {
+        $query = $this->baseQuery($request);
+        if (! $request->query('from') && ! $request->query('to')) {
+            $query->where('ts', '>=', now()->subDays(7));
+        }
+        $logs = $query->orderByDesc('ts')->limit(SignalHealth::SCAN_LIMIT)->get();
+
+        return response()->json([
+            'success' => true,
+            'signals' => $logs->count(),
+            'issues' => $health->issues($logs),
+            'normal' => array_values(array_filter(
+                $this->reasonCounts($logs),
+                fn ($r) => $r['severity'] === SignalHealth::NORMAL,
+            )),
+        ]);
+    }
+
+    /** The SQL half of every list: the signal-level filters. */
+    private function baseQuery(Request $request)
     {
         $query = TradeLog::query();
 
@@ -56,45 +194,55 @@ class AdminTradeLogController extends Controller
             $query->where('ts', '<=', $to.' 23:59:59');
         }
 
-        // Summary reflects the filters but NOT the page window.
-        $summary = (clone $query)
-            ->selectRaw('COUNT(*) AS signals')
-            ->selectRaw('COALESCE(SUM(filled), 0) AS filled')
-            ->selectRaw('COALESCE(SUM(failed), 0) AS failed')
-            ->selectRaw('COALESCE(SUM(skipped), 0) AS skipped')
-            ->selectRaw('COALESCE(SUM(success = 1), 0) AS clean_signals')
-            ->first();
+        return $query;
+    }
 
-        $limit = min(max((int) $request->query('limit', 50), 1), self::MAX_LIMIT);
-        $offset = max((int) $request->query('offset', 0), 0);
+    /**
+     * Account outcomes per reason across these signals, for the reason filter.
+     *
+     * @return array<string, array{key: string, label: string, severity: string, count: int}>
+     */
+    private function reasonCounts($logs): array
+    {
+        $counts = [];
+        foreach ($logs as $log) {
+            foreach ((array) $log->details as $d) {
+                if (! is_array($d) || ! ($c = SignalHealth::classify($d, $log->category))) {
+                    continue;
+                }
+                $counts[$c['key']] ??= $c + ['count' => 0];
+                $counts[$c['key']]['count']++;
+            }
+        }
+        uasort($counts, fn ($a, $b) => [$a['severity'] === SignalHealth::NORMAL, -$a['count']] <=> [$b['severity'] === SignalHealth::NORMAL, -$b['count']]);
 
-        $logs = $query->orderByDesc('ts')->orderByDesc('id')
-            ->offset($offset)->limit($limit)->get();
+        return $counts;
+    }
 
-        $names = $this->userNames($logs);
+    /** Does one account outcome pass the account filters? */
+    private function detailMatches(array $d, TradeLog $log, string $outcome, string $reason, string $account, array $names): bool
+    {
+        $c = SignalHealth::classify($d, $log->category);
+        $status = $log->category === 'rejected' ? 'rejected' : ($d['status'] ?? null);
 
-        return response()->json([
-            'success' => true,
-            'logs' => $logs->map(fn (TradeLog $log) => $this->mapLog($log, $names))->values(),
-            'summary' => [
-                'signals' => (int) ($summary->signals ?? 0),
-                'clean_signals' => (int) ($summary->clean_signals ?? 0),
-                'filled' => (int) ($summary->filled ?? 0),
-                'failed' => (int) ($summary->failed ?? 0),
-                'skipped' => (int) ($summary->skipped ?? 0),
-            ],
-            'pagination' => [
-                'limit' => $limit,
-                'offset' => $offset,
-                'total' => (int) ($summary->signals ?? 0),
-            ],
-            // Drives the frontend filter chips without a second round trip.
-            'filters' => [
-                'tickers' => TradeLog::distinct()->orderBy('ticker')->pluck('ticker'),
-                'strategies' => TradeLog::whereNotNull('strategy')
-                    ->distinct()->orderBy('strategy')->pluck('strategy'),
-            ],
-        ]);
+        if ($outcome === 'problem') {
+            if (! $c || $c['severity'] !== SignalHealth::PROBLEM) {
+                return false;
+            }
+        } elseif ($outcome !== '' && $status !== $outcome) {
+            return false;
+        }
+        if ($reason !== '' && ($c['key'] ?? null) !== $reason) {
+            return false;
+        }
+        if ($account !== '') {
+            $hay = strtolower(($d['account'] ?? '').' '.(isset($d['uni_id']) ? ($names[$d['uni_id']] ?? '') : ''));
+            if (! str_contains($hay, strtolower($account))) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /** GET /api/admin/trade-logs/{id} — one signal with its full fan-out. */
@@ -132,8 +280,17 @@ class AdminTradeLogController extends Controller
             ->all();
     }
 
-    private function mapLog(TradeLog $log, array $names): array
+    private function mapLog(TradeLog $log, array $names, ?callable $matcher = null): array
     {
+        $details = is_array($log->details) ? $log->details : [];
+        $problems = 0;
+        $normal = 0;
+        foreach ($details as $d) {
+            if (is_array($d) && ($c = SignalHealth::classify($d, $log->category))) {
+                $c['severity'] === SignalHealth::PROBLEM ? $problems++ : $normal++;
+            }
+        }
+
         return [
             'id' => $log->id,
             'exchange' => $log->exchange,
@@ -149,9 +306,15 @@ class AdminTradeLogController extends Controller
             'failed' => (int) $log->failed,
             'skipped' => (int) $log->skipped,
             'details' => array_map(
-                fn ($row) => $this->mapDetail($row, $names),
-                is_array($log->details) ? $log->details : []
+                fn ($row) => $this->mapDetail($row, $names, $log, $matcher),
+                $details
             ),
+            // How the master did (filled | skipped | failed | absent), or null
+            // when the engine sent no master flag — and the account outcomes
+            // split into problems and normal skips, for the row's chips.
+            'master' => SignalHealth::masterOutcome($log),
+            'problems' => $problems,
+            'normal_skips' => $normal,
             'ts' => optional($log->ts)->toIso8601String(),
         ];
     }
@@ -161,15 +324,23 @@ class AdminTradeLogController extends Controller
      * decision — present on entries only (exits close whatever is open, and
      * rejected signals never reach an account).
      */
-    private function mapDetail($row, array $names): array
+    private function mapDetail($row, array $names, ?TradeLog $log = null, ?callable $matcher = null): array
     {
         if (! is_array($row)) {
             return ['status' => 'unknown'];
         }
 
         $sizing = is_array($row['sizing'] ?? null) ? $row['sizing'] : null;
+        $class = SignalHealth::classify($row, $log?->category);
 
         return [
+            // SignalHealth's verdict on this outcome (null for a fill) and,
+            // when account filters are on, whether this row is one they found.
+            'reason_key' => $class['key'] ?? null,
+            'reason_label' => $class['label'] ?? null,
+            'severity' => $class['severity'] ?? null,
+            'is_master' => array_key_exists('is_master', $row) ? (bool) $row['is_master'] : null,
+            'match' => $matcher && $log ? (bool) $matcher($row, $log) : true,
             'account' => $row['account'] ?? null,
             'uni_id' => $row['uni_id'] ?? null,
             'user_name' => isset($row['uni_id']) ? ($names[$row['uni_id']] ?? null) : null,
