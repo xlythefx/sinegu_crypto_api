@@ -179,8 +179,8 @@ class AdminTradeLogTest extends EngineTestCase
      * A deposit-gated skip writes a partial sizing block (no base_size, no
      * quantity). It must survive the mapper without inventing zeros.
      */
-    /** Loss-streak sizing rides in the same block, and is null on every other row. */
-    public function test_the_loss_streak_step_survives_the_round_trip(): void
+    /** Streak sizing rides in the same block, and is null on every other row. */
+    public function test_the_streak_step_survives_the_round_trip(): void
     {
         $admin = $this->makeUser(['type' => 'admin']);
         TradeLog::create([
@@ -196,7 +196,8 @@ class AdminTradeLogTest extends EngineTestCase
                     'balance' => 2500.0, 'base_size' => 50.0, 'reference_balance' => 1000.0,
                     'coarse_step' => false, 'quantity' => 100.0, 'size_multiple' => 2.5,
                     'stacks_now' => 0.0, 'max_increments' => 3.0,
-                    'loss_streak' => 2, 'streak_known' => true, 'streak_step' => 1, 'streak_size' => 40.0,
+                    'streak_run' => -2, 'streak_known' => true, 'streak_kind' => 'loss',
+                    'streak_step' => 1, 'streak_size' => 40.0,
                 ],
             ]],
         ]);
@@ -206,11 +207,12 @@ class AdminTradeLogTest extends EngineTestCase
         $streak = collect($logs)->firstWhere('ticker', 'LTCUSDT')['details'][0]['sizing'];
         $plain = collect($logs)->firstWhere('ticker', 'BTCUSDT')['details'][0]['sizing'];
 
-        $this->assertSame(2, $streak['loss_streak']);
+        $this->assertSame(-2, $streak['streak_run']);
         $this->assertTrue($streak['streak_known']);
+        $this->assertSame('loss', $streak['streak_kind']);
         $this->assertSame(1, $streak['streak_step']);
         $this->assertSame(40.0, (float) $streak['streak_size']);
-        $this->assertNull($plain['loss_streak']);
+        $this->assertNull($plain['streak_run']);
         $this->assertNull($plain['streak_size']);
     }
 

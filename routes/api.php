@@ -281,9 +281,9 @@ Route::middleware(['auth:sanctum', 'account.active', 'email.verified'])->group(f
         Route::post('/assets', [AssetController::class, 'store']);
         Route::put('/assets/{asset}', [AssetController::class, 'update']);
         Route::delete('/assets/{asset}', [AssetController::class, 'destroy']);
-        // Loss-streak sizing tab: write the ladder alone / who sits at each step now.
-        Route::put('/assets/{asset}/loss-sizing', [AssetController::class, 'updateLossSizing']);
-        Route::get('/assets/{asset}/loss-streaks', [AssetController::class, 'lossStreaks']);
+        // Streak Sizing Settings tab: write the ladder alone / which run each account is on now.
+        Route::put('/assets/{asset}/streak-sizing', [AssetController::class, 'updateStreakSizing']);
+        Route::get('/assets/{asset}/streaks', [AssetController::class, 'streaks']);
 
         // Engine signal log (read-only) — what the engine did per signal, incl.
         // the balance-proportional sizing decision per account.
@@ -460,7 +460,7 @@ Route::prefix('engine/{exchange}')
     ->group(function () {
         Route::get('/accounts', [EngineController::class, 'accounts']);
         Route::get('/assets', [EngineController::class, 'assets']);
-        Route::get('/loss-streaks', [EngineController::class, 'lossStreaks']);
+        Route::get('/streaks', [EngineController::class, 'streaks']);
         Route::post('/trade-logs', [EngineController::class, 'storeTradeLog']);
         Route::get('/open-strategies', [EngineController::class, 'openStrategies']);
         Route::post('/open-strategies', [EngineController::class, 'storeOpenStrategy']);

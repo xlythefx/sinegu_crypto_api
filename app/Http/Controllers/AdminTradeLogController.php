@@ -194,11 +194,14 @@ class AdminTradeLogController extends Controller
                 'size_multiple' => isset($sizing['size_multiple']) ? (float) $sizing['size_multiple'] : null,
                 'stacks_now' => isset($sizing['stacks_now']) ? (float) $sizing['stacks_now'] : null,
                 'max_increments' => isset($sizing['max_increments']) ? (float) $sizing['max_increments'] : null,
-                // Loss-streak sizing — written only for an asset with a ladder,
-                // so null on every other row. `streak_size` is the size the
-                // multiple was applied to; base_size stays the asset's own.
-                'loss_streak' => isset($sizing['loss_streak']) ? (int) $sizing['loss_streak'] : null,
+                // Streak sizing — written only for an asset with a ladder, so
+                // null on every other row. `streak_run` is signed (-3 = three
+                // losses in a row, +2 = two wins); `streak_kind`/`streak_step`
+                // name the step applied (step 0 = base). `streak_size` is the
+                // size the multiple was applied to; base_size stays the asset's.
+                'streak_run' => isset($sizing['streak_run']) ? (int) $sizing['streak_run'] : null,
                 'streak_known' => isset($sizing['streak_known']) ? (bool) $sizing['streak_known'] : null,
+                'streak_kind' => isset($sizing['streak_kind']) ? (string) $sizing['streak_kind'] : null,
                 'streak_step' => isset($sizing['streak_step']) ? (int) $sizing['streak_step'] : null,
                 'streak_size' => isset($sizing['streak_size']) ? (float) $sizing['streak_size'] : null,
             ],

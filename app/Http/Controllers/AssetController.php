@@ -3,7 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\Asset;
-use App\Services\Assets\LossSizing;
+use App\Services\Assets\StreakSizing;
 use App\Services\EngineCache;
 use App\Services\Exchanges\ExchangeSchema;
 use Illuminate\Http\JsonResponse;
@@ -21,16 +21,16 @@ use Illuminate\Validation\Rule;
  * A saved base_size applies to the next signal; the engine is never restarted
  * for a config change.
  *
- * The loss-streak ladder (App\Services\Assets\LossSizing) belongs to the same
- * asset: the form posts it alongside the asset fields, the Loss-streak sizing
- * tab writes it alone, and both go through LossSizing::replace. It is NEVER in
+ * The streak ladder (App\Services\Assets\StreakSizing) belongs to the same
+ * asset: the form posts it alongside the asset fields, the Streak Sizing
+ * Settings tab writes it alone, and both go through StreakSizing::replace. It is NEVER in
  * the trader catalog — like base_size, it is how big the bot trades.
  */
 class AssetController extends Controller
 {
     public function __construct(
         private EngineCache $engineCache,
-        private LossSizing $lossSizing,
+        private StreakSizing $streakSizing,
     ) {}
 
     /** GET /api/admin/assets */
@@ -38,7 +38,7 @@ class AssetController extends Controller
     {
         return response()->json([
             'success' => true,
-            'assets' => Asset::with('lossSizes')->orderBy('ticker')->get()
+            'assets' => Asset::with('streakSizes')->orderBy('ticker')->get()
                 ->map(fn (Asset $a) => $this->present($a)),
         ]);
     }
@@ -46,11 +46,11 @@ class AssetController extends Controller
     /** An asset as the admin screens read it: every column plus its ladder. */
     private function present(Asset $asset): array
     {
-        $asset->loadMissing('lossSizes');
+        $asset->loadMissing('streakSizes');
 
         return array_merge($asset->withoutRelations()->toArray(), [
-            'loss_sizing_enabled' => (bool) $asset->loss_sizing_enabled,
-            'loss_sizes' => LossSizing::ladder($asset),
+            'streak_sizing_enabled' => (bool) $asset->streak_sizing_enabled,
+            'streak_sizes' => StreakSizing::ladder($asset),
         ]);
     }
 
@@ -94,7 +94,7 @@ class AssetController extends Controller
         $asset = DB::transaction(function () use ($validated, $ladder) {
             $asset = Asset::create($validated);
             if ($ladder !== null) {
-                $this->lossSizing->replace($asset, $ladder['enabled'], $ladder['steps']);
+                $this->streakSizing->replace($asset, $ladder['enabled'], $ladder['steps']);
             }
 
             return $asset;
@@ -131,7 +131,7 @@ class AssetController extends Controller
         DB::transaction(function () use ($asset, $validated, $ladder) {
             $asset->update($validated);
             if ($ladder !== null) {
-                $this->lossSizing->replace($asset, $ladder['enabled'], $ladder['steps']);
+                $this->streakSizing->replace($asset, $ladder['enabled'], $ladder['steps']);
             }
         });
         $this->engineCache->refreshAssets();
@@ -144,38 +144,40 @@ class AssetController extends Controller
     }
 
     /**
-     * PUT /api/admin/assets/{asset}/loss-sizing — the Loss-streak sizing tab.
-     * Body: {loss_sizing_enabled: bool, loss_sizes: [{losses, size}]}; the
-     * ladder is replaced whole (an empty list clears it).
+     * PUT /api/admin/assets/{asset}/streak-sizing — the Streak Sizing Settings
+     * tab. Body: {streak_sizing_enabled: bool, streak_sizes: [{kind, streak,
+     * size}]}; the ladder is replaced whole (an empty list clears it).
      */
-    public function updateLossSizing(Request $request, Asset $asset): JsonResponse
+    public function updateStreakSizing(Request $request, Asset $asset): JsonResponse
     {
-        $data = $request->validate(LossSizing::rules());
-        $this->lossSizing->replace($asset, (bool) $data['loss_sizing_enabled'], $data['loss_sizes'] ?? []);
+        $data = $request->validate(StreakSizing::rules());
+        $this->streakSizing->replace($asset, (bool) $data['streak_sizing_enabled'], $data['streak_sizes'] ?? []);
         $this->engineCache->refreshAssets();
 
         return response()->json([
             'success' => true,
-            'message' => "Loss-streak sizing for \"{$asset->ticker}\" saved",
+            'message' => "Streak sizing for \"{$asset->ticker}\" saved",
             'asset' => $this->present($asset->fresh()),
         ]);
     }
 
     /**
-     * GET /api/admin/assets/{asset}/loss-streaks — "right now": how many of the
-     * accounts the engine trades on this asset's venue sit at each streak
-     * depth. DB only (the same read the engine makes), never an exchange call.
-     * Depth is the deepest configured step (10 with no ladder), so the last
-     * bucket reads "this many or more".
+     * GET /api/admin/assets/{asset}/streaks — "right now": how many of the
+     * accounts the engine trades on this asset's venue are on each run.
+     * `run` is signed (-3 = three losses in a row, +2 = two wins, 0 = no
+     * close yet) and capped at depth — the deepest configured step of either
+     * kind, 10 with no ladder — so ±depth reads "this many or more". Only
+     * non-empty buckets are listed. DB only (the same read the engine makes),
+     * never an exchange call.
      */
-    public function lossStreaks(Asset $asset): JsonResponse
+    public function streaks(Asset $asset): JsonResponse
     {
-        $exchange = LossSizing::exchangeFor($asset);
-        $depth = LossSizing::deepestStep($asset) ?: LossSizing::MAX_STEPS;
+        $exchange = StreakSizing::exchangeFor($asset);
+        $depth = StreakSizing::deepestStep($asset) ?: StreakSizing::MAX_STEPS;
         if ($exchange === null) {
             return response()->json([
                 'success' => true, 'exchange' => null, 'symbol' => $asset->ticker,
-                'depth' => $depth, 'accounts' => 0, 'counts' => [],
+                'depth' => $depth, 'accounts' => 0, 'runs' => [],
             ]);
         }
 
@@ -190,11 +192,13 @@ class AssetController extends Controller
             ->pluck("{$t}.api_key")
             ->all();
 
-        $streaks = $this->lossSizing->streaks($exchange, $asset->ticker, $depth, $apiKeys);
-        $buckets = array_fill(0, $depth + 1, 0);
+        $runs = $this->streakSizing->runs($exchange, $asset->ticker, $depth, $apiKeys);
+        $buckets = [];
         foreach ($apiKeys as $key) {
-            $buckets[min($depth, $streaks[$key] ?? 0)]++;
+            $run = $runs[$key] ?? 0;
+            $buckets[$run] = ($buckets[$run] ?? 0) + 1;
         }
+        ksort($buckets);
 
         return response()->json([
             'success' => true,
@@ -202,8 +206,8 @@ class AssetController extends Controller
             'symbol' => $asset->ticker,
             'depth' => $depth,
             'accounts' => count($apiKeys),
-            'counts' => collect($buckets)
-                ->map(fn (int $n, int $streak) => ['streak' => $streak, 'accounts' => $n])
+            'runs' => collect($buckets)
+                ->map(fn (int $n, int $run) => ['run' => $run, 'accounts' => $n])
                 ->values(),
         ]);
     }
@@ -234,21 +238,23 @@ class AssetController extends Controller
      * The ladder posted with the asset form, or null when the form did not
      * send one. Absent means UNCHANGED, never "cleared": the asset card's
      * enable/disable toggle re-posts only the asset fields, and must not wipe
-     * a ladder it never displayed. `loss_sizing_enabled` is the marker — a
-     * form that sends it owns the ladder (no `loss_sizes` = no steps).
+     * a ladder it never displayed. `streak_sizing_enabled` is the marker — a
+     * form that sends it owns the ladder (no `streak_sizes` = no steps).
+     * Fully validated here, before the asset row or its image is written.
      *
      * @return array{enabled: bool, steps: array}|null
      */
     private function validatedLadder(Request $request): ?array
     {
-        if (! $request->has('loss_sizing_enabled')) {
+        if (! $request->has('streak_sizing_enabled')) {
             return null;
         }
-        $data = $request->validate(LossSizing::rules());
+        $data = $request->validate(StreakSizing::rules());
+        StreakSizing::validateDistinct($data['streak_sizes'] ?? []);
 
         return [
-            'enabled' => (bool) $data['loss_sizing_enabled'],
-            'steps' => $data['loss_sizes'] ?? [],
+            'enabled' => (bool) $data['streak_sizing_enabled'],
+            'steps' => $data['streak_sizes'] ?? [],
         ];
     }
 

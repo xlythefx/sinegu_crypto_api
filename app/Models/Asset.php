@@ -21,7 +21,7 @@ class Asset extends Model
         'asset_image',
         'max_increments',
         'base_size',
-        'loss_sizing_enabled',
+        'streak_sizing_enabled',
         'enabled',
     ];
 
@@ -30,15 +30,15 @@ class Asset extends Model
         return [
             'max_increments' => 'float',
             'base_size' => 'float',
-            'loss_sizing_enabled' => 'boolean',
+            'streak_sizing_enabled' => 'boolean',
             'enabled' => 'boolean',
         ];
     }
 
-    /** The loss-streak ladder, shallowest step first (App\Services\Assets\LossSizing). */
-    public function lossSizes(): HasMany
+    /** The streak ladder — loss and win steps (App\Services\Assets\StreakSizing). */
+    public function streakSizes(): HasMany
     {
-        return $this->hasMany(AssetLossSize::class, 'asset_id', 'asset_id')->orderBy('losses');
+        return $this->hasMany(AssetStreakSize::class, 'asset_id', 'asset_id')->orderBy('kind')->orderBy('streak');
     }
 
     /**
