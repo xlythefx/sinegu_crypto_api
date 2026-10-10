@@ -76,10 +76,18 @@ class Asset extends Model
     }
 
     /**
-     * Serialize asset_image as an absolute URL. Stored values are relative
-     * paths on the public disk; already-absolute (http/data) values and NULL
-     * pass through unchanged. Use getRawOriginal('asset_image') for the stored
-     * path (e.g. when deleting the old file).
+     * A stored value that is NOT a file on this API's public disk: an absolute
+     * URL, a data: URI, or a site path ("/litecoin-logo.jpg") served by the SPA
+     * from its own `public/` folder — the coin logos shipped with the frontend.
+     * Such values pass through as-is and are never deleted from storage.
+     */
+    public const EXTERNAL_IMAGE = '#^(https?://|data:|/)#i';
+
+    /**
+     * Serialize asset_image as a URL the browser can load. Stored values are
+     * relative paths on the public disk (an uploaded image); EXTERNAL_IMAGE
+     * values and NULL pass through unchanged. Use getRawOriginal('asset_image')
+     * for the stored path (e.g. when deleting the old file).
      */
     protected function assetImage(): Attribute
     {
@@ -88,7 +96,7 @@ class Asset extends Model
                 if (! $value) {
                     return null;
                 }
-                if (preg_match('#^(https?://|data:)#i', $value)) {
+                if (preg_match(self::EXTERNAL_IMAGE, $value)) {
                     return $value;
                 }
 

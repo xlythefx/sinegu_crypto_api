@@ -231,7 +231,7 @@ class AssetController extends Controller
     private function deleteStoredImage(Asset $asset): void
     {
         $previous = $asset->getRawOriginal('asset_image');
-        if ($previous && ! preg_match('#^(https?://|data:)#i', $previous)) {
+        if ($previous && ! preg_match(Asset::EXTERNAL_IMAGE, $previous)) {
             Storage::disk('public')->delete($previous);
         }
     }
