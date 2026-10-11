@@ -35,6 +35,8 @@ final class SignalHealth
         'deposit_unknown' => ['Deposit not synced yet', self::PROBLEM, 'Check in API Keys', '/admin/api-keys'],
         'size_too_small' => ['Size too small to trade', self::PROBLEM, 'Check the asset', '/admin/assets'],
         'stack_unknown' => ['Open size could not be read', self::PROBLEM, 'Check open positions', '/admin?tab=positions'],
+        'positions_unreadable' => ['Positions could not be read', self::PROBLEM, 'Check the bot engine', '/admin/engine'],
+        'not_listed' => ['Coin not listed on the exchange', self::PROBLEM, 'Check the asset', '/admin/assets'],
         'insufficient_margin' => ['Not enough margin on the account', self::PROBLEM, null, null],
         'no_response' => ['Exchange did not answer', self::PROBLEM, 'Check the bot engine', '/admin/engine'],
         'order_failed' => ['Order refused by the exchange', self::PROBLEM, 'Check the bot engine', '/admin/engine'],
@@ -45,6 +47,9 @@ final class SignalHealth
         'maxed' => ['Stack already full', self::NORMAL, null, null],
         'deposit_low' => ['Deposit below the minimum', self::NORMAL, null, null],
         'untradeable' => ['Account cannot trade on this venue', self::NORMAL, null, null],
+        // A demo network lists fewer coins than production (the MEXC testnet
+        // has no LTC_USDT): expected for a test account, not something to fix.
+        'not_listed_demo' => ['Coin not listed on the exchange’s demo', self::NORMAL, null, null],
     ];
 
     /** Most logs any one request classifies — the log is a few signals a day. */
@@ -76,6 +81,9 @@ final class SignalHealth
                 $text === 'deposit unknown' => 'deposit_unknown',
                 $text === 'size too small' => 'size_too_small',
                 $text === 'stack depth unknown' => 'stack_unknown',
+                // "not listed on MEXC Demo" / "… Production" — before the
+                // 'demo' arm below, which would file it as untradeable.
+                str_starts_with($text, 'not listed on ') => str_ends_with($text, ' demo') ? 'not_listed_demo' : 'not_listed',
                 str_contains($text, 'demo') || str_contains($text, 'not available') => 'untradeable',
                 default => 'other_skip',
             });
@@ -88,6 +96,7 @@ final class SignalHealth
                 str_contains($text, 'margin') || str_contains($text, 'insufficient') || str_contains($text, 'balance') => 'insufficient_margin',
                 str_contains($text, 'no response') || str_contains($text, 'timeout') || str_contains($text, 'timed out')
                     || str_contains($text, '408') || str_contains($text, '-1007') => 'no_response',
+                str_starts_with($text, 'could not read positions') => 'positions_unreadable',
                 str_starts_with($text, 'crash') => 'engine_error',
                 default => 'order_failed',
             });

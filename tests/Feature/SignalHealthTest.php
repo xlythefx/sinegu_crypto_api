@@ -67,6 +67,15 @@ class SignalHealthTest extends EngineTestCase
             [['status' => 'failed', 'error' => 'no response'], 'no_response', 'problem'],
             [['status' => 'failed', 'error' => 'crash: boom'], 'engine_error', 'problem'],
             [['status' => 'failed', 'error' => 'Precision is over the maximum'], 'order_failed', 'problem'],
+            // The engine names the network a coin is missing from (2026-10-11).
+            [['status' => 'skipped', 'reason' => 'not listed on MEXC Demo'], 'not_listed_demo', 'normal'],
+            [['status' => 'skipped', 'reason' => 'not listed on MEXC Production'], 'not_listed', 'problem'],
+            [['status' => 'skipped', 'reason' => 'not listed on Binance Demo'], 'not_listed_demo', 'normal'],
+            // A failed read quotes its cause: a timeout is still "no answer"…
+            [['status' => 'failed', 'error' => 'could not read positions (GET /api/v1/private/position/open_positions: timed out)'], 'no_response', 'problem'],
+            // …and anything else is a read failure, not "order refused".
+            [['status' => 'failed', 'error' => 'could not read positions (GET /fapi/v3/positionRisk: HTTP 503)'], 'positions_unreadable', 'problem'],
+            [['status' => 'failed', 'error' => 'could not read positions'], 'positions_unreadable', 'problem'],
         ];
         foreach ($cases as [$detail, $key, $severity]) {
             $c = SignalHealth::classify($detail);
