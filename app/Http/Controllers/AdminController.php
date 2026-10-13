@@ -160,7 +160,7 @@ class AdminController extends Controller
                 't.id', 'a.id as account_id', 'a.name as account_name',
                 'a.balance as account_balance', 't.symbol', 't.entry_price', 't.exit_price',
                 't.realized_pnl', 't.exchange_fee', 't.fee_source', 't.side', 't.strategy',
-                't.closed_at', 't.position_amt',
+                't.closed_at', 't.position_amt', 't.close_source',
             ]);
 
         return response()->json([
@@ -196,6 +196,8 @@ class AdminController extends Controller
                 'strategy' => $t->strategy,
                 'closed_at' => $t->closed_at,
                 'position_amt' => (float) $t->position_amt,
+                // bot | outside | null (not judged) — App\Services\Positions\CloseSource.
+                'close_source' => $t->close_source,
                 'broker' => 'Binance',
             ])->values(),
         ]);

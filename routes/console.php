@@ -53,3 +53,13 @@ Schedule::command('sanctum:prune-expired --hours=24')->dailyAt('00:50');
 // analytics endpoint saves its own scope on every read, so this only keeps the
 // rows of users who have not opened the page since their last close current.
 Schedule::command('pnl:daily-returns')->everyFifteenMinutes()->withoutOverlapping(15);
+
+// A size change saved while the main account held the coin waits for that
+// position to close (App\Services\Assets\PendingSizing). The engine's close and
+// position syncs put it live the moment they land; this catches the rest.
+Schedule::command('assets:apply-pending')->everyMinute()->withoutOverlapping(5);
+
+// "Closed by the bot" vs "closed outside the bot" on every closed trade
+// (App\Services\Positions\CloseSource). An outside close is shown on the admin
+// screens and left out of streak sizing.
+Schedule::command('positions:classify-closes')->everyFiveMinutes()->withoutOverlapping(10);

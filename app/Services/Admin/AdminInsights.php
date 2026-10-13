@@ -124,6 +124,9 @@ class AdminInsights
                     'reasons' => $outcomes['reasons'],
                 ],
                 'paused_for_payment' => $this->pausedForPayment($overdue)->count(),
+                // Trades closed on the exchange without the bot (CloseSource) —
+                // informational: the next signal treats that account as empty.
+                'outside_closes' => $this->outsideCloses(),
             ],
             'headline' => [
                 'master_balance' => $master->isEmpty() ? null
@@ -918,5 +921,43 @@ class AdminInsights
         }
 
         return Carbon::parse($value, 'UTC')->toIso8601String();
+    }
+    /**
+     * Closes made outside the bot in the last 7 days, every exchange, real
+     * money only: the count and the latest few (account, coin, when, P&L).
+     *
+     * @return array{count: int, latest: list<array<string, mixed>>}
+     */
+    private function outsideCloses(): array
+    {
+        $since = now()->subDays(7)->toDateTimeString();
+        $rows = collect();
+        foreach (ExchangeSchema::supported() as $exchange) {
+            $schema = ExchangeSchema::for($exchange);
+            $rows = $rows->concat(
+                DB::table("{$schema->pastPositions} as t")
+                    ->leftJoin("{$schema->accountsTable} as a", 't.api_key', '=', 'a.api_key')
+                    ->where('t.close_source', \App\Services\Positions\CloseSource::OUTSIDE)
+                    ->where('t.closed_at', '>=', $since)
+                    ->where('t.is_sandbox', 0)
+                    ->get(['t.id', 't.uni_id', 'a.name as account_name', 'a.demo', 't.symbol', 't.position_side', 't.realized_pnl', 't.closed_at'])
+                    ->map(fn ($r) => [
+                        'id' => $r->id,
+                        'exchange' => $exchange,
+                        'uni_id' => $r->uni_id,
+                        'account_name' => $r->account_name,
+                        'demo' => (bool) $r->demo,
+                        'symbol' => $r->symbol,
+                        'side' => $r->position_side,
+                        'realized_pnl' => $r->realized_pnl === null ? null : round((float) $r->realized_pnl, 2),
+                        'closed_at' => $this->iso($r->closed_at),
+                    ])
+            );
+        }
+
+        return [
+            'count' => $rows->count(),
+            'latest' => $rows->sortByDesc('closed_at')->take(5)->values()->all(),
+        ];
     }
 }

@@ -5,6 +5,7 @@ namespace App\Services\Assets;
 use App\Http\Controllers\AdminInsightsController;
 use App\Mail\AssetKillSwitchNotice;
 use App\Models\Asset;
+use App\Models\AssetChange;
 use App\Services\EngineCache;
 use App\Services\Exchanges\ExchangeSchema;
 use App\Services\Notifications\AccountMail;
@@ -36,7 +37,10 @@ use Throwable;
  */
 final class KillSwitch
 {
-    public function __construct(private EngineCache $engine) {}
+    public function __construct(
+        private EngineCache $engine,
+        private AssetHistory $history,
+    ) {}
 
     /**
      * After a past-positions sync: check every coin the batch touched for the
@@ -49,7 +53,7 @@ final class KillSwitch
     public function checkAfterSync(string $exchange, array $rows): array
     {
         try {
-            $masterKeys = $this->masterKeys($exchange);
+            $masterKeys = self::masterKeys($exchange);
             if ($masterKeys === []) {
                 return [];
             }
@@ -146,6 +150,10 @@ final class KillSwitch
         Log::warning('KillSwitch: asset switched off.', [
             'asset_id' => $asset->asset_id, 'ticker' => $asset->ticker, 'exchange' => $exchange, 'losses' => $losses,
         ]);
+        $this->history->record(
+            $asset, AssetChange::KILL_SWITCH, ['enabled' => ['from' => true, 'to' => false]],
+            AssetHistory::SYSTEM, $reason, 'Kill switch',
+        );
 
         self::forgetOverview();
         $this->engine->refreshAssets();
@@ -161,8 +169,11 @@ final class KillSwitch
         Cache::forget(AdminInsightsController::CACHE_PREFIX.'overview');
     }
 
-    /** The master's real-money keys on the venue (live accounts only). @return list<string> */
-    private function masterKeys(string $exchange): array
+    /**
+     * The master's real-money keys on the venue (live accounts only) — also
+     * what PendingSizing waits on. @return list<string>
+     */
+    public static function masterKeys(string $exchange): array
     {
         $schema = ExchangeSchema::for($exchange);
         $t = $schema->accountsTable;

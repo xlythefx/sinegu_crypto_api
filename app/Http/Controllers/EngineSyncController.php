@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Http\Controllers\Concerns\GuardsEngineExchange;
 use App\Models\ExchangeAccount;
 use App\Services\Assets\KillSwitch;
+use App\Services\Assets\PendingSizing;
 use App\Services\EngineCache;
 use App\Services\Exchanges\TransferLedger;
 use App\Services\Pnl\FeeRebase;
@@ -113,6 +114,10 @@ class EngineSyncController extends Controller
             });
         }
 
+        // A size change waiting for a position that this snapshot shows closed
+        // goes live now. Never throws.
+        app(PendingSizing::class)->applyDue($exchange);
+
         return response()->json([
             'success' => true,
             'deleted' => $deleted,
@@ -189,6 +194,12 @@ class EngineSyncController extends Controller
 
             return 'inserted';
         });
+
+        // An exit's write-through: the position this deleted may be the one a
+        // waiting size change was waiting for. Never throws.
+        if ($result === 'deleted') {
+            app(PendingSizing::class)->applyDue($exchange);
+        }
 
         return response()->json(['success' => true, 'result' => $result]);
     }
@@ -359,6 +370,10 @@ class EngineSyncController extends Controller
         $killed = $inserted + $updated > 0
             ? app(KillSwitch::class)->checkAfterSync($exchange, $data['rows'])
             : [];
+        // A close just landed: a size change waiting for it may go live. Never throws.
+        if ($inserted > 0) {
+            app(PendingSizing::class)->applyDue($exchange);
+        }
 
         return response()->json([
             'success' => true,

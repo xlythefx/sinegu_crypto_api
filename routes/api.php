@@ -278,12 +278,16 @@ Route::middleware(['auth:sanctum', 'account.active', 'email.verified'])->group(f
         Route::put('/strategies/{key}', [StrategyController::class, 'setEnabled']);
 
         Route::get('/assets', [AssetController::class, 'index']);
+        Route::get('/assets/history', [AssetController::class, 'history']);
         Route::post('/assets', [AssetController::class, 'store']);
         Route::put('/assets/{asset}', [AssetController::class, 'update']);
         Route::delete('/assets/{asset}', [AssetController::class, 'destroy']);
         // Streak Sizing Settings tab: write the ladder alone / which run each account is on now.
         Route::put('/assets/{asset}/streak-sizing', [AssetController::class, 'updateStreakSizing']);
         Route::get('/assets/{asset}/streaks', [AssetController::class, 'streaks']);
+        // A size change waiting for the open position to close (PendingSizing).
+        Route::post('/assets/{asset}/pending-sizing/apply', [AssetController::class, 'applyPending']);
+        Route::delete('/assets/{asset}/pending-sizing', [AssetController::class, 'cancelPending']);
 
         // Engine signal log (read-only) — what the engine did per signal, incl.
         // the balance-proportional sizing decision per account.

@@ -5,6 +5,7 @@ namespace App\Services\Assets;
 use App\Models\Asset;
 use App\Models\AssetStreakSize;
 use App\Services\Exchanges\ExchangeSchema;
+use App\Services\Positions\CloseSource;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 
@@ -22,7 +23,8 @@ use Illuminate\Validation\ValidationException;
  * - One past-position row is one trade — a stacked position closes as one row.
  * - A win is any `realized_pnl > 0` (after fees from 2026-09-11 on); zero or
  *   negative is a loss. A row whose P&L is not written yet is skipped, never
- *   guessed. Sandbox rows never count.
+ *   guessed. Sandbox rows never count, nor do closes made OUTSIDE the bot
+ *   (`close_source = outside`, owner 2026-10-14).
  * - Steps are manual sizes per kind ('loss' after N losses, 'win' after N
  *   wins). The deepest step of the run's kind at or below its length applies;
  *   none reached = base size. A win ends a losing run and vice versa, so with
@@ -142,7 +144,10 @@ final class StreakSizing
             ->selectRaw('ROW_NUMBER() OVER (PARTITION BY api_key ORDER BY closed_at DESC, id DESC) AS rn')
             ->where('symbol', $symbol)
             ->where('is_sandbox', 0)
-            ->whereNotNull('realized_pnl');
+            ->whereNotNull('realized_pnl')
+            // A close made outside the bot (the customer by hand, their own
+            // TP/SL) is not the strategy's trade, so it never moves the run.
+            ->where(fn ($q) => $q->whereNull('close_source')->orWhere('close_source', '!=', CloseSource::OUTSIDE));
         if ($apiKeys !== null) {
             $inner->whereIn('api_key', $apiKeys);
         }

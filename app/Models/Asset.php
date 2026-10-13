@@ -36,6 +36,9 @@ class Asset extends Model
             'kill_switch_armed_at' => 'datetime',
             'killed_at' => 'datetime',
             'enabled' => 'boolean',
+            // A size change waiting for the open position to close (PendingSizing).
+            'pending_sizing' => 'array',
+            'pending_since' => 'datetime',
         ];
     }
 
