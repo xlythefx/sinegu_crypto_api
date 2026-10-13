@@ -173,7 +173,10 @@ class AdminController extends Controller
                 'symbol' => $p->symbol,
                 'position_side' => $p->position_side,
                 'position_amt' => (float) $p->position_amt,
+                // `price` is the MARK (now); `entry_price` is the exchange's
+                // average over everything still open in the position.
                 'price' => round((float) ($p->mark_price ?? $p->entry_price ?? 0), 8),
+                'entry_price' => $p->entry_price === null ? null : round((float) $p->entry_price, 8),
                 'unrealized_pnl' => round((float) ($p->unrealized_profit ?? 0), 2),
                 'broker' => 'Binance',
             ])->values(),

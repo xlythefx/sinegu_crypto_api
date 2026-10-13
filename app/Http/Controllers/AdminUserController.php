@@ -427,6 +427,7 @@ class AdminUserController extends Controller
                 'position_side' => $p->position_side,
                 'position_amt' => (float) $p->position_amt,
                 'price' => round((float) ($p->mark_price ?? $p->entry_price ?? 0), 8),
+                'entry_price' => $p->entry_price === null ? null : round((float) $p->entry_price, 8),
                 'unrealized_pnl' => round((float) ($p->unrealized_profit ?? 0), 2),
                 'broker' => $broker,
             ]));
