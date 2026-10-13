@@ -45,6 +45,10 @@ final class SignalHealth
         'other_skip' => ['Skipped for another reason', self::PROBLEM, null, null],
         'nothing_to_close' => ['Nothing open to close', self::NORMAL, null, null],
         'maxed' => ['Stack already full', self::NORMAL, null, null],
+        // The MAIN account was already full on the coin, so an account with
+        // room of its own (one that closed by hand) was held back — the
+        // engine's rule since 2026-10-14, working as intended.
+        'main_full' => ['Main account already full', self::NORMAL, null, null],
         'deposit_low' => ['Deposit below the minimum', self::NORMAL, null, null],
         'untradeable' => ['Account cannot trade on this venue', self::NORMAL, null, null],
         // A demo network lists fewer coins than production (the MEXC testnet
@@ -77,6 +81,7 @@ final class SignalHealth
                 $text === 'api key blocked' => 'key_blocked',
                 str_starts_with($text, 'no ') && str_contains($text, 'to close') => 'nothing_to_close',
                 $text === 'maxed sizing' => 'maxed',
+                $text === 'main account at max' => 'main_full',
                 $text === 'deposit below minimum' => 'deposit_low',
                 $text === 'deposit unknown' => 'deposit_unknown',
                 $text === 'size too small' => 'size_too_small',

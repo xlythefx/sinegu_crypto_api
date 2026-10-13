@@ -57,6 +57,7 @@ class SignalHealthTest extends EngineTestCase
         $cases = [
             [['status' => 'skipped', 'reason' => 'no long position to close'], 'nothing_to_close', 'normal'],
             [['status' => 'skipped', 'reason' => 'maxed sizing'], 'maxed', 'normal'],
+            [['status' => 'skipped', 'reason' => 'main account at max'], 'main_full', 'normal'],
             [['status' => 'skipped', 'reason' => 'deposit below minimum'], 'deposit_low', 'normal'],
             [['status' => 'skipped', 'reason' => 'api key blocked'], 'key_blocked', 'problem'],
             [['status' => 'skipped', 'reason' => 'deposit unknown'], 'deposit_unknown', 'problem'],
