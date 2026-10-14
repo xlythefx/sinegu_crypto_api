@@ -8,6 +8,7 @@ use App\Models\ExchangeAccount;
 use App\Models\OpenStrategy;
 use App\Models\TradeLog;
 use App\Services\Assets\StreakSizing;
+use App\Services\Positions\EntryStreak;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -237,11 +238,21 @@ class EngineController extends Controller
 
         return response()->json([
             'success' => true,
-            'open_strategies' => $query->get(['api_key', 'symbol', 'position_side', 'strategy'])->values(),
+            'open_strategies' => $query
+                ->get(['api_key', 'symbol', 'position_side', 'strategy', ...EntryStreak::COLUMNS])
+                ->values(),
         ]);
     }
 
-    /** POST /api/engine/{exchange}/open-strategies — remember an entry's strategy tag. */
+    /**
+     * POST /api/engine/{exchange}/open-strategies — remember an entry's tag:
+     * its strategy label and, on a coin with a streak ladder, the streak step
+     * that sized it (EntryStreak). Both are copied onto the closed trade.
+     *
+     * Every entry of a stack shares one step, so the streak columns are always
+     * the latest entry's (absent = normal size). The label is kept when an
+     * entry arrives without one — an older entry's label is still the stack's.
+     */
     public function storeOpenStrategy(string $exchange, Request $request): JsonResponse
     {
         if ($guard = $this->guardExchange($exchange)) {
@@ -252,18 +263,30 @@ class EngineController extends Controller
             'api_key' => ['required', 'string', 'max:128'],
             'symbol' => ['required', 'string', 'max:32'],
             'position_side' => ['required', 'string', 'max:8'],
-            'strategy' => ['required', 'string', 'max:100'],
+            'strategy' => ['nullable', 'string', 'max:100'],
+            ...EntryStreak::rules(),
         ]);
 
-        OpenStrategy::updateOrCreate(
-            [
-                'exchange' => $exchange,
-                'api_key' => $data['api_key'],
-                'symbol' => $data['symbol'],
-                'position_side' => $data['position_side'],
-            ],
-            ['strategy' => $data['strategy']]
-        );
+        $key = [
+            'exchange' => $exchange,
+            'api_key' => $data['api_key'],
+            'symbol' => $data['symbol'],
+            'position_side' => $data['position_side'],
+        ];
+        $values = EntryStreak::fromPayload($data);
+        if (! empty($data['strategy'])) {
+            $values['strategy'] = $data['strategy'];
+        }
+
+        // Neither a label nor a streak: nothing to start a tag for. An
+        // existing tag is still updated, which clears a streak left by a
+        // position closed outside the bot (never consumed).
+        if (! isset($values['strategy']) && $values['streak_kind'] === null
+            && ! OpenStrategy::where($key)->exists()) {
+            return response()->json(['success' => true]);
+        }
+
+        OpenStrategy::updateOrCreate($key, $values);
 
         return response()->json(['success' => true]);
     }

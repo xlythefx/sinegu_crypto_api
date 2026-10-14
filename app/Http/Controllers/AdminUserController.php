@@ -11,6 +11,7 @@ use App\Services\Discord\DiscordRoleSync;
 use App\Services\EngineCache;
 use App\Services\InvoiceService;
 use App\Services\Exchanges\ExchangeSchema;
+use App\Services\Positions\EntryStreak;
 use App\Services\UserStatsService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -415,6 +416,7 @@ class AdminUserController extends Controller
                     'a.balance as account_balance', 't.symbol', 't.entry_price', 't.exit_price',
                     't.realized_pnl', 't.exchange_fee', 't.fee_source', 't.position_side', 't.side', 't.strategy',
                     't.closed_at', 't.position_amt', 't.close_source',
+                    't.streak_kind', 't.streak_run', 't.streak_step', 't.streak_size', 't.streak_base_size',
                 ]);
 
             $positions = $positions->concat($open->map(fn ($p) => [
@@ -455,6 +457,8 @@ class AdminUserController extends Controller
                 'position_amt' => (float) $t->position_amt,
                 // bot | outside | null (not judged) — App\Services\Positions\CloseSource.
                 'close_source' => $t->close_source,
+                // Streak sizing at entry, every figure (null = normal size).
+                'streak' => EntryStreak::forStaff($t),
                 'broker' => $broker,
             ]));
         }

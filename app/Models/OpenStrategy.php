@@ -18,5 +18,11 @@ class OpenStrategy extends Model
         'symbol',
         'position_side',
         'strategy',
+        // Streak sizing at entry — App\Services\Positions\EntryStreak.
+        'streak_kind',
+        'streak_run',
+        'streak_step',
+        'streak_size',
+        'streak_base_size',
     ];
 }

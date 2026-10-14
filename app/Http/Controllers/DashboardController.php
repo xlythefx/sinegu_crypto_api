@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Services\Positions\EntryStreak;
 use App\Services\UserStatsService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -196,8 +197,18 @@ class DashboardController extends Controller
                 'id', 'api_key', 'symbol', 'position_side', 'position_amt',
                 'entry_price', 'exit_price', 'realized_pnl', 'exchange_fee', 'fee_source',
                 'side', 'order_id', 'closed_at', 'strategy',
+                ...EntryStreak::COLUMNS,
             ],
-        )->sortByDesc('closed_at')->values();
+        )->map(function (object $row) {
+            // A customer reads whether a streak set the size and which way —
+            // never the sizes themselves (base_size and the ladder stay staff-only).
+            $row->streak = EntryStreak::forCustomer($row);
+            foreach (EntryStreak::COLUMNS as $col) {
+                unset($row->$col);
+            }
+
+            return $row;
+        })->sortByDesc('closed_at')->values();
 
         return response()->json(['success' => true, 'exchange' => $exchange, 'positions' => $rows]);
     }

@@ -10,6 +10,7 @@ use App\Services\EngineCache;
 use App\Services\Exchanges\TransferLedger;
 use App\Services\Pnl\FeeRebase;
 use App\Services\Pnl\TradingFee;
+use App\Services\Positions\EntryStreak;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
@@ -285,6 +286,9 @@ class EngineSyncController extends Controller
             'rows.*.order_id' => ['required', 'integer'],
             'rows.*.closed_at' => ['required', 'date'],
             'rows.*.strategy' => ['nullable', 'string', 'max:100'],
+            // Streak sizing at entry, recovered from the entry's tag by the
+            // webhook close path only — the pollers never know it.
+            ...EntryStreak::rules('rows.*.'),
         ]);
 
         $table = $this->schema($exchange)->pastPositions;
@@ -333,6 +337,7 @@ class EngineSyncController extends Controller
                     'order_id' => $row['order_id'],
                     'closed_at' => $row['closed_at'],
                     'strategy' => $row['strategy'] ?? null,
+                    ...EntryStreak::fromPayload($row),
                     'created_at' => now(),
                 ]);
                 $inserted++;
@@ -346,6 +351,11 @@ class EngineSyncController extends Controller
                 if ($existing->$col === null && isset($row[$col])) {
                     $fill[$col] = $row[$col];
                 }
+            }
+            // The streak lands as one unit — a row the poller wrote first
+            // (none of it) takes all five, one that has a kind keeps it.
+            if ($existing->streak_kind === null && ! empty($row['streak_kind'])) {
+                $fill += EntryStreak::fromPayload($row);
             }
 
             // The P&L and the fee taken out of it are one fact, so they are

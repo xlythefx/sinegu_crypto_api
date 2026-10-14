@@ -10,6 +10,7 @@ use App\Services\EngineCache;
 use App\Services\Exchanges\ExchangeSchema;
 use App\Services\Notifications\AccountMail;
 use App\Services\Pnl\TradingFee;
+use App\Services\Positions\EntryStreak;
 use App\Services\UserStatsService;
 use Illuminate\Database\QueryException;
 use Illuminate\Http\JsonResponse;
@@ -161,6 +162,7 @@ class AdminController extends Controller
                 'a.balance as account_balance', 't.symbol', 't.entry_price', 't.exit_price',
                 't.realized_pnl', 't.exchange_fee', 't.fee_source', 't.position_side', 't.side', 't.strategy',
                 't.closed_at', 't.position_amt', 't.close_source',
+                't.streak_kind', 't.streak_run', 't.streak_step', 't.streak_size', 't.streak_base_size',
             ]);
 
         return response()->json([
@@ -204,6 +206,8 @@ class AdminController extends Controller
                 'position_amt' => (float) $t->position_amt,
                 // bot | outside | null (not judged) — App\Services\Positions\CloseSource.
                 'close_source' => $t->close_source,
+                // Streak sizing at entry, every figure (null = normal size).
+                'streak' => EntryStreak::forStaff($t),
                 'broker' => 'Binance',
             ])->values(),
         ]);
