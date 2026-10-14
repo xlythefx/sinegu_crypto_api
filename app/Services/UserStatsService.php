@@ -591,6 +591,10 @@ class UserStatsService
             // means "nothing connected on that exchange", which the card shows
             // instead of a $0.00 equity that reads as a wiped account.
             'accounts' => $accounts->count(),
+            // How many of those trade on a testnet / demo venue. Equal to
+            // `accounts` = the equity card is play money and says so; fewer
+            // but not zero = real money pooled with a demo balance.
+            'demo_accounts' => $accounts->filter(fn ($a) => (bool) ($a->demo ?? false))->count(),
             'equity' => round($equity, 2),
             'balance' => round($balance, 2),
             'realized_pnl' => round($realized, 2),
