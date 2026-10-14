@@ -11,6 +11,7 @@ use App\Http\Controllers\AdminManualTradeController;
 use App\Http\Controllers\AdminOpenPositionsController;
 use App\Http\Controllers\EngineInvoiceController;
 use App\Http\Controllers\AdminReferralController;
+use App\Http\Controllers\AdminSignupInfoController;
 use App\Http\Controllers\AdminTodoController;
 use App\Http\Controllers\AdminTradeLogController;
 use App\Http\Controllers\AdminTronTransferController;
@@ -19,6 +20,7 @@ use App\Http\Controllers\AnalyticsController;
 use App\Http\Controllers\AssetController;
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\CoinsbuyWebhookController;
+use App\Http\Controllers\ContactHandleController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\DiscordAuthController;
 use App\Http\Controllers\EmailVerificationController;
@@ -188,6 +190,9 @@ Route::middleware(['auth:sanctum', 'account.active', 'email.verified'])->group(f
         Route::post('/discord/link', [DiscordAuthController::class, 'link'])
             ->middleware('throttle:10,1');
         Route::delete('/discord', [DiscordAuthController::class, 'unlink']);
+        // Settings → the optional Telegram / Discord usernames given at sign-up.
+        Route::get('/contacts', [ContactHandleController::class, 'show']);
+        Route::put('/contacts', [ContactHandleController::class, 'update']);
     });
 
     Route::prefix('referrals')->group(function () {
@@ -228,6 +233,9 @@ Route::middleware(['auth:sanctum', 'account.active', 'email.verified'])->group(f
         Route::get('/users/{uniId}/summary', [AdminUserController::class, 'summary']);
         Route::get('/users/{uniId}/daily-pnl', [AdminUserController::class, 'dailyPnl']);
         Route::get('/users/{uniId}/analytics', [AnalyticsController::class, 'forUser']);
+        // Sign-up details: sources, handles, register + login fingerprints.
+        // Every staff role, IP included (owner, 2026-10-14).
+        Route::get('/users/{uniId}/signup-info', [AdminSignupInfoController::class, 'show']);
 
         // The Strategies list AND the strategy detail page both read only this.
         Route::get('/strategies', [StrategyController::class, 'index']);

@@ -3,8 +3,11 @@
 namespace App\Http\Controllers;
 
 use App\Models\UserCredential;
+use App\Services\Auth\AccessLog;
 use App\Services\Auth\EmailVerification;
 use App\Services\ReferralService;
+use App\Services\Signup\ContactHandles;
+use App\Services\Signup\SignupSources;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -15,14 +18,27 @@ class AuthController extends Controller
     public function __construct(
         private ReferralService $referrals,
         private EmailVerification $verification,
+        private SignupSources $sources,
+        private ContactHandles $contacts,
+        private AccessLog $access,
     ) {
     }
 
     /**
      * POST /api/auth/register
+     *
+     * Sign-up details ride along, all optional: `heard_from` (SignupSources
+     * slugs) + `heard_from_other`, the `telegram` / `discord` handles, and the
+     * `client` / `consent` pair AccessLog reads. The first two are written in
+     * the registration transaction; the access event after it commits. Client
+     * info is never validated here — AccessLog drops what it cannot use, it
+     * does not refuse a sign-up over it.
      */
     public function register(Request $request): JsonResponse
     {
+        // `@Name` and t.me links become the bare username before the rules see them.
+        ContactHandles::prepare($request);
+
         $validated = $request->validate([
             'name' => ['required', 'string', 'max:255'],
             'email' => ['required', 'email', 'max:255', 'unique:user_credentials,email'],
@@ -36,8 +52,11 @@ class AuthController extends Controller
             // which text was agreed to, not merely that a box was ticked.
             'terms' => ['accepted'],
             'terms_version' => ['nullable', 'string', 'max:32'],
+            ...SignupSources::rules(),
+            ...ContactHandles::rules(),
         ], [
             'terms.accepted' => 'You must accept the Terms and Conditions to create an account.',
+            ...ContactHandles::messages(),
         ]);
 
         $user = DB::transaction(function () use ($validated) {
@@ -57,8 +76,13 @@ class AuthController extends Controller
 
             $this->referrals->bind($validated['referral_code'] ?? null, $user->uni_id);
 
+            $this->sources->store($user->uni_id, $validated['heard_from'] ?? [], $validated['heard_from_other'] ?? null);
+            $this->contacts->save($user->uni_id, array_intersect_key($validated, array_flip(ContactHandles::FIELDS)));
+
             return $user;
         });
+
+        $this->access->record($user, $request, AccessLog::EVENT_REGISTER, AccessLog::METHOD_PASSWORD);
 
         // Mail the verification code — after COMMIT, and best-effort: a mail
         // failure must not undo a registration ("Resend" is the way on). The
@@ -105,6 +129,11 @@ class AuthController extends Controller
      * beside sending them round a password form that can never work.
      * ACCOUNT_SUSPENDED is only reached after a correct password, so it tells
      * a stranger nothing.
+     *
+     * A successful login writes an access event (AccessLog); the body may
+     * carry the same `client` / `consent` pair register takes. They are
+     * deliberately NOT in the rules below — a malformed one is dropped by
+     * AccessLog, never a 422 on a correct password.
      */
     public function login(Request $request): JsonResponse
     {
@@ -149,6 +178,8 @@ class AuthController extends Controller
         $user->forceFill(['last_activity' => now()])->save();
 
         $token = $user->createToken('spa')->plainTextToken;
+
+        $this->access->record($user, $request, AccessLog::EVENT_LOGIN, AccessLog::METHOD_PASSWORD);
 
         return response()->json([
             'success' => true,

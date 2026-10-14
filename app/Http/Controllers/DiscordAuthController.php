@@ -3,11 +3,14 @@
 namespace App\Http\Controllers;
 
 use App\Models\UserCredential;
+use App\Services\Auth\AccessLog;
 use App\Services\Auth\EmailVerification;
 use App\Services\Discord\DiscordGateway;
 use App\Services\Discord\DiscordRoleSync;
 use App\Services\Notifications\AccountMail;
 use App\Services\ReferralService;
+use App\Services\Signup\ContactHandles;
+use App\Services\Signup\SignupSources;
 use Illuminate\Database\QueryException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -58,6 +61,9 @@ class DiscordAuthController extends Controller
         private ReferralService $referrals,
         private AccountMail $mail,
         private EmailVerification $verification,
+        private SignupSources $sources,
+        private ContactHandles $contacts,
+        private AccessLog $access,
     ) {}
 
     /**
@@ -112,6 +118,8 @@ class DiscordAuthController extends Controller
                 'discord_username' => $profile['username'],
                 'last_activity' => now(),
             ])->save();
+
+            $this->access->record($user, $request, AccessLog::EVENT_LOGIN, AccessLog::METHOD_DISCORD);
 
             return $this->loggedIn($user, $profile['access_token'], 'Login successful');
         }
@@ -214,27 +222,37 @@ class DiscordAuthController extends Controller
         $this->attach($user, $parked['profile']);
         $user->forceFill(['last_activity' => now()])->save();
 
+        $this->access->record($user, $request, AccessLog::EVENT_LOGIN, AccessLog::METHOD_DISCORD);
+
         return $this->loggedIn($user, $parked['profile']['access_token'], 'Discord connected');
     }
 
     /**
      * POST /api/auth/discord/complete
-     *   { signup_token, terms, terms_version?, referral_code?, name? }
+     *   { signup_token, terms, terms_version?, referral_code?, name?,
+     *     heard_from?, heard_from_other?, telegram?, client?, consent? }
      *
      * Mirrors AuthController::register for a user who arrived through Discord:
      * the Terms are mandatory, invalid referral codes are silently ignored,
-     * and the row starts in the approval queue.
+     * and the row starts in the approval queue. The same sign-up details ride
+     * along, minus the Discord handle — this sign-up already knows the linked
+     * Discord account, so a typed one is ignored.
      */
     public function complete(Request $request): JsonResponse
     {
+        ContactHandles::prepare($request, [ContactHandles::TELEGRAM]);
+
         $validated = $request->validate([
             'signup_token' => ['required', 'string', 'max:128'],
             'terms' => ['accepted'],
             'terms_version' => ['nullable', 'string', 'max:32'],
             'referral_code' => ['nullable', 'string', 'max:50'],
             'name' => ['nullable', 'string', 'max:255'],
+            ...SignupSources::rules(),
+            ...ContactHandles::rules([ContactHandles::TELEGRAM]),
         ], [
             'terms.accepted' => 'You must accept the Terms and Conditions to create an account.',
+            ...ContactHandles::messages(),
         ]);
 
         $key = 'discord-signup:'.$validated['signup_token'];
@@ -283,12 +301,17 @@ class DiscordAuthController extends Controller
 
                 $this->referrals->bind($validated['referral_code'] ?? null, $user->uni_id);
 
+                $this->sources->store($user->uni_id, $validated['heard_from'] ?? [], $validated['heard_from_other'] ?? null);
+                $this->contacts->save($user->uni_id, array_intersect_key($validated, [ContactHandles::TELEGRAM => true]));
+
                 return $user;
             });
         } catch (QueryException) {
             // The unique index on discord_id (or email) won the race.
             return $this->discordTaken();
         }
+
+        $this->access->record($user, $request, AccessLog::EVENT_REGISTER, AccessLog::METHOD_DISCORD);
 
         // Same queue, same notice as register() — a Discord signup lands in the
         // approval queue exactly like a password one, so the desk hears about
