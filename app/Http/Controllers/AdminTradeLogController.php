@@ -4,8 +4,12 @@ namespace App\Http\Controllers;
 
 use App\Models\TradeLog;
 use App\Services\Admin\SignalHealth;
+use App\Services\Exchanges\ExchangeSchema;
+use App\Services\Positions\CloseSource;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Carbon;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 
 /**
@@ -22,19 +26,33 @@ class AdminTradeLogController extends Controller
     /** Hard ceiling so a bad `limit` can never table-scan the whole log. */
     private const MAX_LIMIT = 200;
 
+    /** A retry belongs to the signal it re-runs when it lands this soon after it. */
+    private const RETRY_FOLD_MINUTES = 60;
+
+    /** How far an exit's closed-trade row may sit from the exit signal (retries included). */
+    private const CLOSE_MATCH_MINUTES = 15;
+
     /**
      * GET /api/admin/trade-logs — filtered, paginated signal log.
      *
-     * Signal filters (exchange, action, ticker, category, strategy, result,
-     * from/to) run in SQL. ACCOUNT filters look inside each signal's fan-out
-     * and run in PHP over at most SignalHealth::SCAN_LIMIT signals — the log is
-     * a few signals a day, and `details` is JSON:
-     * - outcome = filled | skipped | failed | problem (any account outcome
-     *   SignalHealth calls a problem);
+     * One timeline of what happened to positions, newest first:
+     * - `kind: signal` — one engine run of a TradingView signal (or an admin's
+     *   close, which goes through the same exit path). Its RETRIES are folded
+     *   under it (`retries`), never listed as rows of their own: one MEXC exit
+     *   retried every minute used to fill the page with five copies.
+     * - `kind: outside_close` — a position closed on the exchange WITHOUT the
+     *   bot (CloseSource: the customer by hand, their own TP/SL, a liquidation).
+     *   It is not a signal, so it never counts in the signal summary.
+     * Exit rows carry each account's closed trade (`close`: entry → exit, P&L
+     * after fees), matched from {x}_pastpositions.
+     *
+     * Signal filters (exchange, side, type, action, ticker, category, strategy,
+     * result, from/to) run in SQL. ACCOUNT filters look inside each signal's
+     * fan-out and run in PHP over at most SignalHealth::SCAN_LIMIT signals:
+     * - outcome = filled | skipped | failed | problem;
      * - reason  = a SignalHealth reason key;
      * - account = text matched against the account name and its owner's name.
-     * A signal is listed when at least one account matches; every account row
-     * then carries `match` so the page can show just those.
+     * `source` = all (default) | signals | outside.
      */
     public function index(Request $request): JsonResponse
     {
@@ -45,52 +63,59 @@ class AdminTradeLogController extends Controller
         $outcome = (string) $request->query('outcome', '');
         $reason = (string) $request->query('reason', '');
         $account = trim((string) $request->query('account', ''));
+        $source = (string) $request->query('source', 'all');
         $accountFilter = $outcome !== '' || $reason !== '' || $account !== '';
 
-        // The window every reason count and account filter reads.
+        // The window every reason count, fold and account filter reads.
         $window = (clone $query)->orderByDesc('ts')->orderByDesc('id')->limit(SignalHealth::SCAN_LIMIT)->get();
         $names = $this->userNames($window);
         $reasonCounts = $this->reasonCounts($window);
+        [$signals, $retries] = $this->foldRetries($window);
 
-        if ($accountFilter) {
-            $matcher = fn (array $d, TradeLog $log) => $this->detailMatches($d, $log, $outcome, $reason, $account, $names);
-            $matched = $window->filter(function (TradeLog $log) use ($matcher) {
-                foreach ((array) $log->details as $d) {
-                    if (is_array($d) && $matcher($d, $log)) {
-                        return true;
+        $matcher = $accountFilter
+            ? fn (array $d, TradeLog $log) => $this->detailMatches($d, $log, $outcome, $reason, $account, $names)
+            : null;
+        if ($source === 'outside') {
+            $signals = collect();
+        } elseif ($matcher) {
+            $signals = $signals->filter(function (TradeLog $log) use ($matcher, $retries) {
+                foreach ([$log, ...($retries[$log->id] ?? [])] as $run) {
+                    foreach ((array) $run->details as $d) {
+                        if (is_array($d) && $matcher($d, $run)) {
+                            return true;
+                        }
                     }
                 }
 
                 return false;
             })->values();
-            $page = $matched->slice($offset, $limit)->values();
-            $summary = [
-                'signals' => $matched->count(),
-                'clean_signals' => $matched->where('success', true)->count(),
-                'filled' => (int) $matched->sum('filled'),
-                'failed' => (int) $matched->sum('failed'),
-                'skipped' => (int) $matched->sum('skipped'),
-            ];
-            $logs = $page->map(fn (TradeLog $log) => $this->mapLog($log, $names, $matcher));
-        } else {
-            // Summary reflects the filters but NOT the page window.
-            $row = (clone $query)
-                ->selectRaw('COUNT(*) AS signals')
-                ->selectRaw('COALESCE(SUM(filled), 0) AS filled')
-                ->selectRaw('COALESCE(SUM(failed), 0) AS failed')
-                ->selectRaw('COALESCE(SUM(skipped), 0) AS skipped')
-                ->selectRaw('COALESCE(SUM(success = 1), 0) AS clean_signals')
-                ->first();
-            $summary = [
-                'signals' => (int) ($row->signals ?? 0),
-                'clean_signals' => (int) ($row->clean_signals ?? 0),
-                'filled' => (int) ($row->filled ?? 0),
-                'failed' => (int) ($row->failed ?? 0),
-                'skipped' => (int) ($row->skipped ?? 0),
-            ];
-            $page = (clone $query)->orderByDesc('ts')->orderByDesc('id')->offset($offset)->limit($limit)->get();
-            $logs = $page->map(fn (TradeLog $log) => $this->mapLog($log, $this->userNames($page) + $names));
         }
+
+        $outside = $this->wantsOutsideCloses($request, $source, $outcome, $reason)
+            ? $this->outsideCloses($request, $account)
+            : collect();
+
+        $items = $signals->map(fn (TradeLog $log) => ['ts' => $log->ts?->getTimestamp() ?? 0, 'id' => $log->id, 'log' => $log])
+            ->concat($outside->map(fn (array $row) => ['ts' => $row['_ts'], 'id' => 0, 'outside' => $row]))
+            ->sort(fn ($a, $b) => [$b['ts'], $b['id']] <=> [$a['ts'], $a['id']])
+            ->values();
+        $page = $items->slice($offset, $limit)->values();
+
+        $pageLogs = $page->pluck('log')->filter();
+        $pageRuns = $pageLogs->concat($pageLogs->flatMap(fn (TradeLog $l) => $retries[$l->id] ?? []));
+        $closes = $this->closesFor($pageRuns);
+        $names += $this->userNames($pageRuns);
+
+        $logs = $page->map(fn (array $item) => isset($item['log'])
+            ? $this->mapLog($item['log'], $names, $matcher, $retries[$item['log']->id] ?? [], $closes)
+            : $this->mapOutside($item['outside']));
+
+        // Counted from the folded rows the list shows whenever the window holds
+        // every matching signal; past the scan limit, SQL over the whole table.
+        $complete = $window->count() < SignalHealth::SCAN_LIMIT;
+        $summary = $this->summary($request, $signals, $retries, $complete || $accountFilter || $source === 'outside') + [
+            'outside_closes' => $outside->count(),
+        ];
 
         $problemDetails = 0;
         $normalDetails = 0;
@@ -109,16 +134,263 @@ class AdminTradeLogController extends Controller
             'pagination' => [
                 'limit' => $limit,
                 'offset' => $offset,
-                'total' => $summary['signals'],
+                'total' => $items->count(),
             ],
             // Drives the frontend filter chips without a second round trip.
             'filters' => [
                 'tickers' => TradeLog::distinct()->orderBy('ticker')->pluck('ticker'),
+                'exchanges' => TradeLog::distinct()->orderBy('exchange')->pluck('exchange'),
                 'strategies' => TradeLog::whereNotNull('strategy')
                     ->distinct()->orderBy('strategy')->pluck('strategy'),
                 'reasons' => array_values($reasonCounts),
             ],
         ]);
+    }
+
+    /**
+     * The signal summary. Retries are folded, so `signals` counts signals and
+     * `skipped`/`failed` count their first run; `filled` adds the fills a
+     * retry placed — each of those is an order. Without account filters it
+     * runs in SQL over the whole filtered table, not just the scanned window.
+     *
+     * @param  array<int, list<TradeLog>>  $retries
+     * @return array{signals: int, clean_signals: int, filled: int, failed: int, skipped: int}
+     */
+    private function summary(Request $request, Collection $signals, array $retries, bool $fromWindow): array
+    {
+        if ($fromWindow) {
+            return [
+                'signals' => $signals->count(),
+                'clean_signals' => $signals->where('success', true)->count(),
+                'filled' => (int) $signals->sum(fn (TradeLog $l) => $l->filled + collect($retries[$l->id] ?? [])->sum('filled')),
+                'failed' => (int) $signals->sum('failed'),
+                'skipped' => (int) $signals->sum('skipped'),
+            ];
+        }
+        $firstRuns = $this->baseQuery($request)->where(fn ($q) => $q->whereNull('category')->orWhere('category', '!=', 'retry'));
+        $row = (clone $firstRuns)
+            ->selectRaw('COUNT(*) AS signals')
+            ->selectRaw('COALESCE(SUM(failed), 0) AS failed')
+            ->selectRaw('COALESCE(SUM(skipped), 0) AS skipped')
+            ->selectRaw('COALESCE(SUM(success = 1), 0) AS clean_signals')
+            ->first();
+
+        return [
+            'signals' => (int) ($row->signals ?? 0),
+            'clean_signals' => (int) ($row->clean_signals ?? 0),
+            'filled' => (int) $this->baseQuery($request)->sum('filled'),
+            'failed' => (int) ($row->failed ?? 0),
+            'skipped' => (int) ($row->skipped ?? 0),
+        ];
+    }
+
+    /**
+     * Split a window into signals and their retries. A retry row (category
+     * `retry`) is folded under the latest earlier signal with the same
+     * exchange, action and ticker within RETRY_FOLD_MINUTES; one with no such
+     * signal in the window stays a row of its own.
+     *
+     * @return array{0: Collection<int, TradeLog>, 1: array<int, list<TradeLog>>}
+     */
+    private function foldRetries(Collection $window): array
+    {
+        $signals = [];
+        $retries = [];
+        $last = [];
+        foreach ($window->sortBy(fn (TradeLog $l) => [$l->ts?->getTimestamp() ?? 0, $l->id]) as $log) {
+            $key = "{$log->exchange}|{$log->action}|{$log->ticker}";
+            $parent = $last[$key] ?? null;
+            if ($log->category === 'retry' && $parent
+                && ($log->ts?->getTimestamp() ?? 0) - ($parent->ts?->getTimestamp() ?? 0) <= self::RETRY_FOLD_MINUTES * 60) {
+                $retries[$parent->id][] = $log;
+
+                continue;
+            }
+            $signals[] = $log;
+            $last[$key] = $log;
+        }
+
+        return [
+            collect(array_reverse($signals)),
+            $retries,
+        ];
+    }
+
+    /** Closes made outside the bot can only answer exit-side, account-level questions. */
+    private function wantsOutsideCloses(Request $request, string $source, string $outcome, string $reason): bool
+    {
+        if ($source === 'signals' || $outcome !== '' || $reason !== '') {
+            return false;
+        }
+        if ($request->query('type') === 'entry' || $request->query('category') || $request->query('strategy') || $request->query('result')) {
+            return false;
+        }
+        $action = strtoupper((string) $request->query('action', ''));
+
+        return $action === '' || str_starts_with($action, 'EXIT_');
+    }
+
+    /**
+     * Closes made outside the bot, every exchange (or the filtered one), real
+     * rows only (no sandbox), under the same exchange / side / ticker / date /
+     * account filters as the signals. Newest SignalHealth::SCAN_LIMIT.
+     *
+     * @return Collection<int, array<string, mixed>>
+     */
+    private function outsideCloses(Request $request, string $account): Collection
+    {
+        $exchanges = ExchangeSchema::supported();
+        if ($ex = $request->query('exchange')) {
+            $exchanges = in_array($ex, $exchanges, true) ? [$ex] : [];
+        }
+        $side = $this->sideFilter($request);
+        $needle = strtolower($account);
+
+        $rows = collect();
+        foreach ($exchanges as $exchange) {
+            $schema = ExchangeSchema::for($exchange);
+            $q = DB::table("{$schema->pastPositions} as t")
+                ->leftJoin("{$schema->accountsTable} as a", 't.api_key', '=', 'a.api_key')
+                ->leftJoin('user_credentials as u', 'u.uni_id', '=', 't.uni_id')
+                ->where('t.close_source', CloseSource::OUTSIDE)
+                ->where('t.is_sandbox', 0);
+            if ($ticker = $request->query('ticker')) {
+                $q->where('t.symbol', strtoupper($ticker));
+            }
+            if ($side !== null) {
+                $q->where('t.position_side', $side);
+            }
+            if ($from = $request->query('from')) {
+                $q->where('t.closed_at', '>=', $from.' 00:00:00');
+            }
+            if ($to = $request->query('to')) {
+                $q->where('t.closed_at', '<=', $to.' 23:59:59');
+            }
+            if ($needle !== '') {
+                $q->where(fn ($w) => $w->whereRaw('LOWER(a.name) LIKE ?', ["%{$needle}%"])
+                    ->orWhereRaw('LOWER(u.name) LIKE ?', ["%{$needle}%"]));
+            }
+            $rows = $rows->concat(
+                $q->orderByDesc('t.closed_at')->limit(SignalHealth::SCAN_LIMIT)->get([
+                    't.id', 't.uni_id', 't.symbol', 't.position_side', 't.position_amt', 't.entry_price',
+                    't.exit_price', 't.realized_pnl', 't.exchange_fee', 't.closed_at',
+                    'a.name as account_name', 'a.demo', 'u.name as user_name',
+                ])->map(fn ($r) => ['exchange' => $exchange, '_ts' => Carbon::parse($r->closed_at, 'UTC')->getTimestamp(), 'row' => $r])
+            );
+        }
+
+        return $rows;
+    }
+
+    /** `side=long|short` → the position side it names, or null. */
+    private function sideFilter(Request $request): ?string
+    {
+        return match (strtolower((string) $request->query('side', ''))) {
+            'long' => 'LONG',
+            'short' => 'SHORT',
+            default => null,
+        };
+    }
+
+    /**
+     * The closed-trade row behind each account an exit filled: same exchange,
+     * owner and coin, closed within CLOSE_MATCH_MINUTES of the run, and not a
+     * close made outside the bot. Keyed "{log id}|{uni_id}".
+     *
+     * @return array<string, array<string, mixed>>
+     */
+    private function closesFor(Collection $runs): array
+    {
+        $exits = $runs->filter(fn (TradeLog $l) => str_starts_with((string) $l->action, 'EXIT_'));
+        $out = [];
+        foreach ($exits->groupBy('exchange') as $exchange => $logs) {
+            if (! ExchangeSchema::isSupported((string) $exchange)) {
+                continue;
+            }
+            $uniIds = [];
+            foreach ($logs as $log) {
+                foreach ((array) $log->details as $d) {
+                    if (is_array($d) && ($d['status'] ?? null) === 'filled' && ! empty($d['uni_id'])) {
+                        $uniIds[$d['uni_id']] = true;
+                    }
+                }
+            }
+            if ($uniIds === []) {
+                continue;
+            }
+            $times = $logs->map(fn (TradeLog $l) => $l->ts?->getTimestamp() ?? 0);
+            $window = self::CLOSE_MATCH_MINUTES * 60;
+            $rows = DB::table(ExchangeSchema::for((string) $exchange)->pastPositions)
+                ->whereIn('uni_id', array_keys($uniIds))
+                ->whereIn('symbol', $logs->pluck('ticker')->unique()->values())
+                ->where('is_sandbox', 0)
+                ->where(fn ($q) => $q->whereNull('close_source')->orWhere('close_source', '!=', CloseSource::OUTSIDE))
+                ->whereBetween('closed_at', [
+                    Carbon::createFromTimestamp($times->min() - $window, 'UTC')->toDateTimeString(),
+                    Carbon::createFromTimestamp($times->max() + $window, 'UTC')->toDateTimeString(),
+                ])
+                ->get(['uni_id', 'symbol', 'position_amt', 'entry_price', 'exit_price', 'realized_pnl', 'exchange_fee', 'closed_at']);
+
+            foreach ($logs as $log) {
+                $at = $log->ts?->getTimestamp() ?? 0;
+                foreach ((array) $log->details as $d) {
+                    if (! is_array($d) || ($d['status'] ?? null) !== 'filled' || empty($d['uni_id'])) {
+                        continue;
+                    }
+                    $best = null;
+                    $bestGap = $window + 1;
+                    foreach ($rows as $r) {
+                        if ($r->uni_id !== $d['uni_id'] || $r->symbol !== $log->ticker) {
+                            continue;
+                        }
+                        $gap = abs(Carbon::parse($r->closed_at, 'UTC')->getTimestamp() - $at);
+                        if ($gap < $bestGap) {
+                            $best = $r;
+                            $bestGap = $gap;
+                        }
+                    }
+                    if ($best) {
+                        $out["{$log->id}|{$d['uni_id']}"] = [
+                            'quantity' => abs((float) $best->position_amt),
+                            'entry_price' => $best->entry_price !== null ? (float) $best->entry_price : null,
+                            'exit_price' => $best->exit_price !== null ? (float) $best->exit_price : null,
+                            'realized_pnl' => $best->realized_pnl !== null ? round((float) $best->realized_pnl, 2) : null,
+                            'exchange_fee' => $best->exchange_fee !== null ? round((float) $best->exchange_fee, 2) : null,
+                            'closed_at' => Carbon::parse($best->closed_at, 'UTC')->toIso8601String(),
+                        ];
+                    }
+                }
+            }
+        }
+
+        return $out;
+    }
+
+    /** One close made outside the bot, as a timeline row. */
+    private function mapOutside(array $item): array
+    {
+        $r = $item['row'];
+        $amount = (float) $r->position_amt;
+        $side = in_array($r->position_side, ['LONG', 'SHORT'], true) ? $r->position_side : ($amount < 0 ? 'SHORT' : 'LONG');
+
+        return [
+            'kind' => 'outside_close',
+            'id' => "outside-{$item['exchange']}-{$r->id}",
+            'exchange' => $item['exchange'],
+            'ticker' => $r->symbol,
+            'side' => $side,
+            'type' => 'exit',
+            'account' => $r->account_name,
+            'uni_id' => $r->uni_id,
+            'user_name' => $r->user_name,
+            'demo' => (bool) $r->demo,
+            'quantity' => abs($amount),
+            'entry_price' => $r->entry_price !== null ? (float) $r->entry_price : null,
+            'exit_price' => $r->exit_price !== null ? (float) $r->exit_price : null,
+            'realized_pnl' => $r->realized_pnl !== null ? round((float) $r->realized_pnl, 2) : null,
+            'exchange_fee' => $r->exchange_fee !== null ? round((float) $r->exchange_fee, 2) : null,
+            'ts' => Carbon::parse($r->closed_at, 'UTC')->toIso8601String(),
+        ];
     }
 
     /**
@@ -169,6 +441,20 @@ class AdminTradeLogController extends Controller
         }
         if ($action = $request->query('action')) {
             $query->where('action', strtoupper($action));
+        }
+        // side = long | short, type = entry | exit — the plain-word facets
+        // over the engine's four actions (BUY / SELL / EXIT_LONG / EXIT_SHORT).
+        $side = strtolower((string) $request->query('side', ''));
+        if ($side === 'long') {
+            $query->whereIn('action', ['BUY', 'EXIT_LONG']);
+        } elseif ($side === 'short') {
+            $query->whereIn('action', ['SELL', 'EXIT_SHORT']);
+        }
+        $type = strtolower((string) $request->query('type', ''));
+        if ($type === 'entry') {
+            $query->whereIn('action', ['BUY', 'SELL']);
+        } elseif ($type === 'exit') {
+            $query->whereIn('action', ['EXIT_LONG', 'EXIT_SHORT']);
         }
         if ($ticker = $request->query('ticker')) {
             $query->where('ticker', strtoupper($ticker));
@@ -255,7 +541,7 @@ class AdminTradeLogController extends Controller
 
         return response()->json([
             'success' => true,
-            'log' => $this->mapLog($log, $this->userNames(collect([$log]))),
+            'log' => $this->mapLog($log, $this->userNames(collect([$log])), null, [], $this->closesFor(collect([$log]))),
         ]);
     }
 
@@ -280,7 +566,11 @@ class AdminTradeLogController extends Controller
             ->all();
     }
 
-    private function mapLog(TradeLog $log, array $names, ?callable $matcher = null): array
+    /**
+     * @param  list<TradeLog>  $retries  this signal's folded retry runs
+     * @param  array<string, array<string, mixed>>  $closes  closesFor()
+     */
+    private function mapLog(TradeLog $log, array $names, ?callable $matcher = null, array $retries = [], array $closes = []): array
     {
         $details = is_array($log->details) ? $log->details : [];
         $problems = 0;
@@ -291,10 +581,16 @@ class AdminTradeLogController extends Controller
             }
         }
 
+        $action = (string) $log->action;
+
         return [
+            'kind' => 'signal',
             'id' => $log->id,
             'exchange' => $log->exchange,
             'action' => $log->action,
+            // The plain words: which side of the market, and opening or closing.
+            'side' => in_array($action, ['SELL', 'EXIT_SHORT'], true) ? 'SHORT' : 'LONG',
+            'type' => str_starts_with($action, 'EXIT_') ? 'exit' : 'entry',
             'ticker' => $log->ticker,
             'success' => (bool) $log->success,
             'price' => $log->price !== null ? (float) $log->price : null,
@@ -306,9 +602,23 @@ class AdminTradeLogController extends Controller
             'failed' => (int) $log->failed,
             'skipped' => (int) $log->skipped,
             'details' => array_map(
-                fn ($row) => $this->mapDetail($row, $names, $log, $matcher),
+                fn ($row) => $this->mapDetail($row, $names, $log, $matcher, $closes),
                 $details
             ),
+            // Re-runs of this signal for the accounts that failed it, oldest
+            // first — folded here instead of listed as rows of their own.
+            'retries' => array_map(fn (TradeLog $r) => [
+                'id' => $r->id,
+                'success' => (bool) $r->success,
+                'filled' => (int) $r->filled,
+                'failed' => (int) $r->failed,
+                'skipped' => (int) $r->skipped,
+                'details' => array_map(
+                    fn ($row) => $this->mapDetail($row, $names, $r, $matcher, $closes),
+                    is_array($r->details) ? $r->details : []
+                ),
+                'ts' => optional($r->ts)->toIso8601String(),
+            ], $retries),
             // How the master did (filled | skipped | failed | absent), or null
             // when the engine sent no master flag — and the account outcomes
             // split into problems and normal skips, for the row's chips.
@@ -324,7 +634,7 @@ class AdminTradeLogController extends Controller
      * decision — present on entries only (exits close whatever is open, and
      * rejected signals never reach an account).
      */
-    private function mapDetail($row, array $names, ?TradeLog $log = null, ?callable $matcher = null): array
+    private function mapDetail($row, array $names, ?TradeLog $log = null, ?callable $matcher = null, array $closes = []): array
     {
         if (! is_array($row)) {
             return ['status' => 'unknown'];
@@ -351,6 +661,12 @@ class AdminTradeLogController extends Controller
             'quantity' => isset($row['quantity']) ? (float) $row['quantity'] : null,
             'fill_price' => isset($row['fill_price']) ? (float) $row['fill_price'] : null,
             'closed_quantity' => isset($row['closed_quantity']) ? (float) $row['closed_quantity'] : null,
+            // Exits: the closed trade this account's close produced — entry →
+            // exit price and P&L after fees (null until it has been synced).
+            'close' => $log && isset($row['uni_id']) ? ($closes["{$log->id}|{$row['uni_id']}"] ?? null) : null,
+            // Stack depth after an entry / increments taken off by an exit.
+            'increment' => isset($row['increment']) ? (int) $row['increment'] : null,
+            'max_increments' => isset($row['max_increments']) ? (int) $row['max_increments'] : null,
             'sizing' => $sizing === null ? null : [
                 'balance' => isset($sizing['balance']) ? (float) $sizing['balance'] : null,
                 // Deposit gate. A gate-blocked skip writes only these three
