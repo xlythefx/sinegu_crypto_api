@@ -115,6 +115,8 @@ class AdminPositionEditTest extends EngineTestCase
         $row = DB::table('binance_pastpositions')->where('id', $id)->first();
 
         $this->assertSame('BUY', $row->side);
+        // A BUY close is a short's close — the direction follows it.
+        $this->assertSame('SHORT', $row->position_side);
         $this->assertSame(12.0, (float) $row->position_amt);
         $this->assertSame(53.5, (float) $row->exit_price);
         $this->assertSame(30.0, (float) $row->realized_pnl);
@@ -123,6 +125,68 @@ class AdminPositionEditTest extends EngineTestCase
         $this->assertStringStartsWith('2026-09-05 09:30:00', (string) $row->closed_at);
         $this->assertSame($apiKey, $row->api_key);
         $this->assertSame($owner, $row->uni_id);
+    }
+
+    /**
+     * The editor writes the trade's DIRECTION; the closing order is derived
+     * from it, so the two columns can never describe different trades. When
+     * both are sent and disagree, the direction wins.
+     */
+    public function test_editing_the_direction_moves_the_closing_side_with_it(): void
+    {
+        $admin = $this->admin();
+        $owner = $this->makeUser();
+        $apiKey = DB::table('binance_accounts')->where('id', $this->makeAccount($owner))->value('api_key');
+        $id = $this->makeTrade($owner, $apiKey); // LONG, closed with SELL
+
+        $this->putJson("/api/admin/past-positions/{$id}", [
+            'position_side' => 'SHORT',
+        ], $this->headersFor($admin))->assertOk();
+
+        $row = DB::table('binance_pastpositions')->find($id);
+        $this->assertSame('SHORT', $row->position_side);
+        $this->assertSame('BUY', $row->side);
+
+        $this->putJson("/api/admin/past-positions/{$id}", [
+            'position_side' => 'LONG',
+            'side' => 'BUY',
+        ], $this->headersFor($admin))->assertOk();
+
+        $row = DB::table('binance_pastpositions')->find($id);
+        $this->assertSame('LONG', $row->position_side);
+        $this->assertSame('SELL', $row->side);
+
+        $this->putJson("/api/admin/past-positions/{$id}", [
+            'position_side' => 'BOTH',
+        ], $this->headersFor($admin))->assertStatus(422);
+    }
+
+    /**
+     * Both admin listings carry the trade's direction beside the closing
+     * order: a short closed by a BUY must read SHORT, not "BUY".
+     */
+    public function test_listings_carry_the_trade_direction(): void
+    {
+        $admin = $this->admin();
+        $owner = $this->makeUser();
+        $apiKey = DB::table('binance_accounts')->where('id', $this->makeAccount($owner))->value('api_key');
+        $id = $this->makeTrade($owner, $apiKey, [
+            'position_side' => 'SHORT',
+            'side' => 'BUY',
+            'entry_price' => 2.05,
+            'exit_price' => 2.12,
+        ]);
+
+        $trade = collect($this->getJson('/api/admin/positions', $this->headersFor($admin))
+            ->assertOk()->json('trades'))->firstWhere('id', $id);
+        $this->assertSame('SHORT', $trade['position_side']);
+        $this->assertSame('BUY', $trade['side']);
+
+        $trade = collect($this->getJson("/api/admin/users/{$owner}/positions", $this->headersFor($admin))
+            ->assertOk()->json('trades'))->firstWhere('id', $id);
+        $this->assertSame('SHORT', $trade['position_side']);
+        $this->assertEqualsWithDelta(2.05, $trade['entry_price'], 1e-9);
+        $this->assertEqualsWithDelta(2.12, $trade['price'], 1e-9);
     }
 
     public function test_it_ignores_ownership_columns_in_the_payload(): void

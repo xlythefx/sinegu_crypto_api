@@ -159,7 +159,7 @@ class AdminController extends Controller
             ->get([
                 't.id', 'a.id as account_id', 'a.name as account_name',
                 'a.balance as account_balance', 't.symbol', 't.entry_price', 't.exit_price',
-                't.realized_pnl', 't.exchange_fee', 't.fee_source', 't.side', 't.strategy',
+                't.realized_pnl', 't.exchange_fee', 't.fee_source', 't.position_side', 't.side', 't.strategy',
                 't.closed_at', 't.position_amt', 't.close_source',
             ]);
 
@@ -195,6 +195,9 @@ class AdminController extends Controller
                 'realized_pnl' => round((float) ($t->realized_pnl ?? 0), 2),
                 'exchange_fee' => $t->exchange_fee === null ? null : round((float) $t->exchange_fee, 2),
                 'fee_source' => $t->fee_source,
+                // The TRADE's direction (LONG / SHORT). `side` is the order that
+                // CLOSED it — BUY closes a short — never the direction itself.
+                'position_side' => $t->position_side,
                 'side' => $t->side,
                 'strategy' => $t->strategy,
                 'closed_at' => $t->closed_at,
@@ -311,6 +314,7 @@ class AdminController extends Controller
 
         $data = $request->validate([
             'symbol' => ['sometimes', 'string', 'max:32'],
+            'position_side' => ['sometimes', 'string', 'in:LONG,SHORT'],
             'side' => ['sometimes', 'string', 'in:BUY,SELL'],
             'position_amt' => ['sometimes', 'numeric'],
             'exit_price' => ['sometimes', 'nullable', 'numeric'],
@@ -334,6 +338,16 @@ class AdminController extends Controller
         }
         if (array_key_exists('strategy', $data) && $data['strategy'] !== null) {
             $data['strategy'] = trim($data['strategy']) ?: null;
+        }
+
+        // Two columns, one fact: `position_side` is the trade's direction and
+        // `side` the order that closed it (SELL closes a long, BUY a short).
+        // Either one written moves the other, so the pair can never disagree;
+        // the direction wins when both are sent.
+        if (isset($data['position_side'])) {
+            $data['side'] = $data['position_side'] === 'LONG' ? 'SELL' : 'BUY';
+        } elseif (isset($data['side'])) {
+            $data['position_side'] = $data['side'] === 'SELL' ? 'LONG' : 'SHORT';
         }
 
         if (array_key_exists('realized_pnl', $data)) {
