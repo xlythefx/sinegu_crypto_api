@@ -5,6 +5,7 @@ namespace Tests\Feature;
 use App\Services\Discord\DiscordRoleSync;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Http;
 
 /**
  * The role rules and every write site that fires them: approve / reject /
@@ -57,6 +58,22 @@ class DiscordRoleSyncTest extends DiscordTestCase
 
         $this->putJson("/api/admin/users/{$uniId}", ['status' => 'active'], $this->userHeaders($admin))->assertOk();
         $this->assertEqualsCanonicalizing(['keep-me', self::ROLE_MEMBER, self::ROLE_TRADER], $this->discord->rolesOf(self::DID));
+    }
+
+    /** An internal test account is not a trading customer, live account or not. */
+    public function test_making_a_trader_a_tester_takes_the_trader_role_off_and_back(): void
+    {
+        Http::fake(); // the role change also pings the engine's account cache
+        $uniId = $this->makeLinkedUser(['status' => 'active']);
+        $this->makeAccount($uniId, ['demo' => 0]);
+        $admin = $this->makeUser(['type' => 'admin']);
+        $this->inServer([self::ROLE_MEMBER, self::ROLE_TRADER]);
+
+        $this->putJson("/api/admin/users/{$uniId}", ['type' => 'tester'], $this->userHeaders($admin))->assertOk();
+        $this->assertSame([self::ROLE_MEMBER], $this->discord->rolesOf(self::DID));
+
+        $this->putJson("/api/admin/users/{$uniId}", ['type' => 'user'], $this->userHeaders($admin))->assertOk();
+        $this->assertEqualsCanonicalizing([self::ROLE_MEMBER, self::ROLE_TRADER], $this->discord->rolesOf(self::DID));
     }
 
     public function test_a_fee_edit_does_not_touch_discord(): void
@@ -139,6 +156,19 @@ class DiscordRoleSyncTest extends DiscordTestCase
 
         $active->status = 'suspended';
         $this->assertSame([], $sync->desiredRoles($active));
+    }
+
+    public function test_a_tester_never_gets_the_trader_role(): void
+    {
+        $sync = $this->app->make(DiscordRoleSync::class);
+
+        $tester = \App\Models\UserCredential::find($this->makeLinkedUser(['status' => 'active', 'type' => 'tester']));
+        $this->makeAccount($tester->uni_id, ['demo' => 0]);
+        $this->makeAccount($tester->uni_id, ['demo' => 0], 'mexc');
+
+        // Member still follows the account status; Trader never comes.
+        $this->assertSame([self::ROLE_MEMBER], $sync->desiredRoles($tester));
+        $this->assertSame([self::ROLE_MEMBER, self::ROLE_TRADER], $sync->managedRoles());
     }
 
     public function test_an_empty_role_id_switches_that_rule_off(): void

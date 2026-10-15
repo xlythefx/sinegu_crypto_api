@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 
 class TradeLog extends Model
@@ -14,6 +15,8 @@ class TradeLog extends Model
 
     protected $fillable = [
         'exchange',
+        // main (TradingView, everyone) | test (testers only) — WebhookPaths::FEEDS.
+        'feed',
         'action',
         'ticker',
         'success',
@@ -36,5 +39,17 @@ class TradeLog extends Model
             'details' => 'array',
             'ts' => 'datetime',
         ];
+    }
+
+    /**
+     * Signals from the MAIN feed only — what the business numbers count.
+     * Test-feed traffic (tester accounts, other signal providers) is real
+     * engine work but not real trading: it must never move a "signals today",
+     * a failure count, a strategy's reliability or an asset's last price.
+     * The Signal Log shows it; the dashboards do not.
+     */
+    public function scopeMainFeed(Builder $query): Builder
+    {
+        return $query->where('feed', 'main');
     }
 }

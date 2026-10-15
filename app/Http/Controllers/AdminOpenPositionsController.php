@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\UserCredential;
 use App\Services\EngineCache;
 use App\Services\Exchanges\ExchangeSchema;
 use Illuminate\Http\JsonResponse;
@@ -80,13 +81,14 @@ class AdminOpenPositionsController extends Controller
                 ->where("{$t}.is_sandbox", 0)
                 ->where('u.status', '!=', 'suspended')
                 ->where('u.type', '!=', 'master')
-                ->get(["{$t}.uni_id", "{$t}.name as account_name", "{$t}.demo", 'u.name as owner_name'])
+                ->get(["{$t}.uni_id", "{$t}.name as account_name", "{$t}.demo", 'u.name as owner_name', 'u.type as owner_type'])
                 ->map(fn ($a) => [
                     'exchange' => $exchange,
                     'uni_id' => $a->uni_id,
                     'owner_name' => $a->owner_name ?: 'Unknown user',
                     'account_name' => $a->account_name,
                     'demo' => (bool) $a->demo,
+                    'feed' => self::feedOf($a->owner_type),
                 ]);
         })->values()->all();
     }
@@ -258,6 +260,7 @@ class AdminOpenPositionsController extends Controller
                 'account_name' => $p->account_name,
                 'owner_name' => $p->owner_name ?: 'Unknown user',
                 'owner_type' => $p->owner_type,
+                'feed' => self::feedOf($p->owner_type),
                 'demo' => (bool) $p->demo,
                 'key_blocked' => $p->key_status !== null && $p->key_status !== 'ok',
                 'symbol' => $p->symbol,
@@ -273,6 +276,17 @@ class AdminOpenPositionsController extends Controller
                 'blocked_reason' => $reason,
             ];
         });
+    }
+
+    /**
+     * The signal feed an owner's accounts follow — the same rule as
+     * EngineController::accounts. A tester's (`test`) positions were opened
+     * by the test feed, so the page tags them and keeps them out of the
+     * "compared with the master" view: the master never sees a test signal.
+     */
+    private static function feedOf(?string $ownerType): string
+    {
+        return $ownerType === UserCredential::TESTER ? 'test' : 'main';
     }
 
     private function blockedReason(object $p): ?string

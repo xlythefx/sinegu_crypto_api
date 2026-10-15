@@ -7,6 +7,7 @@ use App\Models\Asset;
 use App\Models\ExchangeAccount;
 use App\Models\OpenStrategy;
 use App\Models\TradeLog;
+use App\Models\UserCredential;
 use App\Services\Assets\StreakSizing;
 use App\Services\Positions\EntryStreak;
 use Illuminate\Http\JsonResponse;
@@ -104,6 +105,14 @@ class EngineController extends Controller
                     'key_blocked' => $a->keyIsBlocked(),
                     // The account the public channel reports on; see the select.
                     'is_master' => $a->owner_type === 'master',
+                    // Which signal feed this account follows. The engine fans a
+                    // MAIN-feed signal (TradingView's webhooks) out to `main`
+                    // rows only and a TEST-feed signal (WebhookPaths::TEST) to
+                    // `test` rows only, so a tester's account never trades
+                    // TradingView's signals and a customer never trades a test
+                    // signal. The API decides the feed from the owner's role;
+                    // the engine never reads a role.
+                    'feed' => $a->owner_type === UserCredential::TESTER ? 'test' : 'main',
                 ];
             })->values(),
         ]);
@@ -214,7 +223,13 @@ class EngineController extends Controller
             'skipped' => ['nullable', 'integer', 'min:0'],
             'details' => ['nullable', 'array'],
             'ts' => ['required', 'date'],
+            // Which webhook the signal arrived on (WebhookPaths::FEEDS).
+            'feed' => ['nullable', 'string', 'in:main,test'],
         ]);
+
+        // An engine deployed before the test feed existed sends no feed, and
+        // every signal it can receive is a main-feed one.
+        $data['feed'] = $data['feed'] ?? 'main';
 
         $log = TradeLog::create($data + ['exchange' => $exchange]);
 

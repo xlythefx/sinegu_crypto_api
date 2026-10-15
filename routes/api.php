@@ -16,6 +16,7 @@ use App\Http\Controllers\AdminTodoController;
 use App\Http\Controllers\AdminTradeLogController;
 use App\Http\Controllers\AdminTronTransferController;
 use App\Http\Controllers\AdminUserController;
+use App\Http\Controllers\AdminWebhookController;
 use App\Http\Controllers\AnalyticsController;
 use App\Http\Controllers\AssetController;
 use App\Http\Controllers\AuthController;
@@ -344,6 +345,10 @@ Route::middleware(['auth:sanctum', 'account.active', 'email.verified'])->group(f
         Route::get('/manual-trade/targets', [AdminManualTradeController::class, 'targets']);
         Route::get('/manual-trade/engine', [AdminManualTradeController::class, 'engineStatus']);
         Route::post('/manual-trade/send', [AdminManualTradeController::class, 'send']);
+
+        // Admin → Webhooks: every engine webhook (venue × signal feed), who it
+        // reaches and whether the engine has it on. Secrets as presence only.
+        Route::get('/webhooks', [AdminWebhookController::class, 'index']);
 
         // Bot Engine ops page: systemd state + health, journal tail, restart.
         Route::get('/engine/status', [AdminEngineController::class, 'status']);

@@ -99,8 +99,10 @@ class AssetController extends Controller
         $balance = $keys === [] ? null : ExchangeSchema::for($exchange)->accountQuery()
             ->whereIn('api_key', $keys)
             ->max('balance');
+        // Main feed only: a test provider's price is not the market's.
         $price = DB::table('trade_logs')
             ->where('exchange', $exchange)
+            ->where('feed', 'main')
             ->where('ticker', $asset->ticker)
             ->whereNotNull('price')
             ->orderByDesc('id')

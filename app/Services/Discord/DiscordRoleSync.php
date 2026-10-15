@@ -10,7 +10,8 @@ use Illuminate\Support\Facades\Log;
  *
  * The rules are the whole point of "Sign in with Discord":
  *   Member  — while the account is `active` (approved by an admin);
- *   Trader  — while a LIVE exchange account (demo = 0) is connected;
+ *   Trader  — while a LIVE exchange account (demo = 0) is connected, never
+ *             for an internal `tester` account (UserCredential::TESTER);
  *   neither — while suspended, and both come off on unlink.
  * Each role id is optional in config; an empty one switches that rule off,
  * and the bot never touches a role it was not given.
@@ -46,8 +47,10 @@ class DiscordRoleSync
             $roles[] = $member;
         }
 
+        // Never for a tester: an internal test account trades on the test
+        // feed, it is not a trading customer — even with a live account.
         $trader = (string) config('services.discord.role_trader_id');
-        if ($trader !== '' && $user->status === 'active' && $user->hasLiveExchangeAccount()) {
+        if ($trader !== '' && $user->status === 'active' && ! $user->isTester() && $user->hasLiveExchangeAccount()) {
             $roles[] = $trader;
         }
 

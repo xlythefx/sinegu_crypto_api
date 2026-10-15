@@ -183,6 +183,35 @@ class AdminInsightsTest extends EngineTestCase
         $this->assertSame(1, $res->json('headline.active_traders_today'));
     }
 
+    public function test_test_feed_signals_never_count_on_the_dashboard(): void
+    {
+        $admin = $this->makeUser(['type' => 'admin']);
+        $tester = $this->makeUser(['type' => 'tester']);
+        $row = fn (string $feed) => TradeLog::create([
+            'exchange' => 'binance', 'feed' => $feed, 'action' => 'BUY', 'ticker' => 'LTCUSDT',
+            'success' => false, 'strategy' => 'Provider-X', 'category' => 'signal', 'target_count' => 1,
+            'filled' => 0, 'skipped' => 0, 'failed' => 1, 'ts' => now(),
+            'details' => [['uni_id' => $tester, 'status' => 'failed', 'error' => 'boom']],
+        ]);
+        $row('test');
+        $row('test');
+
+        $overview = $this->getJson('/api/admin/insights/overview', $this->headersFor($admin))->assertOk();
+        $this->assertSame(0, $overview->json('attention.signals_today.signals'));
+
+        $system = $this->getJson('/api/admin/insights/system', $this->headersFor($admin))->assertOk();
+        $binance = collect($system->json('venues'))->firstWhere('exchange', 'binance');
+        $this->assertSame(0, $binance['signals_today']);
+        $this->assertSame(0, $binance['failed_today']);
+        $this->assertNull($binance['last_signal_at']);
+
+        // The same rows on the main feed do count — the filter is the feed.
+        \Illuminate\Support\Facades\Cache::flush();
+        $row('main');
+        $overview = $this->getJson('/api/admin/insights/overview', $this->headersFor($admin))->assertOk();
+        $this->assertSame(1, $overview->json('attention.signals_today.signals'));
+    }
+
     public function test_money_excludes_scenario_invoices(): void
     {
         $admin = $this->makeUser(['type' => 'admin']);

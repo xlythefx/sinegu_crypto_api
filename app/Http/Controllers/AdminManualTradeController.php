@@ -2,6 +2,8 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\UserCredential;
+use App\Services\Engine\WebhookPaths;
 use App\Services\Exchanges\ExchangeSchema;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -17,22 +19,33 @@ use Illuminate\Validation\Rule;
  * and forwards it to the engine. The console only ever sees a masked copy for
  * its payload preview. Admins choose a target *key*, never a URL, so the proxy
  * can only ever reach hosts configured in services.engine.targets.
+ *
+ * Every call takes a `feed` (main | test, default main). One engine, one
+ * webhook path per venue PER FEED (App\Services\Engine\WebhookPaths): the
+ * path decides which venue's accounts trade the signal AND which feed it is.
+ * `main` reaches every non-tester account with TradingView's secret; `test`
+ * reaches tester-owned accounts only, with the test feed's own secret.
  */
 class AdminManualTradeController extends Controller
 {
-    /**
-     * One engine, one webhook path PER VENUE — the path decides which
-     * exchange's accounts the signal trades (trading-flask hooks.WEBHOOK_PATHS).
-     * Must stay in step with that dict AND with the deploy script's
-     * ENGINE_WEBHOOK_PATHS, which is what nginx actually proxies.
-     */
-    private const WEBHOOK_PATHS = [
-        'binance' => '/binance_abcd_webhook',
-        'bybit' => '/bybit_abcd_webhook',
-        'mexc' => '/mexc_abcd_webhook',
-    ];
-
     private const MAX_INCREMENTS = 20;
+
+    /** `?feed=` / body `feed`: main | test, absent = main; null for anything else. */
+    private function feed(mixed $value): ?string
+    {
+        $feed = $value === null || $value === '' ? 'main' : $value;
+
+        return WebhookPaths::isFeed($feed) ? $feed : null;
+    }
+
+    private function feedRejected(): JsonResponse
+    {
+        return response()->json([
+            'success' => false,
+            'error_code' => 'FEED_NOT_SUPPORTED',
+            'message' => 'Unknown signal feed — use main or test.',
+        ], 400);
+    }
 
     /** Resolve a target key to its configured base URL, or null when unknown. */
     private function targetUrl(string $key): ?string
@@ -42,10 +55,16 @@ class AdminManualTradeController extends Controller
         return is_string($url) && $url !== '' ? rtrim($url, '/') : null;
     }
 
-    /** The webhook token for one exchange, e.g. BINANCE_ENGINE_WEBHOOK_SECRET. */
-    private function webhookSecret(string $exchange): string
+    /**
+     * The webhook token for one exchange on one feed: the main feed's per-venue
+     * token (e.g. BINANCE_ENGINE_WEBHOOK_SECRET), or the test feed's single
+     * ENGINE_TEST_WEBHOOK_SECRET — never one standing in for the other.
+     */
+    private function webhookSecret(string $exchange, string $feed = 'main'): string
     {
-        return (string) config("services.engine.webhook_secrets.{$exchange}");
+        return $feed === 'test'
+            ? (string) config('services.engine.test_webhook_secret')
+            : (string) config("services.engine.webhook_secrets.{$exchange}");
     }
 
     /**
@@ -65,21 +84,27 @@ class AdminManualTradeController extends Controller
     }
 
     /**
-     * GET /api/admin/manual-trade/targets?exchange=binance
+     * GET /api/admin/manual-trade/targets?exchange=binance&feed=main
      *
      * Users the engine would actually trade, grouped per user — same filters as
      * the engine's own accounts endpoint (enabled, not deleted, not sandbox,
      * owner not suspended), so what the admin sees is what the fan-out hits.
+     * The feed narrows it the way the engine does: `main` = every owner except
+     * testers, `test` = tester owners only.
      */
     public function targets(Request $request): JsonResponse
     {
         $exchange = (string) $request->query('exchange', 'binance');
-        if (! isset(self::WEBHOOK_PATHS[$exchange])) {
+        if (WebhookPaths::path($exchange, 'main') === null) {
             return response()->json([
                 'success' => false,
                 'error_code' => 'EXCHANGE_NOT_SUPPORTED',
                 'message' => "Exchange '{$exchange}' has no engine yet.",
             ], 400);
+        }
+        $feed = $this->feed($request->query('feed'));
+        if ($feed === null) {
+            return $this->feedRejected();
         }
 
         // The venue's own accounts table — what its webhook path fans out to.
@@ -90,6 +115,7 @@ class AdminManualTradeController extends Controller
             ->where("{$t}.enabled", 1)
             ->where("{$t}.is_sandbox", 0)
             ->where('user_credentials.status', '!=', 'suspended')
+            ->where('user_credentials.type', $feed === 'test' ? '=' : '!=', UserCredential::TESTER)
             ->orderBy('user_credentials.name')
             ->get([
                 "{$t}.uni_id",
@@ -106,6 +132,7 @@ class AdminManualTradeController extends Controller
                 'display_name' => $rows->first()->user_name ?: 'Unnamed',
                 'email' => $rows->first()->user_email,
                 'exchange' => $exchange,
+                'feed' => $feed,
                 'account_count' => $rows->count(),
                 'demo_count' => $rows->where('demo', 1)->count(),
                 'live_count' => $rows->where('demo', 0)->count(),
@@ -117,13 +144,15 @@ class AdminManualTradeController extends Controller
     }
 
     /**
-     * GET /api/admin/manual-trade/engine?target=local&exchange=binance
+     * GET /api/admin/manual-trade/engine?target=local&exchange=binance&feed=main
      * Is the engine reachable? Proxied so the browser never has to talk to the
      * engine host directly.
      *
-     * Also returns a *masked* webhook secret so the console's payload preview
-     * shows the shape of the real signal. The full token stays server-side —
-     * copy it from CLAUDE.md when setting a TradingView alert up.
+     * Also returns a *masked* webhook secret — the FEED's — so the console's
+     * payload preview shows the shape of the real signal. The full token stays
+     * server-side — copy it from CLAUDE.md when setting a TradingView alert up.
+     * `test_feed_enabled` is the engine's own `/health` → `test_feed.enabled`
+     * (null when the engine is unreachable or predates the test feed).
      */
     public function engineStatus(Request $request): JsonResponse
     {
@@ -138,8 +167,12 @@ class AdminManualTradeController extends Controller
         }
 
         $exchange = (string) $request->query('exchange', 'binance');
-        $masked = isset(self::WEBHOOK_PATHS[$exchange])
-            ? $this->maskSecret($this->webhookSecret($exchange))
+        $feed = $this->feed($request->query('feed'));
+        if ($feed === null) {
+            return $this->feedRejected();
+        }
+        $masked = WebhookPaths::path($exchange, $feed) !== null
+            ? $this->maskSecret($this->webhookSecret($exchange, $feed))
             : null;
 
         try {
@@ -151,18 +184,25 @@ class AdminManualTradeController extends Controller
                     'reachable' => false,
                     'url' => $base,
                     'error' => $e->getMessage(),
+                    'feed' => $feed,
                     'webhook_secret_masked' => $masked,
+                    'test_feed_enabled' => null,
                 ],
             ]);
         }
+
+        $health = $response->successful() ? $response->json() : null;
+        $testFeed = is_array($health) ? data_get($health, 'test_feed.enabled') : null;
 
         return response()->json([
             'success' => true,
             'engine' => [
                 'reachable' => $response->successful(),
                 'url' => $base,
-                'health' => $response->successful() ? $response->json() : null,
+                'health' => $health,
+                'feed' => $feed,
                 'webhook_secret_masked' => $masked,
+                'test_feed_enabled' => is_bool($testFeed) ? $testFeed : null,
             ],
         ]);
     }
@@ -170,7 +210,8 @@ class AdminManualTradeController extends Controller
     /**
      * POST /api/admin/manual-trade/send
      *
-     * Signs the payload with the engine's webhook secret and forwards it.
+     * Signs the payload with the FEED's webhook secret and forwards it to that
+     * feed's path for the venue (`feed`: main | test, default main).
      * `increments` sends the same signal N times (each one stacks another
      * base_size on every recipient) — entries only; exits close everything at
      * once so repeating them is pointless.
@@ -181,7 +222,8 @@ class AdminManualTradeController extends Controller
             // Every venue this engine has a webhook path for — NOT a second
             // hardcoded list. Until 2026-09-24 this said `in:binance`, so
             // targets()/engineStatus() offered MEXC while send() refused it.
-            'exchange' => ['required', 'string', Rule::in(array_keys(self::WEBHOOK_PATHS))],
+            'exchange' => ['required', 'string', Rule::in(WebhookPaths::exchanges())],
+            'feed' => ['nullable', 'string', Rule::in(WebhookPaths::FEEDS)],
             'target' => ['required', 'string', 'in:local,prod'],
             'action' => ['required', 'string', 'in:BUY,SELL,EXIT_LONG,EXIT_SHORT'],
             'symbol' => ['required', 'string', 'max:20'],
@@ -193,7 +235,15 @@ class AdminManualTradeController extends Controller
             'target_uni_ids.*' => ['string', 'max:36'],
         ]);
 
-        $secret = $this->webhookSecret($data['exchange']);
+        $feed = $data['feed'] ?? 'main';
+        $secret = $this->webhookSecret($data['exchange'], $feed);
+        if ($secret === '' && $feed === 'test') {
+            return response()->json([
+                'success' => false,
+                'error_code' => 'ENGINE_TEST_WEBHOOK_SECRET_MISSING',
+                'message' => 'ENGINE_TEST_WEBHOOK_SECRET is not configured on the API.',
+            ], 503);
+        }
         if ($secret === '') {
             $envVar = strtoupper($data['exchange']).'_ENGINE_WEBHOOK_SECRET';
 
@@ -213,7 +263,7 @@ class AdminManualTradeController extends Controller
             ], 400);
         }
 
-        $url = $base.self::WEBHOOK_PATHS[$data['exchange']];
+        $url = $base.WebhookPaths::path($data['exchange'], $feed);
         $isEntry = in_array($data['action'], ['BUY', 'SELL'], true);
         $increments = $isEntry ? (int) ($data['increments'] ?? 1) : 1;
 
@@ -250,6 +300,7 @@ class AdminManualTradeController extends Controller
         // Results per account land in trade_logs a moment later.
         return response()->json([
             'success' => $sent > 0,
+            'feed' => $feed,
             'sent' => $sent,
             'failed' => $failed,
             'increments' => $increments,

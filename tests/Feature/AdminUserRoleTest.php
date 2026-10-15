@@ -3,6 +3,7 @@
 namespace Tests\Feature;
 
 use App\Models\UserCredential;
+use Illuminate\Support\Facades\Http;
 
 /**
  * PUT /api/admin/users/{uniId} — the role column.
@@ -13,6 +14,14 @@ use App\Models\UserCredential;
  */
 class AdminUserRoleTest extends EngineTestCase
 {
+    protected function setUp(): void
+    {
+        parent::setUp();
+        // A role change pings the engine to drop its cached account list
+        // (the feed and is_master derive from the role); keep it in-process.
+        Http::fake();
+    }
+
     private function headersFor(string $uniId): array
     {
         $user = UserCredential::find($uniId);
@@ -37,7 +46,7 @@ class AdminUserRoleTest extends EngineTestCase
         $admin = $this->makeUser(['type' => 'admin']);
         $target = $this->makeUser();
 
-        foreach (['developer', 'admin', 'user'] as $role) {
+        foreach (['developer', 'admin', 'tester', 'user'] as $role) {
             $this->setRole($admin, $target, $role)
                 ->assertOk()
                 ->assertJsonPath('user.type', $role);

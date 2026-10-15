@@ -140,13 +140,19 @@ final class SignalHealth
     }
 
     /**
-     * The health banner: the last `$hours` of signals, plus every problem in
-     * them grouped by cause.
+     * The health banner: the last `$hours` of MAIN-feed signals, plus every
+     * problem in them grouped by cause.
+     *
+     * Test-feed signals (testers only, WebhookPaths::TEST) are left out
+     * entirely — the counts, the issues and `last_signal_at`. The test feed
+     * exists to throw odd signals at prod; that must never turn the banner
+     * amber, nor make "no signals today" read as an engine that is alive.
      */
     public function health(int $hours = 24): array
     {
         $since = now()->subHours($hours);
-        $logs = TradeLog::where('ts', '>=', $since)->orderByDesc('ts')->limit(self::SCAN_LIMIT)->get();
+        $logs = TradeLog::where('feed', 'main')
+            ->where('ts', '>=', $since)->orderByDesc('ts')->limit(self::SCAN_LIMIT)->get();
 
         $issues = $this->issues($logs);
         $normal = 0;
@@ -189,7 +195,7 @@ final class SignalHealth
             'master_missed' => $masterMissed,
             // Read outside the window: a quiet day must still say when the last
             // signal arrived, or "no signals" cannot be told from "engine down".
-            'last_signal_at' => optional(TradeLog::orderByDesc('ts')->first()?->ts)->toIso8601String(),
+            'last_signal_at' => optional(TradeLog::where('feed', 'main')->orderByDesc('ts')->first()?->ts)->toIso8601String(),
             'issues' => array_slice($issues, 0, 5),
             'issues_total' => count($issues),
         ];

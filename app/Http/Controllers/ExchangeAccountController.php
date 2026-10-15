@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Http\Middleware\EnsureAdmin;
 use App\Models\ExchangeAccount;
 use App\Models\Invoice;
+use App\Models\UserCredential;
 use App\Services\Discord\DiscordRoleSync;
 use App\Services\EngineCache;
 use App\Services\Exchanges\ExchangeSchema;
@@ -418,7 +419,10 @@ class ExchangeAccountController extends Controller
      *
      * The roles are EnsureAdmin's, not a second list — whoever may open the
      * admin portal is who may connect a venue that is not on sale yet, and one
-     * list cannot drift from itself.
+     * list cannot drift from itself — PLUS the internal `tester` role, whose
+     * accounts exist to try exactly these venues on the test feed. It is the
+     * admin list with one role appended, never a second spelling of
+     * EnsureAdmin::ROLES: a role added there must open this gate too.
      *
      * The message says "not open yet" rather than "staff only": to a customer
      * that is the true and complete answer, and it matches the "Coming soon"
@@ -432,7 +436,9 @@ class ExchangeAccountController extends Controller
             return null;
         }
 
-        if ($user && in_array($user->type, EnsureAdmin::ROLES, true)) {
+        // Admin roles + the test role (see the docblock) — not EnsureStaff's
+        // list: a read-only collaborator connects nothing.
+        if ($user && in_array($user->type, [...EnsureAdmin::ROLES, UserCredential::TESTER], true)) {
             return null;
         }
 

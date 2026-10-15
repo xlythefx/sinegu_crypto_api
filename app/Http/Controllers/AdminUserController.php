@@ -35,7 +35,7 @@ use Illuminate\Validation\Rule;
 class AdminUserController extends Controller
 {
     /** Every value `user_credentials.type` may hold — what an admin may assign. */
-    public const ROLES = ['user', ...EnsureAdmin::ROLES, EnsureStaff::COLLABORATOR];
+    public const ROLES = ['user', ...EnsureAdmin::ROLES, EnsureStaff::COLLABORATOR, UserCredential::TESTER];
 
     /**
      * Keys a read-only collaborator never receives from show() / store() /
@@ -582,8 +582,13 @@ class AdminUserController extends Controller
      * Edit fee percentages and/or status (suspend / reactivate). Status
      * guards: master is immutable, pending belongs to the approval queue,
      * and an admin can never change their own status.
+     *
+     * A role change INTO or OUT OF `tester` moves the user's accounts to the
+     * other signal feed (EngineController::accounts derives the feed from the
+     * role), so it is refused with 409 OPEN_POSITIONS while they hold an open
+     * position: the exit for it would arrive on the feed they just left.
      */
-    public function update(Request $request, string $uniId): JsonResponse
+    public function update(Request $request, string $uniId, EngineCache $engine): JsonResponse
     {
         $user = UserCredential::find($uniId);
         if (! $user) {
@@ -626,6 +631,22 @@ class AdminUserController extends Controller
                     );
                 }
             }
+
+            // Into or out of `tester` switches the signal feed the user's
+            // accounts follow (main ↔ test). A position the old feed opened
+            // would then wait for an exit the new feed never sends, so the
+            // switch waits until they are flat. Between two non-tester roles
+            // the feed does not move, and nothing here blocks it.
+            if (($validated['type'] === UserCredential::TESTER || $user->type === UserCredential::TESTER)
+                && ($venues = $this->openPositionVenues($user)) !== []) {
+                return response()->json([
+                    'success' => false,
+                    'error_code' => 'OPEN_POSITIONS',
+                    'message' => ($user->name ?: $user->email).' still holds open positions — close them first. '
+                        .'A position opened by one signal feed would never receive its exit from the other.',
+                    'exchanges' => $venues,
+                ], 409);
+            }
         }
 
         // Status guards apply only to an actual change (echoing the current
@@ -643,9 +664,18 @@ class AdminUserController extends Controller
         }
 
         $statusChanged = isset($validated['status']) && $validated['status'] !== $user->status;
+        $typeChanged = isset($validated['type']) && $validated['type'] !== $user->type;
 
         // Percentage columns are not fillable — forceFill is deliberate.
         $user->forceFill($validated)->save();
+
+        // The engine caches its account list for 90 s, and two of the fields
+        // it trades on are derived from the role: `feed` (tester ↔ test) and
+        // `is_master`. Invalidate now rather than let a new tester's account
+        // take a minute of main-feed signals. Best-effort, like every ping.
+        if ($typeChanged) {
+            $engine->refreshAccounts();
+        }
 
         // A suspension ends the user's sessions NOW. Until 2026-10-07 only the
         // next login looked at `status`, so a suspended user kept every open
@@ -656,9 +686,10 @@ class AdminUserController extends Controller
             $user->tokens()->delete();
         }
 
-        // Suspend / reactivate moves the Discord roles; a fee edit does not
-        // deserve a Discord round trip.
-        if ($statusChanged) {
+        // Suspend / reactivate moves the Discord roles, and so does a role
+        // change (a tester holds no Trader role); a fee edit does not deserve
+        // a Discord round trip.
+        if ($statusChanged || $typeChanged) {
             $this->discordRoles->syncUser($user);
         }
 
@@ -667,6 +698,38 @@ class AdminUserController extends Controller
             'message' => 'User updated.',
             'user' => $this->userPayload($user),
         ]);
+    }
+
+    /**
+     * Venues on which the user holds an open position (a non-zero
+     * `position_amt` row) on a CONNECTED account — what blocks a move between
+     * signal feeds.
+     *
+     * Rows of a disconnected account do not count: such an account receives
+     * no signal from either feed, its rows are never re-synced once the key is
+     * gone (disconnect keeps them; only a purge deletes them), and counting
+     * them would block the role change for ever with nothing the admin could
+     * close.
+     *
+     * @return list<string>
+     */
+    private function openPositionVenues(UserCredential $user): array
+    {
+        $venues = [];
+        foreach (ExchangeSchema::supported() as $exchange) {
+            $schema = ExchangeSchema::for($exchange);
+            $open = DB::table("{$schema->positions} as p")
+                ->join("{$schema->accountsTable} as a", 'a.api_key', '=', 'p.api_key')
+                ->whereNull('a.deleted_at')
+                ->where('p.uni_id', $user->uni_id)
+                ->where('p.position_amt', '!=', 0)
+                ->exists();
+            if ($open) {
+                $venues[] = $exchange;
+            }
+        }
+
+        return $venues;
     }
 
     /** The profile block shared by show() and update() (accounts excluded). */

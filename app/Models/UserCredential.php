@@ -12,6 +12,31 @@ class UserCredential extends Authenticatable
 {
     use HasApiTokens, HasUuids;
 
+    /**
+     * The internal TEST account role (`user_credentials.type = 'tester'`).
+     *
+     * Like a developer account for trying the product on prod, with none of
+     * its reach:
+     *  - **Test feed only.** Its exchange accounts are listed to the engine
+     *    with `feed: test` (EngineController::accounts), so they receive
+     *    signals ONLY from the engine's test webhooks
+     *    (App\Services\Engine\WebhookPaths::TEST) and never from the main
+     *    TradingView feed — and a customer never receives a test signal.
+     *    That is what lets someone fire experimental signals (streak sizing,
+     *    another signal provider) at prod without touching anyone's money.
+     *  - **No billing.** Monthly invoicing keys on `type = 'user'`, so a tester
+     *    is never invoiced; demo and real-money accounts alike.
+     *  - **No admin portal.** Not in EnsureAdmin::ROLES nor EnsureStaff::ROLES.
+     *    It may still CONNECT the staff-only venues (they exist to be tested),
+     *    which is the one admin-list privilege it shares.
+     *  - **Not a customer.** AdminInsights counts `type = 'user'` only, and no
+     *    Discord Trader role is granted (an internal account, not a trader).
+     * Changing a user to or from this role is refused while they hold an open
+     * position (AdminUserController::update): a position opened by one feed
+     * would never receive its exit from the other.
+     */
+    public const TESTER = 'tester';
+
     protected $table = 'user_credentials';
 
     protected $primaryKey = 'uni_id';
@@ -68,6 +93,12 @@ class UserCredential extends Authenticatable
     public function hasPassword(): bool
     {
         return $this->password !== null;
+    }
+
+    /** Whether this is an internal test account — see {@see self::TESTER}. */
+    public function isTester(): bool
+    {
+        return $this->type === self::TESTER;
     }
 
     /** Whether a Discord identity is linked to this account. */

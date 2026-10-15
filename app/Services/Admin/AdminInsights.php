@@ -61,7 +61,7 @@ class AdminInsights
         $unpaid = $invoices->whereIn('status', ['pending', 'overdue', 'failed']);
         $overdue = $unpaid->filter(fn ($i) => $this->isOverdue($i));
 
-        $signalsToday = TradeLog::where('ts', '>=', $today)->get();
+        $signalsToday = TradeLog::mainFeed()->where('ts', '>=', $today)->get();
         $outcomes = $this->outcomes($signalsToday);
 
         $master = $this->masterAccounts();
@@ -286,7 +286,7 @@ class AdminInsights
         $closed7 = $this->pastRows($live, $now->copy()->subDays(7));
         $closed30 = $this->pastRows($live, $now->copy()->subDays(30));
 
-        $logs30 = TradeLog::where('ts', '>=', $now->copy()->subDays(30))->get();
+        $logs30 = TradeLog::mainFeed()->where('ts', '>=', $now->copy()->subDays(30))->get();
         $filledSince = fn (Carbon $since) => count($this->outcomes(
             $logs30->filter(fn ($l) => $l->ts && $l->ts->gte($since))
         )['filled_users']);
@@ -525,7 +525,7 @@ class AdminInsights
         $venues = [];
         foreach (ExchangeSchema::supported() as $ex) {
             $s = ExchangeSchema::for($ex);
-            $logs = TradeLog::where('exchange', $ex)->where('ts', '>=', $today)->get();
+            $logs = TradeLog::mainFeed()->where('exchange', $ex)->where('ts', '>=', $today)->get();
             $errors = [];
             foreach ($logs as $log) {
                 foreach (is_array($log->details) ? $log->details : [] as $row) {
@@ -539,7 +539,7 @@ class AdminInsights
 
             $venues[] = [
                 'exchange' => $ex,
-                'last_signal_at' => $this->iso(TradeLog::where('exchange', $ex)->max('ts')),
+                'last_signal_at' => $this->iso(TradeLog::mainFeed()->where('exchange', $ex)->max('ts')),
                 'last_close_synced_at' => $this->iso(DB::table($s->pastPositions)->max('created_at')),
                 'last_key_check_at' => $this->iso(DB::table($s->accountsTable)->max('key_checked_at')),
                 'signals_today' => $logs->count(),
@@ -611,7 +611,7 @@ class AdminInsights
      */
     public function strategyInsights(?string $exchange, ?string $from, ?string $to): array
     {
-        $logs = TradeLog::query()
+        $logs = TradeLog::mainFeed()
             ->whereNotNull('strategy')->where('strategy', '!=', '')
             ->when($exchange, fn ($q) => $q->where('exchange', $exchange))
             ->when($from, fn ($q) => $q->where('ts', '>=', $from.' 00:00:00'))

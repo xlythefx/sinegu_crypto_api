@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\TradeLog;
 use App\Services\Admin\SignalHealth;
+use App\Services\Engine\WebhookPaths;
 use App\Services\Exchanges\ExchangeSchema;
 use App\Services\Positions\CloseSource;
 use Illuminate\Http\JsonResponse;
@@ -46,8 +47,10 @@ class AdminTradeLogController extends Controller
      * Exit rows carry each account's closed trade (`close`: entry → exit, P&L
      * after fees), matched from {x}_pastpositions.
      *
-     * Signal filters (exchange, side, type, action, ticker, category, strategy,
-     * result, from/to) run in SQL. ACCOUNT filters look inside each signal's
+     * Signal filters (exchange, feed, side, type, action, ticker, category,
+     * strategy, result, from/to) run in SQL. `feed` = main | test (anything
+     * else = both): main is TradingView's webhooks, test the testers-only
+     * feed (WebhookPaths). ACCOUNT filters look inside each signal's
      * fan-out and run in PHP over at most SignalHealth::SCAN_LIMIT signals:
      * - outcome = filled | skipped | failed | problem;
      * - reason  = a SignalHealth reason key;
@@ -186,9 +189,11 @@ class AdminTradeLogController extends Controller
 
     /**
      * Split a window into signals and their retries. A retry row (category
-     * `retry`) is folded under the latest earlier signal with the same
+     * `retry`) is folded under the latest earlier signal with the same feed,
      * exchange, action and ticker within RETRY_FOLD_MINUTES; one with no such
-     * signal in the window stays a row of its own.
+     * signal in the window stays a row of its own. The feed is part of the
+     * key so a test-feed retry can never fold under a main-feed signal (or
+     * the other way round) for the same coin.
      *
      * @return array{0: Collection<int, TradeLog>, 1: array<int, list<TradeLog>>}
      */
@@ -198,7 +203,8 @@ class AdminTradeLogController extends Controller
         $retries = [];
         $last = [];
         foreach ($window->sortBy(fn (TradeLog $l) => [$l->ts?->getTimestamp() ?? 0, $l->id]) as $log) {
-            $key = "{$log->exchange}|{$log->action}|{$log->ticker}";
+            $feed = $log->feed ?? 'main';
+            $key = "{$feed}|{$log->exchange}|{$log->action}|{$log->ticker}";
             $parent = $last[$key] ?? null;
             if ($log->category === 'retry' && $parent
                 && ($log->ts?->getTimestamp() ?? 0) - ($parent->ts?->getTimestamp() ?? 0) <= self::RETRY_FOLD_MINUTES * 60) {
@@ -216,10 +222,17 @@ class AdminTradeLogController extends Controller
         ];
     }
 
-    /** Closes made outside the bot can only answer exit-side, account-level questions. */
+    /**
+     * Closes made outside the bot can only answer exit-side, account-level
+     * questions — and never a feed filter: a close made by hand on the
+     * exchange arrived on no feed at all.
+     */
     private function wantsOutsideCloses(Request $request, string $source, string $outcome, string $reason): bool
     {
         if ($source === 'signals' || $outcome !== '' || $reason !== '') {
+            return false;
+        }
+        if (WebhookPaths::isFeed($request->query('feed'))) {
             return false;
         }
         if ($request->query('type') === 'entry' || $request->query('category') || $request->query('strategy') || $request->query('result')) {
@@ -439,6 +452,11 @@ class AdminTradeLogController extends Controller
         if ($exchange = $request->query('exchange')) {
             $query->where('exchange', $exchange);
         }
+        // feed = main | test. Anything else (or nothing) shows both feeds.
+        $feed = $request->query('feed');
+        if (WebhookPaths::isFeed($feed)) {
+            $query->where('feed', $feed);
+        }
         if ($action = $request->query('action')) {
             $query->where('action', strtoupper($action));
         }
@@ -587,6 +605,8 @@ class AdminTradeLogController extends Controller
             'kind' => 'signal',
             'id' => $log->id,
             'exchange' => $log->exchange,
+            // main (TradingView, everyone) | test (testers only).
+            'feed' => $log->feed ?? 'main',
             'action' => $log->action,
             // The plain words: which side of the market, and opening or closing.
             'side' => in_array($action, ['SELL', 'EXIT_SHORT'], true) ? 'SHORT' : 'LONG',

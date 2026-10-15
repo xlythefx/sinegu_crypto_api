@@ -102,6 +102,32 @@ class AdminOpenPositionsTest extends EngineTestCase
         $this->assertSame([$flat], $accounts->pluck('uni_id')->all());
     }
 
+    /**
+     * A tester's positions were opened by the TEST feed — the master never
+     * sees those signals — so every row says which feed its owner follows and
+     * the page can tag them and leave them out of the master comparison.
+     */
+    public function test_positions_and_accounts_name_the_feed_their_owner_follows(): void
+    {
+        $headers = $this->admin();
+        $alice = $this->makeUser(['name' => 'Alice']);
+        $tess = $this->makeUser(['name' => 'Tess', 'type' => 'tester']);
+        $alicePos = $this->position($alice, $this->makeAccount($alice));
+        $tessPos = $this->position($tess, $this->makeAccount($tess, [], 'mexc'), [], 'mexc');
+
+        $body = $this->getJson('/api/admin/open-positions', $headers)->assertOk()->json();
+
+        $rows = collect($body['positions']);
+        $this->assertSame('main', $rows->first(fn ($r) => $r['exchange'] === 'binance' && $r['id'] === $alicePos)['feed']);
+        $tester = $rows->first(fn ($r) => $r['exchange'] === 'mexc' && $r['id'] === $tessPos);
+        $this->assertSame('test', $tester['feed']);
+        $this->assertSame('tester', $tester['owner_type']);
+
+        $accounts = collect($body['accounts'])->keyBy('uni_id');
+        $this->assertSame('main', $accounts[$alice]['feed']);
+        $this->assertSame('test', $accounts[$tess]['feed']);
+    }
+
     public function test_refresh_has_a_thirty_second_platform_wide_cooldown(): void
     {
         Http::fake(['engine.test:5010/*' => Http::response(['success' => true], 200)]);

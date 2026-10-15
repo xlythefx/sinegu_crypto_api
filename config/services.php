@@ -102,10 +102,21 @@ return [
             'bybit' => env('BYBIT_ENGINE_WEBHOOK_SECRET', env('BINANCE_ENGINE_WEBHOOK_SECRET', env('ENGINE_WEBHOOK_SECRET'))),
             'mexc' => env('MEXC_ENGINE_WEBHOOK_SECRET', env('BINANCE_ENGINE_WEBHOOK_SECRET', env('ENGINE_WEBHOOK_SECRET'))),
         ],
+        // The TEST feed's webhook token (WebhookPaths::TEST — tester-owned
+        // accounts only). Must equal the engine's BINANCE_ABCD_TEST_WEBHOOK_SECRET.
+        // Deliberately its own value with NO fallback to the main secret: the
+        // whole point of the test feed is that a provider holding this token
+        // can never reach a customer's account, and a fallback would make the
+        // two tokens one. Empty = the console cannot send a test signal.
+        'test_webhook_secret' => env('ENGINE_TEST_WEBHOOK_SECRET'),
         'targets' => [
             'local' => env('ENGINE_URL_LOCAL', 'http://127.0.0.1:5010'),
             'prod' => env('ENGINE_URL_PROD', 'http://127.0.0.1:5010'),
         ],
+        // The public origin TradingView (or any other signal provider) posts
+        // to on prod — nginx proxies exactly the WebhookPaths paths from it to
+        // the engine. Shown on Admin → Webhooks; never used to send anything.
+        'public_webhook_base' => env('ENGINE_PUBLIC_WEBHOOK_BASE', 'https://pixel-alpha.com'),
         // The outbound address the exchange sees when this box calls it — what
         // a user must allow-list on their API key. Shown verbatim in the
         // "key blocked" modal, so it must be the IP, never a URL.

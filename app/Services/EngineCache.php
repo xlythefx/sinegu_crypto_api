@@ -35,6 +35,11 @@ class EngineCache
 
     private const TRADED_KEY = 'engine:traded-exchanges';
 
+    private const HEALTH_KEY = 'engine:health';
+
+    /** How long a /health answer is reused — an admin page, not a monitor. */
+    private const HEALTH_TTL = 30;
+
     /**
      * The token the engine's /admin/* routes take as X-Admin-Secret.
      *
@@ -228,6 +233,43 @@ class EngineCache
         Cache::put(self::TRADED_KEY, $list, 60);
 
         return $list;
+    }
+
+    /**
+     * The engine's whole `/health` answer, decoded, remembered for 30 s. Null
+     * when the engine does not answer (down, restarting, not deployed here) or
+     * answers something that is not a JSON object — UNKNOWN, which callers
+     * must report as unknown rather than as "nothing is enabled".
+     *
+     * Read by Admin → Webhooks for `exchanges` (the venues it trades),
+     * `test_feed.enabled` and `webhooks[]` ({exchange, feed, path, enabled}).
+     * Only a real answer is cached, so a dead engine is re-asked on the next
+     * page load instead of being reported dead for half a minute after it is
+     * back. Never throws.
+     *
+     * @return array<string, mixed>|null
+     */
+    public function health(): ?array
+    {
+        $cached = Cache::get(self::HEALTH_KEY);
+        if (is_array($cached)) {
+            return $cached;
+        }
+
+        $base = rtrim((string) config('services.engine.targets.local', 'http://127.0.0.1:5010'), '/');
+        try {
+            $response = Http::timeout(self::TIMEOUT)->get("{$base}/health");
+            $body = $response->successful() ? $response->json() : null;
+        } catch (\Throwable) {
+            return null;
+        }
+        if (! is_array($body)) {
+            return null;
+        }
+
+        Cache::put(self::HEALTH_KEY, $body, self::HEALTH_TTL);
+
+        return $body;
     }
 
     /** @return array{refreshed: list<string>, error: ?string} */
