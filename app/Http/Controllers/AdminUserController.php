@@ -10,6 +10,7 @@ use App\Models\UserCredential;
 use App\Services\Discord\DiscordRoleSync;
 use App\Services\EngineCache;
 use App\Services\InvoiceService;
+use App\Services\Exchanges\AccountRefresh;
 use App\Services\Exchanges\ExchangeSchema;
 use App\Services\Positions\EntryStreak;
 use App\Services\UserStatsService;
@@ -152,35 +153,13 @@ class AdminUserController extends Controller
      * to the user's keys, so one press costs one exchange read per account.
      * The page then re-reads its figures from the DB the engine just wrote.
      */
-    public function refresh(string $uniId, EngineCache $engine): JsonResponse
+    public function refresh(string $uniId, AccountRefresh $refresh): JsonResponse
     {
         if (! UserCredential::find($uniId)) {
             return $this->userNotFound();
         }
 
-        $keys = $this->stats->allAccounts($uniId)
-            ->whereNull('deleted_at')
-            ->pluck('api_key')->filter()->values()->all();
-
-        if ($keys === []) {
-            return response()->json([
-                'success' => true,
-                'accounts' => 0,
-                'message' => 'No connected exchange account — nothing to read.',
-            ]);
-        }
-
-        $balances = $engine->syncBalances($keys, 30);
-        $positions = $engine->syncPositions($keys, 30);
-        $reached = $balances || $positions;
-
-        return response()->json([
-            'success' => $reached,
-            'accounts' => count($keys),
-            'message' => $reached
-                ? 'Balances and positions read from the exchange.'
-                : 'Could not reach the trading engine — showing the last synced figures.',
-        ], $reached ? 200 : 503);
+        return PositionRefreshController::respond($refresh->forUser($uniId));
     }
 
     /**

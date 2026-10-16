@@ -206,12 +206,12 @@ class AdminWebhookTest extends EngineTestCase
         Http::fake();
 
         $this->getJson('/api/admin/webhooks')->assertUnauthorized();
-        foreach (['collaborator', 'tester', 'user'] as $type) {
+        foreach (['collaborator', 'user'] as $type) {
             $this->getJson('/api/admin/webhooks', $this->as($type))
                 ->assertForbidden()
                 ->assertJsonPath('error_code', 'FORBIDDEN');
         }
-        foreach (['admin', 'master', 'developer'] as $type) {
+        foreach (['admin', 'master', 'developer', 'tester'] as $type) {
             $this->getJson('/api/admin/webhooks', $this->as($type))->assertOk();
         }
     }

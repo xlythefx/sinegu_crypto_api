@@ -26,9 +26,13 @@ class UserCredential extends Authenticatable
      *    another signal provider) at prod without touching anyone's money.
      *  - **No billing.** Monthly invoicing keys on `type = 'user'`, so a tester
      *    is never invoiced; demo and real-money accounts alike.
-     *  - **No admin portal.** Not in EnsureAdmin::ROLES nor EnsureStaff::ROLES.
-     *    It may still CONNECT the staff-only venues (they exist to be tested),
-     *    which is the one admin-list privilege it shares.
+     *  - **Admin portal, full access** (owner, 2026-10-16 — it was trader-only
+     *    for a day): in EnsureAdmin::ROLES, so it opens every admin page and
+     *    may connect the staff-only venues. Not the developer-only surfaces
+     *    (Database console, test-mode payments), which check `developer`.
+     *  - **Fetch now** on its own Positions page (POST /user/positions/refresh,
+     *    PositionRefreshController): a test signal's position shows at once
+     *    instead of after the 300 s poller tick.
      *  - **Not a customer.** AdminInsights counts `type = 'user'` only, and no
      *    Discord Trader role is granted (an internal account, not a trader).
      * Changing a user to or from this role is refused while they hold an open

@@ -16,8 +16,9 @@ use Laravel\Sanctum\Sanctum;
  * `main`), so they trade only the test webhooks' signals. Moving a user into
  * or out of the role moves their accounts to the other feed, which is why it
  * waits until they are flat and pings the engine to drop its cached list. A
- * tester may connect the staff-only venues, opens no admin page, and is never
- * counted as a customer.
+ * tester has the full admin portal (owner, 2026-10-16) — so it may connect
+ * the staff-only venues — has no developer-only surface, may fetch its own
+ * positions on demand, and is never counted as a customer.
  */
 class TesterRoleTest extends EngineTestCase
 {
@@ -217,7 +218,7 @@ class TesterRoleTest extends EngineTestCase
         $this->assertDatabaseCount('bybit_accounts', 1);
     }
 
-    public function test_a_tester_opens_no_admin_page(): void
+    public function test_a_tester_has_the_admin_portal_but_no_developer_surface(): void
     {
         $tester = $this->makeUser(['type' => 'tester']);
 
@@ -228,8 +229,80 @@ class TesterRoleTest extends EngineTestCase
             '/api/admin/manual-trade/targets',
             '/api/admin/webhooks',
         ] as $url) {
-            $this->actor($tester)->getJson($url)->assertForbidden();
+            $this->actor($tester)->getJson($url)->assertOk();
         }
+
+        // The Database console checks `developer` exactly.
+        $this->actor($tester)->getJson('/api/admin/database/tables')->assertForbidden();
+    }
+
+    public function test_a_developer_may_switch_themselves_to_tester(): void
+    {
+        // Tester is an admin role, so this is not "demoting yourself out of
+        // the admin roles" — the refusal the owner hit on 2026-10-16.
+        $dev = $this->makeUser(['type' => 'developer']);
+
+        $this->setRole($dev, $dev, 'tester')->assertOk();
+        $this->assertSame('tester', UserCredential::find($dev)->type);
+    }
+
+    // ---- Fetch on /dashboard/positions ----------------------------------------
+
+    public function test_a_tester_fetches_their_own_accounts_from_the_exchange(): void
+    {
+        $tester = $this->makeUser(['type' => 'tester']);
+        $this->makeAccount($tester, ['api_key' => 'TESTER-KEY']);
+        $this->makeAccount($this->makeUser(), ['api_key' => 'SOMEONE-ELSE']);
+
+        $this->actor($tester)->postJson('/api/user/positions/refresh')
+            ->assertOk()
+            ->assertJsonPath('success', true)
+            ->assertJsonPath('accounts', 1);
+
+        $sent = collect(Http::recorded())->map(fn ($pair) => $pair[0]);
+        foreach (['refresh-balances', 'refresh-positions'] as $path) {
+            $call = $sent->first(fn (HttpRequest $r) => str_ends_with($r->url(), "/admin/{$path}"));
+            $this->assertNotNull($call, $path);
+            $this->assertSame(['TESTER-KEY'], $call->data()['api_keys']);
+        }
+    }
+
+    public function test_fetch_is_for_testers_only(): void
+    {
+        foreach (['user', 'admin', 'developer'] as $type) {
+            $uniId = $this->makeUser(['type' => $type]);
+            $this->makeAccount($uniId);
+            $this->actor($uniId)->postJson('/api/user/positions/refresh')
+                ->assertForbidden()
+                ->assertJsonPath('error_code', 'FORBIDDEN');
+        }
+    }
+
+    public function test_a_second_fetch_inside_the_cooldown_is_refused(): void
+    {
+        $tester = $this->makeUser(['type' => 'tester']);
+        $this->makeAccount($tester);
+
+        $this->actor($tester)->postJson('/api/user/positions/refresh')->assertOk();
+        $this->actor($tester)->postJson('/api/user/positions/refresh')
+            ->assertStatus(429)
+            ->assertJsonPath('error_code', 'REFRESH_COOLDOWN');
+    }
+
+    public function test_fetch_with_nothing_connected_or_the_engine_down(): void
+    {
+        $tester = $this->makeUser(['type' => 'tester']);
+        $this->actor($tester)->postJson('/api/user/positions/refresh')
+            ->assertOk()->assertJsonPath('accounts', 0);
+
+        $other = $this->makeUser(['type' => 'tester']);
+        $this->makeAccount($other);
+        // A different engine host that answers 500 (a second fake on the same
+        // host would not replace the one from setUp).
+        config(['services.engine.targets.local' => 'http://engine-down.test:5010']);
+        Http::fake(['engine-down.test:5010/*' => Http::response(['error' => 'down'], 500)]);
+        $this->actor($other)->postJson('/api/user/positions/refresh')
+            ->assertStatus(503)->assertJsonPath('success', false);
     }
 
     public function test_a_tester_is_never_counted_as_a_customer(): void

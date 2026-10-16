@@ -32,6 +32,7 @@ use App\Http\Controllers\InvoiceController;
 use App\Http\Controllers\PaymentController;
 use App\Http\Controllers\PasswordResetController;
 use App\Http\Controllers\PayoutMethodController;
+use App\Http\Controllers\PositionRefreshController;
 use App\Http\Controllers\ProfileController;
 use App\Http\Controllers\PublicMarketController;
 use App\Http\Controllers\PublicStatsController;
@@ -194,6 +195,10 @@ Route::middleware(['auth:sanctum', 'account.active', 'email.verified'])->group(f
         // Settings → the optional Telegram / Discord usernames given at sign-up.
         Route::get('/contacts', [ContactHandleController::class, 'show']);
         Route::put('/contacts', [ContactHandleController::class, 'update']);
+        // A tester's "Fetch" on /dashboard/positions (tester role checked in
+        // the controller, plus its own 15 s per-user cooldown).
+        Route::post('/positions/refresh', [PositionRefreshController::class, 'refresh'])
+            ->middleware('throttle:10,1');
     });
 
     Route::prefix('referrals')->group(function () {
