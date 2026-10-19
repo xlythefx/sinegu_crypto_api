@@ -157,6 +157,35 @@ class EntryStreakTest extends EngineTestCase
         $this->assertEquals($expected, $userTab['streak']);
     }
 
+    public function test_an_open_position_carries_its_entry_streak_on_the_admin_list(): void
+    {
+        $owner = $this->makeUser();
+        $admin = $this->makeUser(['type' => 'admin']);
+        $apiKey = DB::table('binance_accounts')->where('id', $this->makeAccount($owner))->value('api_key');
+        $open = ['api_key' => $apiKey, 'uni_id' => $owner, 'entry_price' => 2.05, 'mark_price' => 2.1, 'unrealized_profit' => -3];
+        DB::table('binance_positions')->insert([
+            $open + ['symbol' => 'RENDERUSDT', 'position_side' => 'SHORT', 'position_amt' => -400],
+            // Same coin, other side: the SHORT's tag must not attach to it.
+            $open + ['symbol' => 'RENDERUSDT', 'position_side' => 'LONG', 'position_amt' => 200],
+        ]);
+        $this->postJson('/api/engine/binance/open-strategies', [
+            'api_key' => $apiKey, 'symbol' => 'RENDERUSDT', 'position_side' => 'SHORT',
+        ] + self::STREAK, $this->engineHeaders())->assertOk();
+        // Another venue's tag with the same key/coin/side is not this position's.
+        DB::table('open_strategies')->insert([
+            'exchange' => 'mexc', 'api_key' => $apiKey, 'symbol' => 'RENDERUSDT', 'position_side' => 'LONG',
+            'streak_kind' => 'win', 'streak_run' => 2, 'streak_step' => 2, 'streak_size' => 80, 'streak_base_size' => 60,
+        ]);
+
+        $positions = collect($this->getJson('/api/admin/positions', $this->headersFor($admin))->assertOk()->json('positions'));
+        $this->assertCount(2, $positions);
+        $this->assertEquals(
+            ['kind' => 'loss', 'run' => 3, 'step' => 2, 'size' => 40.0, 'base_size' => 60.0, 'effect' => 'smaller'],
+            $positions->firstWhere('position_side', 'SHORT')['streak'],
+        );
+        $this->assertNull($positions->firstWhere('position_side', 'LONG')['streak']);
+    }
+
     public function test_a_larger_win_step_reads_larger(): void
     {
         $owner = $this->makeUser();

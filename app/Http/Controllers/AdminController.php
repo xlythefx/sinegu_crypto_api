@@ -146,12 +146,22 @@ class AdminController extends Controller
     {
         $open = DB::table('binance_positions as p')
             ->leftJoin('binance_accounts as a', 'p.api_key', '=', 'a.api_key')
+            // The position's entry tag — where the engine records whether a
+            // streak step set its size. One tag per stack (unique key), since
+            // every entry of a stack shares one step.
+            ->leftJoin('open_strategies as s', function ($j) {
+                $j->on('s.api_key', '=', 'p.api_key')
+                    ->on('s.symbol', '=', 'p.symbol')
+                    ->on('s.position_side', '=', 'p.position_side')
+                    ->where('s.exchange', '=', 'binance');
+            })
             ->orderBy('a.name')
             ->orderBy('p.symbol')
             ->get([
                 'p.id', 'a.id as account_id', 'a.name as account_name',
                 'a.balance as account_balance', 'p.symbol', 'p.position_side',
                 'p.position_amt', 'p.entry_price', 'p.mark_price', 'p.unrealized_profit',
+                's.streak_kind', 's.streak_run', 's.streak_step', 's.streak_size', 's.streak_base_size',
             ]);
 
         $past = DB::table('binance_pastpositions as t')
@@ -180,6 +190,8 @@ class AdminController extends Controller
                 'price' => round((float) ($p->mark_price ?? $p->entry_price ?? 0), 8),
                 'entry_price' => $p->entry_price === null ? null : round((float) $p->entry_price, 8),
                 'unrealized_pnl' => round((float) ($p->unrealized_profit ?? 0), 2),
+                // Streak sizing at entry, every figure (null = normal size).
+                'streak' => EntryStreak::forStaff($p),
                 'broker' => 'Binance',
             ])->values(),
             'trades' => $past->map(fn ($t) => [
