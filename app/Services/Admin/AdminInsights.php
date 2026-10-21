@@ -41,6 +41,9 @@ class AdminInsights
     /** The Overview's Platform view: whose money it pools. */
     public const PLATFORM_SCOPES = ['all', 'customers', 'master'];
 
+    /** When the test signal feed went live (UTC); tester trades before it followed the main feed. */
+    public const TEST_FEED_SINCE = '2026-10-15 12:00:00';
+
     public function __construct(
         private PaymentEnvironment $env,
         private UserStatsService $stats,
@@ -575,6 +578,12 @@ class AdminInsights
      * The client computes the statistics (lib/strategyStats.ts), so every
      * trade row carries what that math reads plus `exchange` and `uni_id`.
      *
+     * `all` also carries TESTER accounts' trades — demo or not — from the
+     * moment the test feed went live, so a strategy run on the test feed
+     * (QuantLab) gets its own card like any other. Never earlier: a tester
+     * account may have followed the main feed before it became one, and
+     * those demo trades would otherwise fold into the real strategy's card.
+     *
      * @param  'master'|'customers'|'all'  $scope
      */
     public function strategyTrades(string $scope, ?string $exchange = null): Collection
@@ -584,11 +593,14 @@ class AdminInsights
             'customers' => $this->customerAccounts(),
             default => $this->masterAccounts()->concat($this->customerAccounts()),
         };
+        $testers = $scope === 'all' ? $this->testerAccounts() : collect();
         if ($exchange) {
             $accounts = $accounts->where('exchange', $exchange);
+            $testers = $testers->where('exchange', $exchange);
         }
 
         return $this->pastRows($accounts)
+            ->concat($this->pastRows($testers, Carbon::parse(self::TEST_FEED_SINCE, 'UTC')))
             ->filter(fn ($p) => trim((string) $p->strategy) !== '')
             ->sortBy('closed_at')
             ->map(fn ($p) => [
@@ -732,6 +744,14 @@ class AdminInsights
         return $this->accounts()->filter(
             fn ($a) => isset($ids[$a->uni_id]) && ($includeDemo || (int) $a->demo === 0)
         )->values();
+    }
+
+    /** Tester accounts (type = tester), demo included — the test feed's accounts. */
+    private function testerAccounts(): Collection
+    {
+        $ids = UserCredential::where('type', 'tester')->pluck('uni_id')->flip();
+
+        return $this->accounts()->filter(fn ($a) => isset($ids[$a->uni_id]))->values();
     }
 
     /** Every non-sandbox account on every exchange, tagged with its exchange. */

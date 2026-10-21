@@ -310,6 +310,27 @@ class AdminInsightsTest extends EngineTestCase
         $this->assertSame(0.0, (float) $compare['customers'][0]['win_rate']);
     }
 
+    public function test_all_scope_shows_tester_test_feed_trades_but_not_their_main_feed_history(): void
+    {
+        $admin = $this->makeUser(['type' => 'admin']);
+        $tester = $this->makeUser(['type' => 'tester']);
+        $testerDemo = $this->makeAccount($tester, ['demo' => 1]);
+
+        // Before the test feed: this account still followed the main feed.
+        $this->closeTrade('binance', $testerDemo, ['strategy' => 'VWMA-Reversion', 'closed_at' => '2026-10-15 08:00:00']);
+        // After: a test-feed strategy, demo money — still its own card.
+        $this->closeTrade('binance', $testerDemo, ['strategy' => 'QuantLab', 'realized_pnl' => -3, 'closed_at' => '2026-10-16 09:00:00']);
+
+        $h = $this->headersFor($admin);
+        $all = $this->getJson('/api/admin/strategies', $h)->assertOk()->json('trades');
+        $this->assertSame(['QuantLab'], array_column($all, 'strategy'));
+
+        // The master / customers scopes stay real money only.
+        $this->assertCount(0, $this->getJson('/api/admin/strategies?scope=master', $h)->json('trades'));
+        $this->assertCount(0, $this->getJson('/api/admin/strategies?scope=customers', $h)->json('trades'));
+        $this->assertCount(0, $this->getJson('/api/admin/strategies?exchange=mexc', $h)->json('trades'));
+    }
+
     public function test_admin_can_read_any_users_analytics(): void
     {
         $admin = $this->makeUser(['type' => 'admin']);

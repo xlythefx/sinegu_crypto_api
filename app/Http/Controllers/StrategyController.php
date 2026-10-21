@@ -27,7 +27,8 @@ class StrategyController extends Controller
      * Every exchange's table, real money only (no demo, sandbox or SBXINV-
      * rows). `?scope=master` is the master account alone — the strategy's
      * true result; `customers` is every customer pooled; `all` (default) is
-     * both. `?exchange=` narrows to one venue.
+     * both plus tester accounts' test-feed trades (demo included, from
+     * `AdminInsights::TEST_FEED_SINCE`). `?exchange=` narrows to one venue.
      */
     public function index(Request $request, AdminInsights $insights): JsonResponse
     {
