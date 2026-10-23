@@ -913,13 +913,19 @@ class UserStatsService
 
     /**
      * Deposit / withdrawal totals and transaction counts over the connected
-     * accounts' transfer tables (every exchange, or the one named).
+     * accounts' transfer tables (every exchange, or the one named), plus the
+     * transfers themselves, newest first.
+     *
+     * A transfer is dated by the exchange's own `transaction_time` when the
+     * row carries one — rows stored before 2026-09-25 hold the poll time in
+     * `created_at`, which can be days after the money moved. Dates are UTC
+     * ISO strings with a `Z`, rendered in the reader's zone.
      */
     public function capitalFlow(string $uniId, ?string $exchange = null): array
     {
         $transactions = $this->transactions(
             $this->displayAccounts($uniId, $exchange),
-            ['type', 'amount', 'created_at'],
+            ['id', 'type', 'amount', 'currency', 'transaction_time', 'created_at'],
         );
 
         $deposits = $transactions->where('type', 'DEPOSIT');
@@ -927,12 +933,29 @@ class UserStatsService
         $in = (float) $deposits->sum('amount');
         $out = (float) $withdrawals->sum('amount');
 
+        $transfers = $transactions
+            ->whereIn('type', ['DEPOSIT', 'WITHDRAWAL'])
+            ->map(fn ($t) => [
+                'id' => (int) $t->id,
+                'exchange' => $t->exchange,
+                'type' => $t->type === 'DEPOSIT' ? 'deposit' : 'withdrawal',
+                'amount' => round((float) $t->amount, 2),
+                'currency' => $t->currency ?: 'USDT',
+                'at' => $t->transaction_time
+                    ? gmdate('Y-m-d\TH:i:s\Z', intdiv((int) $t->transaction_time, 1000))
+                    : Carbon::parse($t->created_at, 'UTC')->format('Y-m-d\TH:i:s\Z'),
+            ])
+            ->sortByDesc('at')
+            ->values()
+            ->all();
+
         return [
             'deposits' => round($in, 2),
             'deposit_count' => $deposits->count(),
             'withdrawals' => round($out, 2),
             'withdrawal_count' => $withdrawals->count(),
             'net_flow' => round($in - $out, 2),
+            'transfers' => $transfers,
         ];
     }
 

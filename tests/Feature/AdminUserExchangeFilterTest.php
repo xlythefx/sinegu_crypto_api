@@ -115,6 +115,26 @@ class AdminUserExchangeFilterTest extends EngineTestCase
         $this->assertEquals(1515, $s['hwm']); // max(1100, 560) < equity 1515
     }
 
+    public function test_transfers_are_listed_newest_first_dated_when_the_money_moved(): void
+    {
+        DB::table('binance_transactions')->insert([
+            'uni_id' => $this->uniId, 'api_key' => 'binance-key', 'type' => 'WITHDRAWAL',
+            'amount' => 25.5, 'currency' => 'USDT',
+            // Exchange time 2026-07-10 12:00 UTC, polled two days later.
+            'transaction_time' => 1783684800000, 'created_at' => '2026-07-12 08:00:00',
+        ]);
+
+        $transfers = $this->summary()['capital_flow']['transfers'];
+
+        $this->assertCount(3, $transfers);
+        $this->assertSame('withdrawal', $transfers[0]['type']);
+        $this->assertSame('2026-07-10T12:00:00Z', $transfers[0]['at']);
+        $this->assertEquals(25.5, $transfers[0]['amount']);
+        $this->assertSame('deposit', $transfers[1]['type']);
+        $this->assertSame('2026-05-01T09:00:00Z', $transfers[1]['at']); // no exchange time: created_at
+        $this->assertStringNotContainsString('binance-key', json_encode($transfers));
+    }
+
     public function test_a_venue_narrows_every_figure_to_that_venue(): void
     {
         $s = $this->summary('?exchange=mexc');
@@ -127,6 +147,8 @@ class AdminUserExchangeFilterTest extends EngineTestCase
         $this->assertEquals(50, $s['net_deposits']);
         $this->assertEquals(550, $s['capital_flow']['capital']);
         $this->assertSame(1, $s['metrics']['total_trades']);
+        $this->assertCount(1, $s['capital_flow']['transfers']);
+        $this->assertSame('mexc', $s['capital_flow']['transfers'][0]['exchange']);
         $this->assertEquals(3, $s['commissions']['this_month']);
         $this->assertEquals(560, $s['hwm']); // MEXC's own invoice HWM, above its equity
 
