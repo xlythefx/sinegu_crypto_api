@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\TradeLog;
+use App\Services\Admin\SignalDelivery;
 use App\Services\Admin\SignalHealth;
 use App\Services\Engine\WebhookPaths;
 use App\Services\Exchanges\ExchangeSchema;
@@ -233,6 +234,10 @@ class AdminTradeLogController extends Controller
             return false;
         }
         if (WebhookPaths::isFeed($request->query('feed'))) {
+            return false;
+        }
+        // Nor a delivery filter: nothing was delivered.
+        if ($request->query('delivery') === 'slow') {
             return false;
         }
         if ($request->query('type') === 'entry' || $request->query('category') || $request->query('strategy') || $request->query('result')) {
@@ -491,6 +496,12 @@ class AdminTradeLogController extends Controller
         } elseif ($result === 'problem') {
             $query->where('success', false);
         }
+        // delivery=slow -> signals that took longer than TradingView waits
+        // (SignalDelivery::SLOW_MS) to reach us and be answered — the rows
+        // TradingView may show as "failed / timed out".
+        if ($request->query('delivery') === 'slow') {
+            SignalDelivery::whereSlow($query);
+        }
         if ($from = $request->query('from')) {
             $query->where('ts', '>=', $from.' 00:00:00');
         }
@@ -645,6 +656,9 @@ class AdminTradeLogController extends Controller
             'master' => SignalHealth::masterOutcome($log),
             'problems' => $problems,
             'normal_skips' => $normal,
+            // When TradingView fired it, when we got it, how fast we answered
+            // (null = the engine recorded no timing: older rows, retries).
+            'delivery' => SignalDelivery::present($log),
             'ts' => optional($log->ts)->toIso8601String(),
         ];
     }

@@ -8,6 +8,7 @@ use App\Models\ExchangeAccount;
 use App\Models\OpenStrategy;
 use App\Models\TradeLog;
 use App\Models\UserCredential;
+use App\Services\Admin\SignalDelivery;
 use App\Services\Assets\StreakSizing;
 use App\Services\Positions\EntryStreak;
 use Illuminate\Http\JsonResponse;
@@ -230,6 +231,12 @@ class EngineController extends Controller
         // An engine deployed before the test feed existed sends no feed, and
         // every signal it can receive is a main-feed one.
         $data['feed'] = $data['feed'] ?? 'main';
+
+        // Delivery timing is read OUTSIDE validate(): a malformed value is
+        // dropped, never a 422 that would lose the whole signal's row.
+        $data += SignalDelivery::fromPayload(
+            $request->input('sent_at'), $request->input('received_at'), $request->input('ack_ms'),
+        );
 
         $log = TradeLog::create($data + ['exchange' => $exchange]);
 

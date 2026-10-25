@@ -30,6 +30,12 @@ class TradeLog extends Model
         'skipped',
         'details',
         'ts',
+        // Delivery timing (App\Services\Admin\SignalDelivery): when TradingView
+        // fired the alert, when the engine got it, and how fast it answered.
+        'sent_at',
+        'received_at',
+        'transit_ms',
+        'ack_ms',
     ];
 
     protected function casts(): array
@@ -38,6 +44,10 @@ class TradeLog extends Model
             'success' => 'boolean',
             'details' => 'array',
             'ts' => 'datetime',
+            'sent_at' => 'datetime',
+            'received_at' => 'datetime',
+            'transit_ms' => 'integer',
+            'ack_ms' => 'float',
         ];
     }
 
