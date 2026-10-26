@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Casts\MillisecondDateTime;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 
@@ -44,8 +45,10 @@ class TradeLog extends Model
             'success' => 'boolean',
             'details' => 'array',
             'ts' => 'datetime',
-            'sent_at' => 'datetime',
-            'received_at' => 'datetime',
+            // Milliseconds kept: the feed comparison tells two signals apart
+            // that reached us within the same second.
+            'sent_at' => MillisecondDateTime::class,
+            'received_at' => MillisecondDateTime::class,
             'transit_ms' => 'integer',
             'ack_ms' => 'float',
         ];

@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\TradeLog;
+use App\Services\Admin\FeedComparison;
 use App\Services\Admin\SignalDelivery;
 use App\Services\Admin\SignalHealth;
 use App\Services\Engine\WebhookPaths;
@@ -10,6 +11,7 @@ use App\Services\Exchanges\ExchangeSchema;
 use App\Services\Positions\CloseSource;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Arr;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
@@ -447,6 +449,48 @@ class AdminTradeLogController extends Controller
                 fn ($r) => $r['severity'] === SignalHealth::NORMAL,
             )),
         ]);
+    }
+
+    /**
+     * GET /api/admin/trade-logs/compare — TradingView (main feed) vs QuantLab
+     * (test feed): the same signal from both, paired, with which arrived first
+     * and the master's vs the tester's fill (FeedComparison).
+     *
+     * Takes exchange, side, type, ticker and from/to; with no dates it reads
+     * the last 7 days. Never the feed filter (both feeds ARE the comparison),
+     * nor the delivery / result / category / strategy ones. Only first runs
+     * with an arrival time are read — a retry was never delivered, and a row
+     * from before 25 Oct 2026 has no arrival to compare.
+     */
+    public function compare(Request $request, FeedComparison $comparison): JsonResponse
+    {
+        $scope = $request->duplicate(
+            Arr::only($request->query(), ['exchange', 'side', 'type', 'ticker', 'from', 'to'])
+        );
+        $query = $this->baseQuery($scope)
+            ->whereNotNull('received_at')
+            ->where(fn ($q) => $q->whereNull('category')->orWhere('category', '!=', 'retry'));
+        $from = $scope->query('from');
+        $to = $scope->query('to');
+        if (! $from && ! $to) {
+            $query->where('ts', '>=', now()->subDays(7));
+        }
+
+        // Each feed reads its own newest SCAN_LIMIT, so a busy main feed can
+        // never crowd the test feed's signals out of the window.
+        $logs = collect(WebhookPaths::FEEDS)->flatMap(
+            fn (string $feed) => (clone $query)->where('feed', $feed)
+                ->orderByDesc('received_at')->limit(SignalHealth::SCAN_LIMIT)->get()
+        );
+
+        return response()->json([
+            'success' => true,
+            'match_seconds' => FeedComparison::MATCH_SECONDS,
+            'window' => [
+                'from' => $from ?: now()->subDays(7)->toDateString(),
+                'to' => $to ?: null,
+            ],
+        ] + $comparison->compare($logs));
     }
 
     /** The SQL half of every list: the signal-level filters. */

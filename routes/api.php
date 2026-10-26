@@ -309,6 +309,8 @@ Route::middleware(['auth:sanctum', 'account.active', 'email.verified'])->group(f
         // Health banner + problems grouped by cause (SignalHealth). Before {id}.
         Route::get('/trade-logs/health', [AdminTradeLogController::class, 'health']);
         Route::get('/trade-logs/issues', [AdminTradeLogController::class, 'issues']);
+        // TradingView (main feed) vs QuantLab (test feed), paired (FeedComparison).
+        Route::get('/trade-logs/compare', [AdminTradeLogController::class, 'compare']);
         Route::get('/trade-logs/{id}', [AdminTradeLogController::class, 'show']);
 
         Route::get('/invoices', [AdminInvoiceController::class, 'index']);

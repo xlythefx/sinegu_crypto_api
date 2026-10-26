@@ -63,12 +63,18 @@ class SignalDelivery
         $ack = $log->ack_ms !== null ? (float) $log->ack_ms : null;
 
         return [
-            'sent_at' => optional($log->sent_at)->toIso8601String(),
-            'received_at' => $log->received_at->toIso8601String(),
+            'sent_at' => self::iso($log->sent_at),
+            'received_at' => self::iso($log->received_at),
             'transit_ms' => $transit,
             'ack_ms' => $ack,
             'slow' => self::isSlow($transit, $ack),
         ];
+    }
+
+    /** ISO 8601 UTC with milliseconds ("2026-10-24T14:15:09.120Z"), or null. */
+    public static function iso(?\DateTimeInterface $at): ?string
+    {
+        return $at ? CarbonImmutable::instance($at)->utc()->format('Y-m-d\TH:i:s.v\Z') : null;
     }
 
     public static function isSlow(?int $transitMs, ?float $ackMs): bool
