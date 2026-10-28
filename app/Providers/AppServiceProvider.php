@@ -86,6 +86,14 @@ class AppServiceProvider extends ServiceProvider
             Limit::perMinute(10)->by($request->ip()),
             Limit::perMinute(10)->by('reset|'.$this->emailKey($request)),
         ]);
+
+        // The visitor counter's ping. Only the backstop that keeps a flood
+        // from reaching PHP: VisitRecorder::FLOOD_PER_MINUTE (30) trips first,
+        // drops the rest and marks the IP suspicious. A person opens a page
+        // every few seconds at most.
+        RateLimiter::for('visits', fn (Request $request) => [
+            Limit::perMinute(120)->by('visits|'.$request->ip()),
+        ]);
     }
 
     /**

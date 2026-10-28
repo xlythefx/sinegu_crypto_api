@@ -88,8 +88,11 @@ final class AccessLog
         ] + DeviceInfo::parse($userAgent);
     }
 
-    /** ISO 3166 alpha-2 as Cloudflare sends it (it also uses "T1" for Tor); "XX" is its "unknown". */
-    private static function country(mixed $header): ?string
+    /**
+     * ISO 3166 alpha-2 as Cloudflare sends it (it also uses "T1" for Tor); "XX" is its "unknown".
+     * Shared with the visitor counter (VisitRecorder).
+     */
+    public static function country(mixed $header): ?string
     {
         if (! is_string($header)) {
             return null;
@@ -103,9 +106,9 @@ final class AccessLog
     /**
      * Truncated to the column, and scrubbed to valid UTF-8: the header is
      * whatever the client chose to send, and one invalid byte would make
-     * MySQL refuse the whole row.
+     * MySQL refuse the whole row. Shared with the visitor counter (VisitRecorder).
      */
-    private static function userAgent(?string $ua): ?string
+    public static function userAgent(?string $ua): ?string
     {
         $ua = trim(mb_scrub((string) $ua, 'UTF-8'));
 

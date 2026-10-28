@@ -63,3 +63,8 @@ Schedule::command('assets:apply-pending')->everyMinute()->withoutOverlapping(5);
 // (App\Services\Positions\CloseSource). An outside close is shown on the admin
 // screens and left out of streak sizing.
 Schedule::command('positions:classify-closes')->everyFiveMinutes()->withoutOverlapping(10);
+
+// The visitor counter keeps full IP addresses for 90 days (owner, 2026-10-28;
+// the Privacy Policy says so). After that the IP and User-Agent are removed
+// from the row and the counts stay.
+Schedule::command('visits:purge-ips')->dailyAt('01:10');

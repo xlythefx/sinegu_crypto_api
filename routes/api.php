@@ -16,6 +16,7 @@ use App\Http\Controllers\AdminTodoController;
 use App\Http\Controllers\AdminTradeLogController;
 use App\Http\Controllers\AdminTronTransferController;
 use App\Http\Controllers\AdminUserController;
+use App\Http\Controllers\AdminVisitorController;
 use App\Http\Controllers\AdminWebhookController;
 use App\Http\Controllers\AnalyticsController;
 use App\Http\Controllers\AssetController;
@@ -36,6 +37,7 @@ use App\Http\Controllers\PositionRefreshController;
 use App\Http\Controllers\ProfileController;
 use App\Http\Controllers\PublicMarketController;
 use App\Http\Controllers\PublicStatsController;
+use App\Http\Controllers\PublicVisitController;
 use App\Http\Controllers\ReferralController;
 use App\Http\Controllers\SandboxController;
 use App\Http\Controllers\SandboxEmailController;
@@ -66,6 +68,14 @@ Route::prefix('public')->middleware('throttle:60,1')->group(function () {
     // book that refreshes on the strip's 30s is a picture of a book.
     Route::get('/order-book', [PublicMarketController::class, 'orderBook']);
 });
+
+// The visitor counter's ping from a public page (VisitRecorder decides what
+// counts; always 204). Outside the group above so it never spends the
+// landing page's 60/min. Its own limiter (120/min per IP) is only the
+// backstop that keeps a flood from reaching PHP: VisitRecorder's own flood
+// rule (30/min) trips first and marks the IP suspicious.
+Route::post('/public/visits', [PublicVisitController::class, 'store'])
+    ->middleware('throttle:visits');
 
 // The four unauthenticated writes carry NAMED limiters
 // (AppServiceProvider::configureRateLimiting). Each pairs the old per-IP
@@ -245,6 +255,11 @@ Route::middleware(['auth:sanctum', 'account.active', 'email.verified'])->group(f
 
         // The Strategies list AND the strategy detail page both read only this.
         Route::get('/strategies', [StrategyController::class, 'index']);
+
+        // Admin → Visitors: the public website's traffic. Every staff role,
+        // IP included (owner, 2026-10-28).
+        Route::get('/visitors/summary', [AdminVisitorController::class, 'summary']);
+        Route::get('/visitors/log', [AdminVisitorController::class, 'log']);
     });
 
     Route::prefix('admin')->middleware('admin')->group(function () {
