@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\Asset;
 use App\Models\AssetChange;
 use App\Services\Assets\AssetHistory;
+use App\Services\Assets\BinanceSizingCheck;
 use App\Services\Assets\KillSwitch;
 use App\Services\Assets\PendingSizing;
 use App\Services\Assets\StreakSizing;
@@ -112,6 +113,21 @@ class AssetController extends Controller
             'balance' => $balance === null ? null : round((float) $balance, 2),
             'price' => $price === null ? null : (float) $price,
         ];
+    }
+
+    /**
+     * GET /api/admin/assets/binance-check?ticker=LTCUSDT — the asset form's
+     * "Binance check": the coin's order rules and mark price on Binance, the
+     * smallest account the engine would trade it on, and the signals' leverage.
+     * Works for a coin that is not saved yet (that is the point).
+     */
+    public function binanceCheck(Request $request, BinanceSizingCheck $check): JsonResponse
+    {
+        $data = $request->validate([
+            'ticker' => ['required', 'string', 'max:20', 'regex:/^[A-Za-z0-9]+$/'],
+        ]);
+
+        return response()->json(['success' => true] + $check->check($data['ticker']));
     }
 
     /**
