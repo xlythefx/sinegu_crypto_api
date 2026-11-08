@@ -50,6 +50,7 @@ class SandboxInvoiceController extends Controller
         'equity_end' => 'Equity at month end',
         'deposit_amount' => 'Adjusted deposit',
         'capital_flow' => 'Capital flow',
+        'performance_equity' => 'Equity with transfers set aside',
         'fee_realized' => 'Fee on realized',
         'fee_unrealized' => 'Fee on unrealized',
         'total_fee' => 'Total fee',
@@ -187,6 +188,56 @@ class SandboxInvoiceController extends Controller
                     'deposit_amount' => 15000, 'equity_end' => 16000,
                     'fee_realized' => 200, 'total_fee' => 200,
                     'hwm_after' => 16000, 'status' => 'pending',
+                ],
+            ],
+            // The three below pin the 2026-11-08 rule: money in or out is
+            // neither profit nor loss (InvoiceService::applyHighWaterMark).
+            [
+                'key' => 'withdrawal_profit_month',
+                'title' => 'Withdrawal in a winning month — taking money out is not a loss',
+                'summary' => 'Last month closed at an 11,000 peak. This month the user makes 500 and withdraws 2,000, ending at 9,500. Put the 2,000 back and the account stands at 11,500 — above the peak — so the 500 is billed.',
+                'note' => 'The peak moves down with the money that left: 11,500 − 2,000 = 9,500, so next month is measured against what is actually in the account. Before 2026-11-08 this month billed nothing.',
+                'setup' => [
+                    'initial_deposit' => 10000, 'balance' => 9500, 'unrealized' => 0,
+                    'trades' => [500], 'deposits' => [-2000], 'prior_hwm' => 11000,
+                ],
+                'expect' => [
+                    'hwm_before' => 11000, 'realized_pnl' => 500, 'capital_flow' => -2000,
+                    'equity_end' => 9500, 'performance_equity' => 11500,
+                    'fee_realized' => 100, 'total_fee' => 100,
+                    'hwm_after' => 9500, 'status' => 'pending',
+                ],
+            ],
+            [
+                'key' => 'withdrawal_loss_month',
+                'title' => 'Withdrawal in a losing month — the peak moves down with the money',
+                'summary' => 'Last month closed at an 11,000 peak. This month the user loses 300 and withdraws 2,000, ending at 8,700. Put the 2,000 back: 10,700, still below the peak, so nothing is billed.',
+                'note' => 'The peak becomes 11,000 − 2,000 = 9,000. Next month only has to win back the 300 it lost (8,700 → 9,000) before billing resumes — not climb all the way back to the old 11,000.',
+                'setup' => [
+                    'initial_deposit' => 10000, 'balance' => 8700, 'unrealized' => 0,
+                    'trades' => [-300], 'deposits' => [-2000], 'prior_hwm' => 11000,
+                ],
+                'expect' => [
+                    'hwm_before' => 11000, 'realized_pnl' => -300, 'capital_flow' => -2000,
+                    'equity_end' => 8700, 'performance_equity' => 10700,
+                    'fee_realized' => 0, 'fee_unrealized' => 0, 'total_fee' => 0,
+                    'hwm_after' => 9000, 'status' => 'paid',
+                ],
+            ],
+            [
+                'key' => 'deposit_hides_loss',
+                'title' => 'A deposit cannot turn a losing month into a billable one',
+                'summary' => 'The user starts at 10,000, loses 800 on closed trades, holds 500 of open profit and deposits 5,000, ending at 14,700. Take the 5,000 out: 9,700, below the 10,000 start, so nothing is billed — not even the 6% on the open 500.',
+                'note' => 'The peak moves up with the deposit: 10,000 + 5,000 = 15,000. Before 2026-11-08 the deposit lifted the account over its peak and the 500 open profit was billed 30.',
+                'setup' => [
+                    'initial_deposit' => 10000, 'balance' => 14200, 'unrealized' => 500,
+                    'trades' => [-800], 'deposits' => [5000], 'prior_hwm' => null,
+                ],
+                'expect' => [
+                    'hwm_before' => 10000, 'realized_pnl' => -800, 'unrealized_pnl' => 500,
+                    'capital_flow' => 5000, 'equity_end' => 14700, 'performance_equity' => 9700,
+                    'fee_realized' => 0, 'fee_unrealized' => 0, 'total_fee' => 0,
+                    'hwm_after' => 15000, 'status' => 'paid',
                 ],
             ],
             [
@@ -470,7 +521,7 @@ class SandboxInvoiceController extends Controller
 
         if ($setup['deposits']) {
             $this->seedTransfers($account, $monthYear, $setup['deposits']);
-            $steps[] = \sprintf('Recorded %d deposit(s) inside the month.', count($setup['deposits']));
+            $steps[] = \sprintf('Recorded %d deposit(s) / withdrawal(s) inside the month.', count($setup['deposits']));
         }
 
         // The product path — exactly what the monthly job and the manual form call.

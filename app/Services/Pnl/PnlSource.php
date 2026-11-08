@@ -12,11 +12,15 @@ use Illuminate\Support\Carbon;
 interface PnlSource
 {
     /**
-     * @return array{realized: float, unrealized: float, balance: float, capitalFlow: float, adjustedDeposit: float}
+     * @return array{realized: float, unrealized: float, balance: float, capitalFlow: float, flowBefore: float, flowAfter: float, adjustedDeposit: float}
      *   realized        — closed P&L within [monthStart, monthEnd]
      *   unrealized      — current open P&L snapshot
      *   balance         — current account balance
      *   capitalFlow     — net deposits − withdrawals within the month
+     *   flowBefore      — net deposits − withdrawals BEFORE monthStart
+     *   flowAfter       — net deposits − withdrawals AFTER monthEnd (the
+     *                     balance is read now, on the 1st or later, so it
+     *                     already holds them)
      *   adjustedDeposit — initial deposit + all-time net transfers
      */
     public function periodSnapshot(object $account, Carbon $monthStart, Carbon $monthEnd): array;

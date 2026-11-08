@@ -119,6 +119,30 @@ class Invoice extends Model
             ->first();
     }
 
+    /**
+     * The mark each account stands at NOW: its LATEST month's hwm_after,
+     * keyed "exchange:account_id" (ids repeat across the per-exchange tables).
+     *
+     * Never MAX(hwm_after): since 2026-11-08 a withdrawal lowers the mark
+     * (InvoiceService::applyHighWaterMark), so an older month can hold a
+     * higher figure that no longer applies.
+     *
+     * @param  iterable<object>  $rows  invoice rows with exchange, account_id, month_year, hwm_after
+     * @return array<string, float>
+     */
+    public static function latestHwmByAccount(iterable $rows): array
+    {
+        $latest = [];
+        foreach ($rows as $r) {
+            $key = $r->exchange.':'.$r->account_id;
+            if (! isset($latest[$key]) || strcmp((string) $r->month_year, $latest[$key][0]) > 0) {
+                $latest[$key] = [(string) $r->month_year, (float) $r->hwm_after];
+            }
+        }
+
+        return array_map(fn ($v) => $v[1], $latest);
+    }
+
     /** Owning exchange account (may be soft-deleted). */
     public function account()
     {
@@ -194,6 +218,10 @@ class Invoice extends Model
             'fee_realized' => round($f($this->fee_realized), 2),
             'fee_unrealized' => round($f($this->fee_unrealized), 2),
             'deposit_amount' => round($deposit, 2),
+            // Net money added (+) or taken out (−) during the month. It moves
+            // the high-water mark with it and is never billed as profit, so a
+            // mark that went DOWN is explained on the invoice itself.
+            'capital_flow' => round($f($this->capital_flow), 2),
             'is_first_invoice' => $isFirst,
             'reference_label' => $referenceLabel,
             'reference_value' => round($referenceValue, 2),

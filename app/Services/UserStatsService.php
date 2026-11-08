@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Models\Invoice;
 use App\Services\Exchanges\ExchangeSchema;
 use App\Services\Pnl\TradingFee;
 use Illuminate\Support\Carbon;
@@ -550,7 +551,9 @@ class UserStatsService
             ->where('user_id', $uniId)
             ->whereIn('exchange', $exchanges)
             ->get();
-        $hwm = (float) ($invoices->max('hwm_after') ?? 0);
+        // Each account's CURRENT mark (latest month), never the highest ever —
+        // a withdrawal lowers the mark since 2026-11-08.
+        $hwm = max([0.0, ...array_values(Invoice::latestHwmByAccount($invoices))]);
         $hwm = max($hwm, $equity);
 
         $currentMonth = Carbon::now()->format('Y-m');

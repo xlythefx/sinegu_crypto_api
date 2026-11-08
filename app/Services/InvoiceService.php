@@ -189,24 +189,21 @@ class InvoiceService
             ->first();
         $isFirst = ! $prior;
 
+        // The mark as it stood when the month BEGAN: last month's closing mark,
+        // or — first invoice — the capital the account held on the 1st.
         $hwmBefore = $isFirst
-            ? ((float) $account->initial_deposit ?: $snap['adjustedDeposit'])
+            ? (float) $account->initial_deposit + $snap['flowBefore']
             : (float) $prior->hwm_after;
 
-        $realizedRate = (float) ($rates['realized'] ?? 20) / 100;
-        $unrealizedRate = (float) ($rates['unrealized'] ?? 6) / 100;
-
-        // Fee-eligible profit for the period.
-        $newRealizedProfit = max(0, $snap['realized']);
-        $newUnrealizedProfit = max(0, $snap['unrealized']);
-
-        // Charge only when equity is above the prior high-water mark.
-        $chargeable = $equityEnd > $hwmBefore;
-        $feeRealized = $chargeable ? $newRealizedProfit * $realizedRate : 0.0;
-        $feeUnrealized = $chargeable ? $newUnrealizedProfit * $unrealizedRate : 0.0;
-        $totalFee = round($feeRealized + $feeUnrealized, 8);
-
-        $hwmAfter = $chargeable ? max($hwmBefore, $equityEnd) : $hwmBefore;
+        $hwm = self::applyHighWaterMark(
+            $hwmBefore,
+            $equityEnd,
+            $snap['capitalFlow'],
+            $snap['flowAfter'],
+            $snap['realized'],
+            $snap['unrealized'],
+            $rates,
+        );
         // Due the 4th of the following month (owner, 2026-10-01): invoiced the
         // 1st, reminded the 2nd and 3rd, paused on the 4th if still unpaid.
         $dueDate = $period->copy()->addMonthNoOverflow()->startOfMonth()->addDays(3);
@@ -221,15 +218,74 @@ class InvoiceService
             'deposit_amount' => $snap['adjustedDeposit'],
             'adjusted_equity' => $equityEnd,
             'capital_flow' => $snap['capitalFlow'],
-            'performance_equity' => $equityEnd,
             'hwm_before' => $hwmBefore,
-            'hwm_after' => $hwmAfter,
+            'due_date' => $dueDate->toDateString(),
+        ] + $hwm;
+    }
+
+    /**
+     * The high-water-mark rule, pure — the ONE definition, used by
+     * computeForAccount and by any correction re-run on an invoice's stored
+     * figures.
+     *
+     * A fee is charged only while the account stands above its previous high
+     * point, and money the customer adds or takes out is neither profit nor
+     * loss (2026-11-08). Until then the test compared the raw balance with
+     * the mark: a withdrawal read as a trading loss, so a winning month with
+     * a withdrawal was billed nothing (October 2026: +120.18 closed, 254.99
+     * withdrawn, $0 invoice), and a deposit read as a gain that could open
+     * billing on a losing month.
+     *
+     * So the balance is first put back to what it would be had no money
+     * moved since the month began ("performance equity"): less every deposit,
+     * plus every withdrawal, from the 1st up to the moment the balance was
+     * read — the run reads it on the 1st, so a transfer made that morning is
+     * already in it. The closing mark is then carried into the money the
+     * account holds at month END: the month's own transfers move the mark
+     * with them (5,000 withdrawn lowers it by 5,000), so next month is
+     * measured against the same money, never against cash that has left.
+     *
+     * The fee itself is unchanged: rate × the month's realized profit (and
+     * rate × open profit), whenever the account is above its mark.
+     *
+     * @param  float  $hwmBefore    the mark when the month began
+     * @param  float  $equityNow    balance + open P&L, as read now
+     * @param  float  $flowInMonth  net deposits − withdrawals inside the month
+     * @param  float  $flowAfter    net deposits − withdrawals after it ended, before the read
+     * @param  array{realized?: float, unrealized?: float}  $rates  fee percentages (e.g. 20, 6)
+     * @return array{performance_equity: float, hwm_after: float, new_realized_profit: float, new_unrealized_profit: float, fee_realized: float, fee_unrealized: float, total_fee: float}
+     */
+    public static function applyHighWaterMark(
+        float $hwmBefore,
+        float $equityNow,
+        float $flowInMonth,
+        float $flowAfter,
+        float $realized,
+        float $unrealized,
+        array $rates
+    ): array {
+        $realizedRate = (float) ($rates['realized'] ?? 20) / 100;
+        $unrealizedRate = (float) ($rates['unrealized'] ?? 6) / 100;
+
+        $performanceEquity = $equityNow - $flowInMonth - $flowAfter;
+
+        // Fee-eligible profit for the period.
+        $newRealizedProfit = max(0, $realized);
+        $newUnrealizedProfit = max(0, $unrealized);
+
+        // Charge only when the account, money moved aside, is above its mark.
+        $chargeable = $performanceEquity > $hwmBefore;
+        $feeRealized = $chargeable ? $newRealizedProfit * $realizedRate : 0.0;
+        $feeUnrealized = $chargeable ? $newUnrealizedProfit * $unrealizedRate : 0.0;
+
+        return [
+            'performance_equity' => $performanceEquity,
+            'hwm_after' => max($hwmBefore, $performanceEquity) + $flowInMonth,
             'new_realized_profit' => $newRealizedProfit,
             'new_unrealized_profit' => $newUnrealizedProfit,
             'fee_realized' => $feeRealized,
             'fee_unrealized' => $feeUnrealized,
-            'total_fee' => $totalFee,
-            'due_date' => $dueDate->toDateString(),
+            'total_fee' => round($feeRealized + $feeUnrealized, 8),
         ];
     }
 

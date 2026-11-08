@@ -116,11 +116,11 @@ class AdminUserController extends Controller
             );
         }
 
-        $hwmByAccount = DB::table('invoices')
+        // Each account's CURRENT mark (latest month) — a withdrawal lowers it
+        // since 2026-11-08, so MAX(hwm_after) would show a stale, higher one.
+        $hwmByAccount = Invoice::latestHwmByAccount(DB::table('invoices')
             ->where('user_id', $uniId)
-            ->groupBy('account_id')
-            ->selectRaw('account_id, MAX(hwm_after) AS hwm')
-            ->pluck('hwm', 'account_id');
+            ->get(['exchange', 'account_id', 'month_year', 'hwm_after']));
 
         return response()->json([
             'success' => true,
@@ -137,7 +137,7 @@ class AdminUserController extends Controller
                     'realized_pnl' => round((float) ($realizedByKey[$a->api_key] ?? 0), 2),
                     'initial_deposit' => round((float) $a->initial_deposit, 2),
                     'currency_type' => $a->currency_type,
-                    'hwm' => round((float) ($hwmByAccount[$a->id] ?? 0), 2),
+                    'hwm' => round((float) ($hwmByAccount[$a->exchange.':'.$a->id] ?? 0), 2),
                     'deleted_at' => $a->deleted_at?->toISOString(),
                 ])->values(),
                 'delete_blockers' => $this->deleteBlockers($user, $request->user()->uni_id),
@@ -268,10 +268,10 @@ class AdminUserController extends Controller
         // Same HWM the user dashboard shows: never below current equity.
         // Invoices are already per exchange (the unified table's
         // discriminator), so the same filter narrows them.
-        $hwm = (float) (DB::table('invoices')
+        $hwm = max([0.0, ...array_values(Invoice::latestHwmByAccount(DB::table('invoices')
             ->where('user_id', $uniId)
             ->whereIn('exchange', UserStatsService::exchanges($exchange))
-            ->max('hwm_after') ?? 0);
+            ->get(['exchange', 'account_id', 'month_year', 'hwm_after'])))]);
         $hwm = max($hwm, $equity);
 
         $wins = $past->where('realized_pnl', '>', 0);

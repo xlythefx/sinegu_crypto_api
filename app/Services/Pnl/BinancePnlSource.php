@@ -24,18 +24,19 @@ class BinancePnlSource implements PnlSource
         $depAll = (float) $tx->where('type', 'DEPOSIT')->sum('amount');
         $wdAll = (float) $tx->where('type', 'WITHDRAWAL')->sum('amount');
 
-        $inMonth = $tx->filter(function ($t) use ($monthStart, $monthEnd) {
-            $at = Carbon::parse($t->created_at);
-            return $at->betweenIncluded($monthStart, $monthEnd);
-        });
-        $capitalFlow = (float) $inMonth->where('type', 'DEPOSIT')->sum('amount')
-            - (float) $inMonth->where('type', 'WITHDRAWAL')->sum('amount');
+        // Bucketed by created_at = when the money moved (TransferLedger dates
+        // a transfer by the exchange's own transaction_time).
+        $net = fn ($rows) => (float) $rows->where('type', 'DEPOSIT')->sum('amount')
+            - (float) $rows->where('type', 'WITHDRAWAL')->sum('amount');
+        $at = fn ($t) => Carbon::parse($t->created_at);
 
         return [
             'realized' => $realized,
             'unrealized' => (float) $account->unrealized_pnl,
             'balance' => (float) $account->balance,
-            'capitalFlow' => $capitalFlow,
+            'capitalFlow' => $net($tx->filter(fn ($t) => $at($t)->betweenIncluded($monthStart, $monthEnd))),
+            'flowBefore' => $net($tx->filter(fn ($t) => $at($t)->lt($monthStart))),
+            'flowAfter' => $net($tx->filter(fn ($t) => $at($t)->gt($monthEnd))),
             'adjustedDeposit' => (float) $account->initial_deposit + ($depAll - $wdAll),
         ];
     }

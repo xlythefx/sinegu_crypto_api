@@ -499,8 +499,10 @@ class AdminInsights
                 'hwm' => round((float) $inv['hwm_before'], 2),
                 'equity' => round((float) $inv['equity_end'], 2),
                 'fee' => round((float) $inv['fee_realized'], 2),
+                // performance_equity, not equity_end: the same test the invoice
+                // makes, with this month's deposits/withdrawals set aside.
                 'status' => $realized <= 0 ? 'no_profit'
-                    : ((float) $inv['equity_end'] > (float) $inv['hwm_before'] ? 'billable' : 'below_hwm'),
+                    : ((float) $inv['performance_equity'] > (float) $inv['hwm_before'] ? 'billable' : 'below_hwm'),
             ];
         })->filter()->sortByDesc(fn ($r) => [$r['fee'], $r['realized_pnl']])->values();
 
