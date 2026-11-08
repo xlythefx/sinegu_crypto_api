@@ -167,9 +167,9 @@ class CoinsbuyGateway
         // that silently governs a different protocol family is unfixable from
         // the dashboard side, because nothing there tells you which one was used.
         if (($conf['force_ipv4'] ?? true) !== false) {
-            $request = $request->withOptions([
-                'curl' => [CURLOPT_IPRESOLVE => CURL_IPRESOLVE_V4],
-            ]);
+            // Guzzle's own option — Guzzle 8 refuses a raw CURLOPT_IPRESOLVE
+            // (see TronGateway; it broke every call here from 2026-10-07).
+            $request = $request->withOptions(['force_ip_resolve' => 'v4']);
         }
 
         $ca = (string) ($conf['ca_bundle'] ?? '');

@@ -168,9 +168,11 @@ class TronGateway
             ->withHeaders($headers);
 
         if (($conf['force_ipv4'] ?? true) !== false) {
-            $request = $request->withOptions([
-                'curl' => [CURLOPT_IPRESOLVE => CURL_IPRESOLVE_V4],
-            ]);
+            // Guzzle's own option. Guzzle 8 REFUSES a raw CURLOPT_IPRESOLVE in
+            // 'curl' (InvalidArgumentException before any request), which
+            // stopped payments:watch-tron every minute from 2026-10-07 to
+            // 2026-11-08.
+            $request = $request->withOptions(['force_ip_resolve' => 'v4']);
         }
 
         $ca = (string) ($conf['ca_bundle'] ?? '');
