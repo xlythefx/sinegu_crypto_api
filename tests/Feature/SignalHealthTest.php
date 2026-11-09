@@ -84,7 +84,21 @@ class SignalHealthTest extends EngineTestCase
             $this->assertSame($severity, $c['severity'], json_encode($detail));
         }
         $this->assertNull(SignalHealth::classify(['status' => 'filled']));
-        $this->assertSame('rejected', SignalHealth::classify(['reason' => 'asset_not_configured'], 'rejected')['key']);
+        // A rejected signal: the engine names the cause since 2026-11-09. The
+        // old code meant "off OR never added", so it keeps the generic label.
+        $rejected = [
+            ['asset_not_configured', 'rejected', 'problem'],
+            ['asset_disabled', 'asset_off', 'normal'],
+            ['asset_not_added', 'asset_missing', 'problem'],
+            ['assets_unavailable', 'assets_unavailable', 'problem'],
+            ['side_LONG_blocks_SELL', 'rejected', 'problem'],
+            ['no_accounts', 'rejected', 'problem'],
+        ];
+        foreach ($rejected as [$reason, $key, $severity]) {
+            $c = SignalHealth::classify(['reason' => $reason, 'exchange' => 'binance'], 'rejected');
+            $this->assertSame($key, $c['key'], $reason);
+            $this->assertSame($severity, $c['severity'], $reason);
+        }
     }
 
     // ---- the list -----------------------------------------------------------
@@ -233,6 +247,28 @@ class SignalHealthTest extends EngineTestCase
         $this->assertSame('rejected', $issue['reason_key']);
         $this->assertSame(['DOGEUSDT'], $issue['tickers']);
         $this->assertNull($issue['account']);
+    }
+
+    public function test_a_coin_turned_off_on_purpose_does_not_turn_the_banner_amber(): void
+    {
+        // The admin paused LTC; TradingView keeps firing. That is the switch
+        // working, not something to fix — while a coin never added still is.
+        $this->signal([['reason' => 'asset_disabled', 'exchange' => 'binance']], [
+            'category' => 'rejected', 'success' => false, 'target_count' => 0,
+        ]);
+
+        $health = $this->getJson('/api/admin/trade-logs/health', $this->headers())->assertOk()->json('health');
+        $this->assertSame('normal', $health['status']);
+        $this->assertSame(0, $health['problems']);
+
+        $this->signal([['reason' => 'asset_not_added', 'exchange' => 'binance']], [
+            'category' => 'rejected', 'success' => false, 'target_count' => 0, 'ticker' => 'PEPEUSDT',
+        ]);
+
+        $issue = $this->getJson('/api/admin/trade-logs/health', $this->headers())->json('health.issues.0');
+        $this->assertSame('asset_missing', $issue['reason_key']);
+        $this->assertSame('Coin not added yet', $issue['label']);
+        $this->assertSame(['label' => 'Add it in Trading Assets', 'href' => '/admin/assets'], $issue['fix']);
     }
 
     // ---- issues -------------------------------------------------------------

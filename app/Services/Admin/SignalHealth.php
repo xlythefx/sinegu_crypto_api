@@ -42,6 +42,15 @@ final class SignalHealth
         'order_failed' => ['Order refused by the exchange', self::PROBLEM, 'Check the bot engine', '/admin/engine'],
         'engine_error' => ['Engine error', self::PROBLEM, 'Check the bot engine', '/admin/engine'],
         'rejected' => ['Signal rejected', self::PROBLEM, 'Check the asset', '/admin/assets'],
+        // Rejected signals the engine can now name (2026-11-09). A coin an
+        // admin — or the kill switch — turned off is doing what it was told:
+        // its signals keep arriving and are refused on purpose, so they must
+        // not turn the banner amber. A coin never added is a setup gap.
+        // `asset_not_configured` (older rows, and an API too old to say)
+        // stays the generic `rejected`: it meant either.
+        'asset_off' => ['Coin turned off', self::NORMAL, 'Open Trading Assets', '/admin/assets'],
+        'asset_missing' => ['Coin not added yet', self::PROBLEM, 'Add it in Trading Assets', '/admin/assets'],
+        'assets_unavailable' => ['Coin list could not be loaded', self::PROBLEM, 'Check the bot engine', '/admin/engine'],
         'other_skip' => ['Skipped for another reason', self::PROBLEM, null, null],
         'nothing_to_close' => ['Nothing open to close', self::NORMAL, null, null],
         'maxed' => ['Stack already full', self::NORMAL, null, null],
@@ -68,7 +77,12 @@ final class SignalHealth
     public static function classify(array $detail, ?string $category = null): ?array
     {
         if ($category === 'rejected') {
-            return self::reason('rejected');
+            return self::reason(match (strtolower((string) ($detail['reason'] ?? ''))) {
+                'asset_disabled' => 'asset_off',
+                'asset_not_added' => 'asset_missing',
+                'assets_unavailable' => 'assets_unavailable',
+                default => 'rejected',
+            });
         }
         $status = $detail['status'] ?? null;
         if ($status === 'filled') {

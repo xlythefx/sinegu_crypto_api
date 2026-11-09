@@ -145,20 +145,39 @@ class EngineController extends Controller
             ->all();
     }
 
-    /** GET /api/engine/{exchange}/assets?broker=Binance — enabled tradeable assets. */
+    /**
+     * GET /api/engine/{exchange}/assets?broker=Binance — enabled tradeable
+     * assets, plus `disabled`: the coins that EXIST but are switched off.
+     *
+     * `assets` stays enabled-only (what may be traded). `disabled` is there
+     * only so a rejected entry can say WHY — "turned off" (or "switched off by
+     * the kill switch") rather than the old `asset_not_configured`, which read
+     * the same for a coin an admin paused and a coin nobody ever added. An
+     * engine older than the key ignores it.
+     */
     public function assets(string $exchange, Request $request): JsonResponse
     {
         if ($guard = $this->guardExchange($exchange)) {
             return $guard;
         }
 
+        $broker = $request->query('broker');
         $query = Asset::with('streakSizes')->where('enabled', 1);
-        if ($broker = $request->query('broker')) {
+        $disabled = Asset::where('enabled', 0);
+        if ($broker) {
             $query->where('broker', $broker);
+            $disabled->where('broker', $broker);
         }
 
         return response()->json([
             'success' => true,
+            'disabled' => $disabled->orderBy('ticker')
+                ->get(['ticker', 'killed_at', 'killed_reason', 'enabled'])
+                ->map(fn (Asset $a) => [
+                    'ticker' => $a->ticker,
+                    'killed' => $a->isKilled(),
+                    'killed_reason' => $a->isKilled() ? $a->killed_reason : null,
+                ])->values(),
             'assets' => $query->orderBy('ticker')->get()->map(fn (Asset $a) => [
                 'ticker' => $a->ticker,
                 'broker' => $a->broker,
