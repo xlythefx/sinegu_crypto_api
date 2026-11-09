@@ -22,6 +22,8 @@ return Application::configure(basePath: dirname(__DIR__))
             // A suspended account's token is refused everywhere but sign-out.
             'account.active' => \App\Http\Middleware\EnsureAccountActive::class,
             'engine' => \App\Http\Middleware\VerifyEngineSecret::class,
+            // The read-only AI connector's key (Admin → AI Access).
+            'ai.key' => \App\Http\Middleware\VerifyAiAccessKey::class,
             'stripe.webhook' => \App\Http\Middleware\VerifyStripeSignature::class,
             'coinsbuy.webhook' => \App\Http\Middleware\VerifyCoinsbuySignature::class,
         ]);

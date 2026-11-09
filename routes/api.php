@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\AdminAiAccessController;
 use App\Http\Controllers\AdminApiKeyController;
 use App\Http\Controllers\AdminController;
 use App\Http\Controllers\AdminDatabaseController;
@@ -30,6 +31,7 @@ use App\Http\Controllers\EngineController;
 use App\Http\Controllers\EngineSyncController;
 use App\Http\Controllers\ExchangeAccountController;
 use App\Http\Controllers\InvoiceController;
+use App\Http\Controllers\McpController;
 use App\Http\Controllers\PaymentController;
 use App\Http\Controllers\PasswordResetController;
 use App\Http\Controllers\PayoutMethodController;
@@ -263,6 +265,14 @@ Route::middleware(['auth:sanctum', 'account.active', 'email.verified'])->group(f
     });
 
     Route::prefix('admin')->middleware('admin')->group(function () {
+        // Admin → AI Access: keys for the read-only AI connector (POST /mcp)
+        // and the log of every question it asked. Full admins only — a key
+        // reads what an admin reads, billing included.
+        Route::get('/ai-access', [AdminAiAccessController::class, 'index']);
+        Route::get('/ai-access/log', [AdminAiAccessController::class, 'log']);
+        Route::post('/ai-access/keys', [AdminAiAccessController::class, 'store'])->middleware('throttle:10,1');
+        Route::delete('/ai-access/keys/{id}', [AdminAiAccessController::class, 'destroy'])->whereNumber('id');
+
         // Admin → To be Done: the owner's done-state per item slug. The items
         // themselves ship with the frontend, so the slug is shape-checked only.
         Route::get('/todos', [AdminTodoController::class, 'index']);
@@ -526,3 +536,13 @@ Route::prefix('engine/{exchange}')
         Route::post('/invoices/remind', [EngineInvoiceController::class, 'remind']);
         Route::post('/invoices/enforce', [EngineInvoiceController::class, 'enforce']);
     });
+
+// The read-only AI connector (Model Context Protocol over Streamable HTTP) —
+// the employer's Grok app asks its questions here. No user token: a key made
+// on Admin → AI Access, in the X-Api-Key header (`ai.key`). Every tool reads;
+// nothing behind this route can write. GET/DELETE are 405: no server stream,
+// no sessions.
+Route::middleware(['throttle:ai-guard', 'ai.key'])->group(function () {
+    Route::post('/mcp', [McpController::class, 'handle']);
+});
+Route::match(['get', 'delete'], '/mcp', [McpController::class, 'notAllowed'])->middleware('throttle:ai-guard');

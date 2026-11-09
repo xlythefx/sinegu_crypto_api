@@ -94,6 +94,14 @@ class AppServiceProvider extends ServiceProvider
         RateLimiter::for('visits', fn (Request $request) => [
             Limit::perMinute(120)->by('visits|'.$request->ip()),
         ]);
+
+        // The AI connector (POST /api/mcp): per IP, BEFORE the key check, so
+        // guessing keys is slow. The per-KEY limit (60/min, 3,000/day) is in
+        // VerifyAiAccessKey — a throttle listed after it would be sorted to
+        // run before it and could not see the key.
+        RateLimiter::for('ai-guard', fn (Request $request) => [
+            Limit::perMinute(120)->by('ai-guard|'.$request->ip()),
+        ]);
     }
 
     /**

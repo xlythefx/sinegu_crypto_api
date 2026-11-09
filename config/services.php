@@ -210,4 +210,10 @@ return [
         'ca_bundle' => env('DISCORD_CACERT', env('TRON_CACERT')),
     ],
 
+    // The read-only AI connector (POST /api/mcp, Admin → AI Access). Only the
+    // URL the admin page tells the connector to use; empty = the request's own
+    // origin + /api, which is right behind nginx on the live box.
+    'ai_access' => [
+        'public_url' => env('AI_ACCESS_PUBLIC_URL'),
+    ],
 ];
