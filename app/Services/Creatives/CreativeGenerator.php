@@ -34,23 +34,33 @@ final class CreativeGenerator
         private GenerationPoller $poller,
     ) {}
 
-    /** The price check behind the "Generate" button: `{usd, allowed}`. */
-    public function quote(array $input): array
+    /**
+     * The price check behind the "Generate" button: `{usd, allowed}`.
+     *
+     * `$placeholderSource`: price an animation whose image does not exist yet
+     * (the chat agent's "picture of Pixel, then animate it" job, whose second
+     * step animates the first step's output). The price check never fetches
+     * images, so the placeholder prices it exactly; a real submit always
+     * resolves a real source.
+     */
+    public function quote(array $input, bool $placeholderSource = false): array
     {
         $this->assertConfigured();
-        $job = $this->prepare($input);
+        $job = $this->prepare($input, $placeholderSource);
         $usd = $this->price($job);
 
         return ['usd' => $usd, 'allowed' => $this->budget->allows($usd)];
     }
 
-    public function create(array $input, ?UserCredential $user): CreativeGeneration
+    /** @param  int|null  $agentJobId  the chat agent's job this generation is a step of */
+    public function create(array $input, ?UserCredential $user, ?int $agentJobId = null): CreativeGeneration
     {
         $this->assertConfigured();
         $job = $this->prepare($input);
         $usd = $this->price($job);
 
         $generation = $this->budget->reserve($usd, fn () => CreativeGeneration::create([
+            'agent_job_id' => $agentJobId,
             'plan_id' => $job['plan_id'],
             'character_id' => $job['used_character'] ? $job['character']->id : null,
             'kind' => $job['preset']['kind'],
@@ -164,7 +174,7 @@ final class CreativeGenerator
      *
      * @return array{key: string, preset: array, prompt: string, full_prompt: string, params: array, used_character: bool, character: CreativeCharacter, plan_id: ?int, refs: Collection<int, CreativeCharacterRef>, source_url: ?string, source_ref: ?CreativeCharacterRef}
      */
-    private function prepare(array $input): array
+    private function prepare(array $input, bool $placeholderSource = false): array
     {
         $key = (string) $input['model'];
         $preset = $this->models->get($key);
@@ -185,7 +195,11 @@ final class CreativeGenerator
             }
         }
 
-        [$sourceUrl, $sourceRef] = $this->models->needsSource($key) ? $this->source($input['source'] ?? null) : [null, null];
+        [$sourceUrl, $sourceRef] = match (true) {
+            ! $this->models->needsSource($key) => [null, null],
+            $placeholderSource => [CreativeModels::PLACEHOLDER_IMAGE, null],
+            default => $this->source($input['source'] ?? null),
+        };
 
         return [
             'key' => $key,

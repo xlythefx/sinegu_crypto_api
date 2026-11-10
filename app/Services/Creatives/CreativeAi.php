@@ -259,8 +259,19 @@ final class CreativeAi
     /** What a reply cost, from its usage, at each attempt's model's rates. */
     public static function cost(WriterReply $reply): float
     {
+        return self::usageCost($reply->usage);
+    }
+
+    /**
+     * What a call cost from its usage, one entry per attempt, each at its own
+     * model's rates — the writer's replies and the chat agent's alike.
+     *
+     * @param  list<array{model: string, input: int, output: int, cache_write: int, cache_read: int}>  $usage
+     */
+    public static function usageCost(array $usage): float
+    {
         $usd = 0.0;
-        foreach ($reply->usage as $u) {
+        foreach ($usage as $u) {
             $r = self::ratesFor($u['model']);
             $usd += ($u['input'] * $r['input'] + $u['output'] * $r['output']
                 + $u['cache_write'] * $r['cache_write'] + $u['cache_read'] * $r['cache_read']) / 1_000_000;
@@ -294,24 +305,26 @@ final class CreativeAi
     // ---- the call ----------------------------------------------------------
 
     /**
-     * Reserve, call, settle. Throws a CreativeException for every answer that
-     * is not usable JSON-to-be (budget, no answer, refusal, out of room).
+     * RESERVE {@see MAX_CALL_USD} for one Claude call under the settings-row
+     * lock (CreativeBudget), by creating its `creative_ai_calls` row with that
+     * figure and `stop_reason` NULL ("in flight"). No room: BUDGET_EXCEEDED,
+     * and nothing is created. The writer and the chat agent both reserve here,
+     * so they share one cap with Higgsfield generations.
      *
-     * @return array{0: WriterReply, 1: CreativeAiCall, 2: float}
+     * @param  string  $what  how the refusal names the call ("a draft", "one assistant step")
      */
-    private function call(
+    public function reserveCall(
         string $kind,
-        ?string $brief,
-        ?int $planId,
+        string $model,
         ?string $uniId,
         ?string $name,
-        string $user,
-        array $schema,
-        int $maxTokens,
-    ): array {
+        ?string $brief = null,
+        ?int $planId = null,
+        string $what = 'AI writing: a draft',
+    ): CreativeAiCall {
         $call = $this->budget->reserveAiCall(self::MAX_CALL_USD, fn () => CreativeAiCall::create([
             'kind' => $kind,
-            'model' => mb_substr($this->writer->model(), 0, 40),
+            'model' => mb_substr($model, 0, 40),
             'input_tokens' => 0,
             'output_tokens' => 0,
             'cost_usd' => self::MAX_CALL_USD,
@@ -327,13 +340,76 @@ final class CreativeAi
             throw new CreativeException(
                 'BUDGET_EXCEEDED',
                 sprintf(
-                    'Not enough of the monthly limit is left for AI writing: a draft needs up to $%s and $%s of $%s is left this month.',
-                    self::usd(self::MAX_CALL_USD), self::usd($budget['remaining_usd']), self::usd($budget['cap_usd']),
+                    'Not enough of the monthly limit is left for %s needs up to $%s and $%s of $%s is left this month.',
+                    $what, self::usd(self::MAX_CALL_USD), self::usd($budget['remaining_usd']), self::usd($budget['cap_usd']),
                 ),
                 422,
                 ['budget' => $budget],
             );
         }
+
+        return $call;
+    }
+
+    /**
+     * Claude answered: the row takes the REAL cost from the usage, whatever the
+     * stop reason (refusals spent tokens too). Returns that cost.
+     *
+     * @param  list<array{model: string, input: int, output: int, cache_write: int, cache_read: int}>  $usage
+     */
+    public function settleCall(CreativeAiCall $call, string $model, ?string $stopReason, array $usage): float
+    {
+        $cost = self::usageCost($usage);
+        $input = array_sum(array_map(fn (array $u) => $u['input'] + $u['cache_write'] + $u['cache_read'], $usage));
+        $call->forceFill([
+            'model' => mb_substr($model, 0, 40),
+            'input_tokens' => $input,
+            'output_tokens' => array_sum(array_column($usage, 'output')),
+            'cost_usd' => $cost,
+            // Never NULL once answered: NULL is what "in flight" means.
+            'stop_reason' => mb_substr($stopReason ?? 'unknown', 0, 24),
+        ])->save();
+
+        return $cost;
+    }
+
+    /**
+     * No answer. Nothing billed: the reservation row is removed. It may have
+     * run: the reservation is KEPT (stop_reason `unconfirmed`) — the cap errs
+     * on the side of having spent.
+     */
+    public function abandonCall(CreativeAiCall $call, bool $maybeBilled): void
+    {
+        if ($maybeBilled) {
+            $call->forceFill(['stop_reason' => CreativeAiCall::UNCONFIRMED])->save();
+        } else {
+            $call->delete();
+        }
+    }
+
+    /** The message an unanswered call shows (AI_UNAVAILABLE). */
+    public static function unavailableMessage(?string $failure): string
+    {
+        return self::MESSAGES[$failure] ?? self::MESSAGES['error'];
+    }
+
+    /**
+     * Reserve, call, settle. Throws a CreativeException for every answer that
+     * is not usable JSON-to-be (budget, no answer, refusal, out of room).
+     *
+     * @return array{0: WriterReply, 1: CreativeAiCall, 2: float}
+     */
+    private function call(
+        string $kind,
+        ?string $brief,
+        ?int $planId,
+        ?string $uniId,
+        ?string $name,
+        string $user,
+        array $schema,
+        int $maxTokens,
+    ): array {
+        $call = $this->reserveCall($kind, $this->writer->model(), $uniId, $name, $brief, $planId);
 
         try {
             $reply = $this->writer->write(CreativeAiPrompt::SYSTEM, $user, $schema, $maxTokens);
@@ -345,29 +421,17 @@ final class CreativeAi
         }
 
         if (! $reply->answered) {
-            if ($reply->maybeBilled) {
-                $call->forceFill(['stop_reason' => CreativeAiCall::UNCONFIRMED])->save();
-            } else {
-                $call->delete();
-            }
+            $this->abandonCall($call, $reply->maybeBilled);
 
             throw new CreativeException(
                 'AI_UNAVAILABLE',
-                self::MESSAGES[$reply->failure] ?? self::MESSAGES['error'],
+                self::unavailableMessage($reply->failure),
                 502,
                 ['budget' => $this->budget->summary()],
             );
         }
 
-        $cost = self::cost($reply);
-        $call->forceFill([
-            'model' => mb_substr($reply->model, 0, 40),
-            'input_tokens' => $reply->inputTokens(),
-            'output_tokens' => $reply->outputTokens(),
-            'cost_usd' => $cost,
-            // Never NULL once answered: NULL is what "in flight" means.
-            'stop_reason' => mb_substr($reply->stopReason ?? 'unknown', 0, 24),
-        ])->save();
+        $cost = $this->settleCall($call, $reply->model, $reply->stopReason, $reply->usage);
 
         if ($reply->stopReason === 'refusal') {
             throw new CreativeException(

@@ -21,7 +21,18 @@ class CreativePlanRequest extends FormRequest
     /** @return array<string, mixed> */
     public function rules(): array
     {
-        $partial = $this->isMethod('put') || $this->isMethod('patch');
+        return self::fields($this->isMethod('put') || $this->isMethod('patch'));
+    }
+
+    /**
+     * The plan fields' rules — also what the chat agent's create_plan /
+     * update_plan tools are checked against, so a plan the agent writes obeys
+     * exactly what the planner's form does.
+     *
+     * @return array<string, mixed>
+     */
+    public static function fields(bool $partial): array
+    {
         $required = $partial ? ['sometimes', 'required'] : ['required'];
         // Optional on create (defaults: idea / tiktok / video), never null.
         $choice = $partial ? ['sometimes', 'required'] : ['nullable'];

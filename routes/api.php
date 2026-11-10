@@ -3,9 +3,12 @@
 use App\Http\Controllers\AdminAiAccessController;
 use App\Http\Controllers\AdminApiKeyController;
 use App\Http\Controllers\AdminController;
+use App\Http\Controllers\AdminCreativeAgentController;
 use App\Http\Controllers\AdminCreativeAiController;
+use App\Http\Controllers\AdminCreativeBriefController;
 use App\Http\Controllers\AdminCreativeCharacterController;
 use App\Http\Controllers\AdminCreativeGenerationController;
+use App\Http\Controllers\AdminCreativeMemoryController;
 use App\Http\Controllers\AdminCreativePlanController;
 use App\Http\Controllers\AdminCreativesController;
 use App\Http\Controllers\AdminDatabaseController;
@@ -307,6 +310,25 @@ Route::middleware(['auth:sanctum', 'account.active', 'email.verified'])->group(f
         // here — the team edits the draft and saves the plan themselves.
         Route::post('/ai/draft', [AdminCreativeAiController::class, 'draft'])->middleware('throttle:20,1');
         Route::post('/ai/ideas', [AdminCreativeAiController::class, 'ideas'])->middleware('throttle:10,1');
+
+        // The chat agent (Claude with tools). Client-stepped: one request = at
+        // most ONE model call (Cloudflare cuts a request at 100 s). Every call
+        // spends from the same monthly cap. A chat belongs to the person who
+        // started it. The agent never spends on Higgsfield by itself: it
+        // proposes a job and a person clicks Go (approve).
+        Route::get('/agent/session', [AdminCreativeAgentController::class, 'session']);
+        Route::post('/agent/sessions', [AdminCreativeAgentController::class, 'newSession'])->middleware('throttle:20,1');
+        Route::post('/agent/turn', [AdminCreativeAgentController::class, 'turn'])->middleware('throttle:40,1');
+        Route::post('/agent/jobs/{id}/approve', [AdminCreativeAgentController::class, 'approve'])->whereNumber('id')->middleware('throttle:20,1');
+        Route::post('/agent/jobs/{id}/cancel', [AdminCreativeAgentController::class, 'cancel'])->whereNumber('id');
+
+        // The brand brief and the team memory the agent always reads.
+        Route::get('/brief', [AdminCreativeBriefController::class, 'show']);
+        Route::put('/brief', [AdminCreativeBriefController::class, 'update']);
+        Route::get('/memory', [AdminCreativeMemoryController::class, 'index']);
+        Route::post('/memory', [AdminCreativeMemoryController::class, 'store']);
+        Route::put('/memory/{id}', [AdminCreativeMemoryController::class, 'update'])->whereNumber('id');
+        Route::delete('/memory/{id}', [AdminCreativeMemoryController::class, 'destroy'])->whereNumber('id');
     });
 
     Route::prefix('admin')->middleware('admin')->group(function () {

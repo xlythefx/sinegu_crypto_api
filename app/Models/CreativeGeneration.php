@@ -13,6 +13,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
  * (App\Services\Creatives\CreativeBudget).
  *
  * @property int $id
+ * @property int|null $agent_job_id  the chat agent's job this is a step of
  * @property int|null $plan_id
  * @property int|null $character_id
  * @property string $kind image | video
@@ -61,7 +62,7 @@ class CreativeGeneration extends Model
     protected $table = 'creative_generations';
 
     protected $fillable = [
-        'plan_id', 'character_id', 'kind', 'model', 'endpoint', 'prompt', 'full_prompt', 'params',
+        'agent_job_id', 'plan_id', 'character_id', 'kind', 'model', 'endpoint', 'prompt', 'full_prompt', 'params',
         'used_character', 'request_id', 'status', 'error', 'outputs', 'estimated_usd', 'charged_usd',
         'expires_at', 'completed_at', 'last_checked_at', 'created_by_uni_id', 'created_by_name',
     ];
@@ -69,6 +70,7 @@ class CreativeGeneration extends Model
     protected function casts(): array
     {
         return [
+            'agent_job_id' => 'integer',
             'params' => 'array',
             'outputs' => 'array',
             'used_character' => 'boolean',

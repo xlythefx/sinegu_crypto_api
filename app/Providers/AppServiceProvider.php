@@ -2,7 +2,9 @@
 
 namespace App\Providers;
 
+use App\Services\Creatives\ClaudeAgent;
 use App\Services\Creatives\ClaudeWriter;
+use App\Services\Creatives\CreativeAgentModel;
 use App\Services\Creatives\CreativeWriter;
 use App\Services\Payments\PaymentEnvironment;
 use Illuminate\Cache\RateLimiting\Limit;
@@ -24,6 +26,8 @@ class AppServiceProvider extends ServiceProvider
         // Admin → Creatives' AI writer. Tests bind a fake in its place, so the
         // suite never reaches Anthropic.
         $this->app->bind(CreativeWriter::class, ClaudeWriter::class);
+        // …and its chat agent (Claude with tools). Same: tests bind a fake.
+        $this->app->bind(CreativeAgentModel::class, ClaudeAgent::class);
     }
 
     /**

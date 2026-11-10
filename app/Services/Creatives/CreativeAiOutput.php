@@ -244,6 +244,37 @@ final class CreativeAiOutput
         return implode(' ', $tags);
     }
 
+    /**
+     * The disclaimer rule for text that did not come through draft() — the
+     * chat agent's plans: when any of $texts (hook, script, caption…) cites a
+     * percentage and the caption lacks {@see CreativeAi::DISCLAIMER}, it is
+     * appended to the caption. Null caption stays null when nothing is cited.
+     */
+    public static function ensureDisclaimer(?string $caption, ?string ...$texts): ?string
+    {
+        $cites = false;
+        foreach ([$caption, ...$texts] as $text) {
+            if ($text !== null && preg_match(self::PERCENT, $text) === 1) {
+                $cites = true;
+                break;
+            }
+        }
+        if (! $cites || self::hasDisclaimer((string) $caption)) {
+            return $caption;
+        }
+        $caption = rtrim((string) $caption);
+
+        return $caption.($caption === '' ? '' : "
+
+").CreativeAi::DISCLAIMER;
+    }
+
+    /** The first money amount in $text ("$40", "300 USDT"), or null. */
+    public static function moneyIn(string $text): ?string
+    {
+        return preg_match(self::MONEY, $text, $m) === 1 ? $m[0] : null;
+    }
+
     private static function hasDisclaimer(string $caption): bool
     {
         $needle = mb_strtolower(rtrim(CreativeAi::DISCLAIMER, '.'));

@@ -29,6 +29,9 @@ final class CreativeFacts
     /** The window of the default recap: the last 7 days, today included. */
     public const WINDOW_DAYS = 7;
 
+    /** The longest window the chat agent may ask for (get_week_results). */
+    public const MAX_WINDOW_DAYS = 31;
+
     /** Recent plan titles sent so the model does not repeat itself. */
     public const RECENT_TITLES = 15;
 
@@ -61,17 +64,18 @@ final class CreativeFacts
     }
 
     /**
-     * The Facts shape of the API contract for the 7 days ending on $endDay
-     * (default today, in the track record's calendar):
+     * The Facts shape of the API contract for the $days days (default 7,
+     * 1–31) ending on $endDay (default today, in the track record's calendar):
      * `{available, period, return_pct, trades, trading_days, green_days,
      * best_day, top_coins}`. `available: false` = nothing published in that
      * window; the model is then told it has no figures.
      */
-    public function performance(?CarbonImmutable $endDay = null): array
+    public function performance(?CarbonImmutable $endDay = null, int $days = self::WINDOW_DAYS): array
     {
         $timezone = $this->timezone();
+        $days = max(1, min(self::MAX_WINDOW_DAYS, $days));
         $end = ($endDay ?? $this->today())->setTimezone($timezone)->startOfDay();
-        $start = $end->subDays(self::WINDOW_DAYS - 1);
+        $start = $end->subDays($days - 1);
         $period = self::periodLabel($start, $end);
 
         $record = $this->stats->record();

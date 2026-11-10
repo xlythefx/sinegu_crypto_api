@@ -7,7 +7,8 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 /**
  * One Claude call made by Admin → Creatives' AI writer (a draft, a list of
- * ideas, or the Saturday weekly recap): the tokens and what they cost.
+ * ideas, or the Saturday weekly recap) or by its chat agent (one model call
+ * of a chat turn): the tokens and what they cost.
  *
  * Counts against the SAME monthly cap as Higgsfield generations
  * (App\Services\Creatives\CreativeBudget). A row whose `stop_reason` is NULL
@@ -16,7 +17,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
  * figure. Never deleted once Claude answered: refusals cost tokens too.
  *
  * @property int $id
- * @property string $kind draft | ideas | weekly
+ * @property string $kind draft | ideas | weekly | agent
  * @property string $model
  * @property int $input_tokens
  * @property int $output_tokens
@@ -34,6 +35,9 @@ class CreativeAiCall extends Model
     public const IDEAS = 'ideas';
 
     public const WEEKLY = 'weekly';
+
+    /** One model call of the Creatives chat agent (CreativeAgent). */
+    public const AGENT = 'agent';
 
     /** The answer never arrived although the request may have run: the reservation is kept. */
     public const UNCONFIRMED = 'unconfirmed';

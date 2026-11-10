@@ -77,6 +77,12 @@ Schedule::command('creatives:poll')->everyMinute()->withoutOverlapping(5);
 // leaves the "weekly recap" switch on.
 Schedule::command('creatives:weekly-recap')->saturdays()->at('00:15')->timezone('Asia/Manila')->withoutOverlapping(30);
 
+// Admin → Creatives' chat agent keeps only the current conversation: a chat
+// idle for 7 days is deleted with its messages and jobs. Nothing is lost —
+// decisions live in Memory, the Brief and Plans, and generations (the month's
+// spend) are never deleted.
+Schedule::command('creatives:agent-prune')->dailyAt('01:20');
+
 // The visitor counter keeps full IP addresses for 90 days (owner, 2026-10-28;
 // the Privacy Policy says so). After that the IP and User-Agent are removed
 // from the row and the counts stay.
