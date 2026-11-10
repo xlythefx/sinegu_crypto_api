@@ -2,6 +2,8 @@
 
 namespace App\Providers;
 
+use App\Services\Creatives\ClaudeWriter;
+use App\Services\Creatives\CreativeWriter;
 use App\Services\Payments\PaymentEnvironment;
 use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Http\Request;
@@ -18,6 +20,10 @@ class AppServiceProvider extends ServiceProvider
         // Singleton so the machine signals are read (and memoised) once per
         // process — every payment path must see the same verdict.
         $this->app->singleton(PaymentEnvironment::class, fn () => new PaymentEnvironment);
+
+        // Admin → Creatives' AI writer. Tests bind a fake in its place, so the
+        // suite never reaches Anthropic.
+        $this->app->bind(CreativeWriter::class, ClaudeWriter::class);
     }
 
     /**

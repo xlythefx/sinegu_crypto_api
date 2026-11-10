@@ -38,5 +38,7 @@
         <!-- Higgsfield (Admin → Creatives): pinned empty so a developer's real key can never make the suite call the API. Tests set config explicitly and fake every request. -->
         <env name="HIGGSFIELD_KEY_ID" value=""/>
         <env name="HIGGSFIELD_KEY_SECRET" value=""/>
+        <!-- Claude (Admin → Creatives' AI writer): pinned empty for the same reason. Tests bind a fake CreativeWriter and never call Anthropic. -->
+        <env name="ANTHROPIC_API_KEY" value=""/>
     </php>
 </phpunit>

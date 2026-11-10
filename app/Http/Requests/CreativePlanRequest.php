@@ -37,7 +37,11 @@ class CreativePlanRequest extends FormRequest
             'caption' => ['sometimes', 'nullable', 'string', 'max:5000'],
             'hashtags' => ['sometimes', 'nullable', 'string', 'max:500'],
             'notes' => ['sometimes', 'nullable', 'string', 'max:5000'],
+            'video_prompt' => ['sometimes', 'nullable', 'string', 'max:4000'],
             'posted_url' => ['sometimes', 'nullable', 'string', 'max:500', 'url:http,https'],
+            // true = these fields came from the AI writer: stamps ai_drafted_at
+            // (once). Not a column itself; false changes nothing.
+            'ai_drafted' => ['sometimes', 'boolean'],
         ];
     }
 }

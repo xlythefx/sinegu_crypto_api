@@ -231,4 +231,21 @@ return [
         // WAMP ships no CA bundle; the TRON one is the same file.
         'ca_bundle' => env('HIGGSFIELD_CACERT', env('TRON_CACERT')),
     ],
+
+    // Admin → Creatives' AI writer (App\Services\Creatives\ClaudeWriter, the
+    // official Anthropic PHP SDK). `configured` = a key is set. The key is
+    // product identity like Higgsfield's: never printed, logged or returned.
+    // Every call counts against the Creatives monthly cap (CreativeBudget).
+    'anthropic' => [
+        'key' => env('ANTHROPIC_API_KEY'),
+        'model' => env('CREATIVES_AI_MODEL', 'claude-opus-5-5'),
+        'effort' => env('CREATIVES_AI_EFFORT', 'medium'),
+        // Seconds the HTTP client waits for one answer (thinking included).
+        // Capped at 45 in ClaudeWriter: with one retry that stays under
+        // Cloudflare's 100 s cut-off for the browser's request.
+        'timeout' => (int) env('CREATIVES_AI_TIMEOUT', 45),
+        // WAMP ships no CA bundle; the TRON one is the same file.
+        // `?:` rather than env()'s default, so an EMPTY ANTHROPIC_CACERT= line still falls back.
+        'ca_bundle' => env('ANTHROPIC_CACERT') ?: env('TRON_CACERT'),
+    ],
 ];

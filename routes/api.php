@@ -3,6 +3,7 @@
 use App\Http\Controllers\AdminAiAccessController;
 use App\Http\Controllers\AdminApiKeyController;
 use App\Http\Controllers\AdminController;
+use App\Http\Controllers\AdminCreativeAiController;
 use App\Http\Controllers\AdminCreativeCharacterController;
 use App\Http\Controllers\AdminCreativeGenerationController;
 use App\Http\Controllers\AdminCreativePlanController;
@@ -299,6 +300,13 @@ Route::middleware(['auth:sanctum', 'account.active', 'email.verified'])->group(f
         // Spends money, within the monthly cap (CreativeBudget, under a row lock).
         Route::post('/generations', [AdminCreativeGenerationController::class, 'store'])->middleware('throttle:20,1');
         Route::post('/generations/{id}/cancel', [AdminCreativeGenerationController::class, 'cancel'])->whereNumber('id');
+
+        // The AI writer (Claude): a draft from a brief, and post ideas. Both
+        // spend from the SAME monthly cap as generations (reserved before the
+        // call, the real cost recorded after). Nothing is saved or published
+        // here — the team edits the draft and saves the plan themselves.
+        Route::post('/ai/draft', [AdminCreativeAiController::class, 'draft'])->middleware('throttle:20,1');
+        Route::post('/ai/ideas', [AdminCreativeAiController::class, 'ideas'])->middleware('throttle:10,1');
     });
 
     Route::prefix('admin')->middleware('admin')->group(function () {
@@ -314,6 +322,10 @@ Route::middleware(['auth:sanctum', 'account.active', 'email.verified'])->group(f
         // marketing team (collaborators) only sees it (GET is in the
         // admin/creatives staff group above). 0 switches generation off.
         Route::put('/creatives/budget', [AdminCreativesController::class, 'updateBudget']);
+        // …and whether the AI writer drafts a weekly recap every Saturday.
+        // Collaborators see the state (GET /admin/creatives → `ai`), only a
+        // full admin switches it.
+        Route::put('/creatives/ai/settings', [AdminCreativeAiController::class, 'updateSettings']);
 
         // Admin → To be Done: the owner's done-state per item slug. The items
         // themselves ship with the frontend, so the slug is shape-checked only.

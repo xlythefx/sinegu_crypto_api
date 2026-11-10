@@ -49,9 +49,11 @@ class AdminCreativePlanController extends Controller
     public function store(CreativePlanRequest $request): JsonResponse
     {
         $data = $request->validated();
+        $aiDrafted = (bool) ($data['ai_drafted'] ?? false);
+        unset($data['ai_drafted']);
         $user = $request->user();
 
-        $plan = CreativePlan::create([
+        $plan = new CreativePlan([
             ...$data,
             'title' => trim($data['title']),
             'status' => $data['status'] ?? 'idea',
@@ -61,6 +63,8 @@ class AdminCreativePlanController extends Controller
             'created_by_name' => $user?->name,
             'updated_by_name' => $user?->name,
         ]);
+        $this->stampAiDrafted($plan, $aiDrafted);
+        $plan->save();
 
         return response()->json(['success' => true, 'plan' => $this->presenter->plan($plan->loadCount('generations'))], 201);
     }
@@ -74,10 +78,13 @@ class AdminCreativePlanController extends Controller
         }
 
         $data = $request->validated();
+        $aiDrafted = (bool) ($data['ai_drafted'] ?? false);
+        unset($data['ai_drafted']);
         if (isset($data['title'])) {
             $data['title'] = trim($data['title']);
         }
         $plan->fill($data);
+        $this->stampAiDrafted($plan, $aiDrafted);
         $plan->updated_by_name = $request->user()?->name;
         $plan->save();
 
@@ -98,6 +105,18 @@ class AdminCreativePlanController extends Controller
         });
 
         return response()->json(['success' => true]);
+    }
+
+    /**
+     * `ai_drafted: true` — the fields being saved came from the AI writer:
+     * remember when, the first time only (the "AI draft" pill). Never cleared:
+     * a later human edit does not make the plan's origin untrue.
+     */
+    private function stampAiDrafted(CreativePlan $plan, bool $aiDrafted): void
+    {
+        if ($aiDrafted && $plan->ai_drafted_at === null) {
+            $plan->ai_drafted_at = now();
+        }
     }
 
     private function notFound(): JsonResponse

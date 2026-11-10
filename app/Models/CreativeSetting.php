@@ -6,11 +6,16 @@ use Illuminate\Database\Eloquent\Model;
 
 /**
  * The single settings row of Admin → Creatives (id 1): the monthly spending
- * cap. Generation locks this row while it checks the month's spend
- * (App\Services\Creatives\CreativeBudget::reserve).
+ * cap, and whether the AI writer drafts a weekly recap on Saturdays.
+ * Generation and every AI call lock this row while they check the month's
+ * spend (App\Services\Creatives\CreativeBudget).
+ *
+ * `updated_by_*` / `updated_at` describe the CAP (the Budget shape prints
+ * them as "set by"); switching the weekly recap does not touch them.
  *
  * @property int $id
  * @property string $monthly_cap_usd
+ * @property bool $ai_weekly_recap
  * @property string|null $updated_by_uni_id
  * @property string|null $updated_by_name
  */
@@ -22,12 +27,13 @@ class CreativeSetting extends Model
 
     protected $table = 'creative_settings';
 
-    protected $fillable = ['monthly_cap_usd', 'updated_by_uni_id', 'updated_by_name'];
+    protected $fillable = ['monthly_cap_usd', 'ai_weekly_recap', 'updated_by_uni_id', 'updated_by_name'];
 
     protected function casts(): array
     {
         return [
             'monthly_cap_usd' => 'decimal:2',
+            'ai_weekly_recap' => 'boolean',
         ];
     }
 

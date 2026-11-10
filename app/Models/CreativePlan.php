@@ -27,8 +27,16 @@ class CreativePlan extends Model
 
     protected $fillable = [
         'title', 'status', 'platform', 'format', 'planned_for', 'hook', 'script', 'caption',
-        'hashtags', 'notes', 'posted_url', 'created_by_uni_id', 'created_by_name', 'updated_by_name',
+        'hashtags', 'notes', 'video_prompt', 'posted_url', 'created_by_uni_id', 'created_by_name', 'updated_by_name',
     ];
+
+    protected function casts(): array
+    {
+        return [
+            // Set when the plan's fields came from the AI writer and were saved.
+            'ai_drafted_at' => 'datetime',
+        ];
+    }
 
     /**
      * `planned_for` is deliberately NOT cast: a date cast would write

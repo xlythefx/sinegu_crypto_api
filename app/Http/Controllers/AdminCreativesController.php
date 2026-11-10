@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Http\Middleware\EnsureStaff;
+use App\Services\Creatives\CreativeAi;
 use App\Services\Creatives\CreativeBudget;
 use App\Services\Creatives\CreativeModels;
 use App\Services\Creatives\CreativeReferences;
@@ -23,7 +24,7 @@ class AdminCreativesController extends Controller
     public function __construct(private CreativeBudget $budget) {}
 
     /** GET /api/admin/creatives */
-    public function index(Request $request, CreativeModels $models, HiggsfieldGateway $gateway): JsonResponse
+    public function index(Request $request, CreativeModels $models, HiggsfieldGateway $gateway, CreativeAi $ai): JsonResponse
     {
         return response()->json([
             'success' => true,
@@ -33,6 +34,10 @@ class AdminCreativesController extends Controller
             'models' => $models->all(),
             'budget' => $this->budget->summary(),
             'can_edit_budget' => ! EnsureStaff::isLimited($request),
+            // The AI writer: {configured, model, weekly_recap}. The weekly
+            // switch is a full admin's (PUT /admin/creatives/ai/settings);
+            // `can_edit_budget` says who that is.
+            'ai' => $ai->meta(),
         ]);
     }
 

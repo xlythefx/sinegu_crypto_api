@@ -74,6 +74,19 @@ class PublicStatsController extends Controller
     }
 
     /**
+     * The same payload as GET /api/public/track-record (pooled, every asset),
+     * for in-process readers that must publish exactly what the site and the
+     * Telegram recaps publish — Admin → Creatives' AI writer quotes its
+     * figures from here (App\Services\Creatives\CreativeFacts). Same cache,
+     * same computation, so the three can never disagree. Public figures only,
+     * by construction: it is the payload the whole internet already reads.
+     */
+    public function record(): array
+    {
+        return $this->cached(null, []);
+    }
+
+    /**
      * @param  list<string>  $symbols  normalized, sorted, deduplicated
      */
     private function cached(?string $exchange, array $symbols): array

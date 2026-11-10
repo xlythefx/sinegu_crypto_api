@@ -38,7 +38,11 @@ final class CreativePresenter
             'caption' => $plan->caption,
             'hashtags' => $plan->hashtags,
             'notes' => $plan->notes,
+            // The Studio prompt the AI writer wrote (editable).
+            'video_prompt' => $plan->video_prompt,
             'posted_url' => $plan->posted_url,
+            // Set when AI-drafted fields were saved on this plan.
+            'ai_drafted_at' => $plan->ai_drafted_at?->toIso8601String(),
             'generations_count' => (int) ($plan->generations_count ?? $plan->generations()->count()),
             'created_by_name' => $plan->created_by_name,
             'updated_by_name' => $plan->updated_by_name,

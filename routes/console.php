@@ -70,6 +70,13 @@ Schedule::command('positions:classify-closes')->everyFiveMinutes()->withoutOverl
 // expired. Sends no request at all while nothing is running.
 Schedule::command('creatives:poll')->everyMinute()->withoutOverlapping(5);
 
+// Admin → Creatives' AI writer drafts the weekly recap post (an `idea` plan for
+// the coming Monday) from the published track record — Saturdays 00:15 MANILA,
+// just after the Friday 23:55 Telegram weekly recap of the same 7 days. One per
+// week (a re-run skips), within the monthly cap, and only while a full admin
+// leaves the "weekly recap" switch on.
+Schedule::command('creatives:weekly-recap')->saturdays()->at('00:15')->timezone('Asia/Manila')->withoutOverlapping(30);
+
 // The visitor counter keeps full IP addresses for 90 days (owner, 2026-10-28;
 // the Privacy Policy says so). After that the IP and User-Agent are removed
 // from the row and the counts stay.
