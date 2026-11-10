@@ -214,6 +214,11 @@ class InvoiceService
             'equity_start' => $hwmBefore,
             'equity_end' => $equityEnd,
             'realized_pnl' => $snap['realized'],
+            // The same closes before exchange fees, and the fees between the
+            // two, so the invoice can show "+189.70 before, −69.52 fees" from
+            // its own row. Fees are derived, so the three always add up.
+            'realized_pnl_gross' => isset($snap['realizedGross']) ? $snap['realizedGross'] : null,
+            'exchange_fees' => isset($snap['realizedGross']) ? $snap['realizedGross'] - $snap['realized'] : null,
             'unrealized_pnl' => $snap['unrealized'],
             'deposit_amount' => $snap['adjustedDeposit'],
             'adjusted_equity' => $equityEnd,

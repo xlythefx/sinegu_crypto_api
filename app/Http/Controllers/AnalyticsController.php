@@ -16,6 +16,13 @@ class AnalyticsController extends Controller
     /** Bucket label for closed trades that carry no strategy tag. */
     private const UNTAGGED = 'Untagged';
 
+    /** Transfers counted in the Capital Flow card's dollar totals; anything
+     *  else (a BNB fee top-up) is listed in its own coin and left out. */
+    private const DOLLAR_CURRENCIES = ['USDT', 'USDC', 'USD', 'FDUSD', 'BUSD'];
+
+    /** The card lists every transfer; this only bounds the payload. */
+    private const FLOW_LIST_LIMIT = 200;
+
     public function __construct(
         private UserStatsService $stats,
         private DailyReturnStore $returns,
@@ -264,21 +271,41 @@ class AnalyticsController extends Controller
         ], UserStatsService::exchanges($exchange));
 
         // ---- Flows -----------------------------------------------------
-        $recentFlows = $transactions
+        // Every transfer, newest first (2026-11-10: the card showed the last
+        // five, so a customer's big early deposits were never on screen), each
+        // with its currency. A BNB top-up for the fee discount is a coin
+        // amount, not dollars: until then "0.0196 BNB" printed as "+$0.02".
+        // The card's dollar totals count dollar currencies only; `baseline`
+        // above is unchanged, so no other figure on the page moves.
+        $isDollar = fn ($t) => in_array(strtoupper((string) ($t->currency ?: 'USDT')), self::DOLLAR_CURRENCIES, true);
+        $dollarTx = $transactions->filter($isDollar);
+        $dollarIn = (float) $dollarTx->where('type', 'DEPOSIT')->sum('amount');
+        $dollarOut = (float) $dollarTx->where('type', 'WITHDRAWAL')->sum('amount');
+
+        $flowRows = $transactions->whereIn('type', ['DEPOSIT', 'WITHDRAWAL']);
+        $recentFlows = $flowRows
             ->sortByDesc('created_at')
-            ->take(5)
-            ->map(fn ($t) => [
-                'type' => $t->type,
-                'amount' => round((float) $t->amount, 2),
-                'date' => Carbon::parse($t->created_at)->toDateString(),
-            ])
+            ->take(self::FLOW_LIST_LIMIT)
+            ->map(function ($t) use ($isDollar) {
+                $dollar = $isDollar($t);
+
+                return [
+                    'type' => $t->type,
+                    // A coin amount keeps its decimals: 0.0196 BNB is not 0.02.
+                    'amount' => round((float) $t->amount, $dollar ? 2 : 8),
+                    'currency' => strtoupper((string) ($t->currency ?: 'USDT')),
+                    'in_totals' => $dollar,
+                    'date' => Carbon::parse($t->created_at)->toDateString(),
+                ];
+            })
             ->values()
             ->all();
 
         $flows = [
-            'deposits' => round($deposits, 2),
-            'withdrawals' => round($withdrawals, 2),
-            'net_flow' => round($baseline, 2),
+            'deposits' => round($dollarIn, 2),
+            'withdrawals' => round($dollarOut, 2),
+            'net_flow' => round($dollarIn - $dollarOut, 2),
+            'count' => $flowRows->count(),
             'recent' => $recentFlows,
         ];
 

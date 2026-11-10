@@ -17,8 +17,8 @@ class Invoice extends Model
 
     protected $fillable = [
         'user_id', 'account_id', 'exchange', 'api_key', 'month_year',
-        'equity_start', 'equity_end', 'realized_pnl', 'unrealized_pnl',
-        'deposit_amount', 'adjusted_equity', 'capital_flow', 'performance_equity',
+        'equity_start', 'equity_end', 'realized_pnl', 'realized_pnl_gross', 'exchange_fees',
+        'unrealized_pnl', 'deposit_amount', 'adjusted_equity', 'capital_flow', 'performance_equity',
         'hwm_before', 'hwm_after', 'new_realized_profit', 'new_unrealized_profit',
         'fee_realized', 'fee_unrealized', 'total_fee', 'fee_source', 'status', 'due_date',
         'paid_at', 'payment_provider', 'payment_reference', 'paid_amount',
@@ -222,6 +222,14 @@ class Invoice extends Model
             // the high-water mark with it and is never billed as profit, so a
             // mark that went DOWN is explained on the invoice itself.
             'capital_flow' => round($f($this->capital_flow), 2),
+            // The account value with every transfer since the month began set
+            // aside — what the high-water mark test compared (2026-11-08 rule).
+            'performance_equity' => $this->performance_equity === null ? null : round($f($this->performance_equity), 2),
+            // The month's closes before exchange fees, and those fees, so a
+            // screen can show "before − fees = the profit billed" from the row.
+            // NULL = not recorded (never a $0 that reads as free trading).
+            'realized_pnl_gross' => $this->realized_pnl_gross === null ? null : round($f($this->realized_pnl_gross), 2),
+            'exchange_fees' => $this->exchange_fees === null ? null : round($f($this->exchange_fees), 2),
             'is_first_invoice' => $isFirst,
             'reference_label' => $referenceLabel,
             'reference_value' => round($referenceValue, 2),

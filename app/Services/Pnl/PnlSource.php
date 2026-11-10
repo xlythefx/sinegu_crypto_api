@@ -12,8 +12,11 @@ use Illuminate\Support\Carbon;
 interface PnlSource
 {
     /**
-     * @return array{realized: float, unrealized: float, balance: float, capitalFlow: float, flowBefore: float, flowAfter: float, adjustedDeposit: float}
+     * @return array{realized: float, realizedGross?: float, unrealized: float, balance: float, capitalFlow: float, flowBefore: float, flowAfter: float, adjustedDeposit: float}
      *   realized        — closed P&L within [monthStart, monthEnd]
+     *   realizedGross   — the same closes BEFORE exchange fees (optional: a
+     *                     source that cannot tell leaves the invoice's fee
+     *                     split unrecorded, never zero)
      *   unrealized      — current open P&L snapshot
      *   balance         — current account balance
      *   capitalFlow     — net deposits − withdrawals within the month

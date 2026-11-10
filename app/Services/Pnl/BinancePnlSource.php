@@ -15,10 +15,13 @@ class BinancePnlSource implements PnlSource
     {
         $apiKey = $account->api_key;
 
-        $realized = (float) DB::table('binance_pastpositions')
+        $closes = DB::table('binance_pastpositions')
             ->where('api_key', $apiKey)
-            ->whereBetween('closed_at', [$monthStart, $monthEnd])
-            ->sum('realized_pnl');
+            ->whereBetween('closed_at', [$monthStart, $monthEnd]);
+        $realized = (float) (clone $closes)->sum('realized_pnl');
+        // Before exchange fees: a row's own fee added back. Pre-2026-09-11
+        // rows are gross with no fee, so they count once either way.
+        $realizedGross = (float) $closes->sum(DB::raw('realized_pnl + COALESCE(exchange_fee, 0)'));
 
         $tx = DB::table('binance_transactions')->where('api_key', $apiKey)->get();
         $depAll = (float) $tx->where('type', 'DEPOSIT')->sum('amount');
@@ -32,6 +35,7 @@ class BinancePnlSource implements PnlSource
 
         return [
             'realized' => $realized,
+            'realizedGross' => $realizedGross,
             'unrealized' => (float) $account->unrealized_pnl,
             'balance' => (float) $account->balance,
             'capitalFlow' => $net($tx->filter(fn ($t) => $at($t)->betweenIncluded($monthStart, $monthEnd))),
