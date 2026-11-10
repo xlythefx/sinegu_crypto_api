@@ -64,6 +64,12 @@ Schedule::command('assets:apply-pending')->everyMinute()->withoutOverlapping(5);
 // screens and left out of streak sizing.
 Schedule::command('positions:classify-closes')->everyFiveMinutes()->withoutOverlapping(10);
 
+// Admin → Creatives: Higgsfield pushes nothing, so this poll is how a running
+// image / video generation becomes "done" (and its reservation against the
+// monthly cap is settled), and how a result whose 7 days are over is marked
+// expired. Sends no request at all while nothing is running.
+Schedule::command('creatives:poll')->everyMinute()->withoutOverlapping(5);
+
 // The visitor counter keeps full IP addresses for 90 days (owner, 2026-10-28;
 // the Privacy Policy says so). After that the IP and User-Agent are removed
 // from the row and the counts stay.

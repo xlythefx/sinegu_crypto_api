@@ -3,6 +3,10 @@
 use App\Http\Controllers\AdminAiAccessController;
 use App\Http\Controllers\AdminApiKeyController;
 use App\Http\Controllers\AdminController;
+use App\Http\Controllers\AdminCreativeCharacterController;
+use App\Http\Controllers\AdminCreativeGenerationController;
+use App\Http\Controllers\AdminCreativePlanController;
+use App\Http\Controllers\AdminCreativesController;
 use App\Http\Controllers\AdminDatabaseController;
 use App\Http\Controllers\AdminEngineController;
 use App\Http\Controllers\AdminInsightsController;
@@ -24,6 +28,7 @@ use App\Http\Controllers\AssetController;
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\CoinsbuyWebhookController;
 use App\Http\Controllers\ContactHandleController;
+use App\Http\Controllers\CreativeAssetController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\DiscordAuthController;
 use App\Http\Controllers\EmailVerificationController;
@@ -264,6 +269,38 @@ Route::middleware(['auth:sanctum', 'account.active', 'email.verified'])->group(f
         Route::get('/visitors/log', [AdminVisitorController::class, 'log']);
     });
 
+    // Admin → Creatives — THE ONE ADMIN AREA A COLLABORATOR MAY WRITE (owner,
+    // 2026-11-10: collaborators are the marketing team). They plan X / TikTok
+    // posts and generate images and videos with Higgsfield here, so this group
+    // is `staff`, writes included. It must never grow a non-creative route:
+    // anything else a collaborator could write here would bypass the
+    // read-only rule the staff group above exists for. The one creative
+    // write they may NOT make — the monthly cap — is in the `admin` group.
+    Route::prefix('admin/creatives')->middleware('staff')->group(function () {
+        Route::get('/', [AdminCreativesController::class, 'index']);
+        Route::get('/budget', [AdminCreativesController::class, 'budget']);
+
+        Route::get('/plans', [AdminCreativePlanController::class, 'index']);
+        Route::post('/plans', [AdminCreativePlanController::class, 'store']);
+        Route::put('/plans/{id}', [AdminCreativePlanController::class, 'update'])->whereNumber('id');
+        Route::delete('/plans/{id}', [AdminCreativePlanController::class, 'destroy'])->whereNumber('id');
+
+        Route::get('/character', [AdminCreativeCharacterController::class, 'show']);
+        Route::put('/character', [AdminCreativeCharacterController::class, 'update']);
+        Route::post('/character/refs', [AdminCreativeCharacterController::class, 'storeRef'])->middleware('throttle:20,1');
+        Route::post('/character/refs/from-generation', [AdminCreativeCharacterController::class, 'storeRefFromGeneration'])
+            ->middleware('throttle:20,1');
+        Route::delete('/character/refs/{id}', [AdminCreativeCharacterController::class, 'destroyRef'])->whereNumber('id');
+
+        // The list refreshes running rows at Higgsfield before it answers.
+        Route::get('/generations', [AdminCreativeGenerationController::class, 'index']);
+        // Free price check — nothing is started.
+        Route::post('/generations/estimate', [AdminCreativeGenerationController::class, 'estimate'])->middleware('throttle:60,1');
+        // Spends money, within the monthly cap (CreativeBudget, under a row lock).
+        Route::post('/generations', [AdminCreativeGenerationController::class, 'store'])->middleware('throttle:20,1');
+        Route::post('/generations/{id}/cancel', [AdminCreativeGenerationController::class, 'cancel'])->whereNumber('id');
+    });
+
     Route::prefix('admin')->middleware('admin')->group(function () {
         // Admin → AI Access: keys for the read-only AI connector (POST /mcp)
         // and the log of every question it asked. Full admins only — a key
@@ -272,6 +309,11 @@ Route::middleware(['auth:sanctum', 'account.active', 'email.verified'])->group(f
         Route::get('/ai-access/log', [AdminAiAccessController::class, 'log']);
         Route::post('/ai-access/keys', [AdminAiAccessController::class, 'store'])->middleware('throttle:10,1');
         Route::delete('/ai-access/keys/{id}', [AdminAiAccessController::class, 'destroy'])->whereNumber('id');
+
+        // Admin → Creatives' monthly spending cap: any full admin sets it; the
+        // marketing team (collaborators) only sees it (GET is in the
+        // admin/creatives staff group above). 0 switches generation off.
+        Route::put('/creatives/budget', [AdminCreativesController::class, 'updateBudget']);
 
         // Admin → To be Done: the owner's done-state per item slug. The items
         // themselves ship with the frontend, so the slug is shape-checked only.
@@ -536,6 +578,21 @@ Route::prefix('engine/{exchange}')
         Route::post('/invoices/remind', [EngineInvoiceController::class, 'remind']);
         Route::post('/invoices/enforce', [EngineInvoiceController::class, 'enforce']);
     });
+
+// Admin → Creatives' files, opened by an `<img src>` or a download link — which
+// cannot send a Bearer token, hence outside the auth group. The SIGNATURE is the
+// authorisation: these paths exist only as short-lived signed relative paths
+// handed out by the staff API (CreativePresenter: 2 h for a reference image,
+// 30 min for a download). The download streams the file from Higgsfield,
+// fetching only the URL recorded from Higgsfield's own status response.
+Route::middleware('signed:relative')->group(function () {
+    Route::get('/creatives/refs/{id}/image', [CreativeAssetController::class, 'refImage'])
+        ->whereNumber('id')
+        ->name('creatives.refs.image');
+    Route::get('/creatives/generations/{id}/download/{index}', [CreativeAssetController::class, 'download'])
+        ->whereNumber(['id', 'index'])
+        ->name('creatives.generations.download');
+});
 
 // The read-only AI connector (Model Context Protocol over Streamable HTTP) —
 // the employer's Grok app asks its questions here. No user token: a key made

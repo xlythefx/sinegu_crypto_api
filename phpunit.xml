@@ -35,5 +35,8 @@
         <!-- Payment rollout switches: pinned so a developer's local .env (TRON_PUBLIC=true, provider tron) cannot leak into the suite. -->
         <env name="TRON_PUBLIC" value="false"/>
         <env name="PAYMENTS_DEFAULT_PROVIDER" value="coinsbuy"/>
+        <!-- Higgsfield (Admin → Creatives): pinned empty so a developer's real key can never make the suite call the API. Tests set config explicitly and fake every request. -->
+        <env name="HIGGSFIELD_KEY_ID" value=""/>
+        <env name="HIGGSFIELD_KEY_SECRET" value=""/>
     </php>
 </phpunit>

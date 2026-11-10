@@ -216,4 +216,19 @@ return [
     'ai_access' => [
         'public_url' => env('AI_ACCESS_PUBLIC_URL'),
     ],
+
+    // Admin → Creatives: image / video generation for the marketing team
+    // (App\Services\Creatives\HiggsfieldGateway). Both key halves set =
+    // configured. They are never printed, logged or returned — diagnostics
+    // are presence booleans. phpunit.xml pins both empty so the suite can
+    // never reach the real API (a submit spends real money).
+    'higgsfield' => [
+        'key_id' => env('HIGGSFIELD_KEY_ID'),
+        'key_secret' => env('HIGGSFIELD_KEY_SECRET'),
+        'base_url' => env('HIGGSFIELD_API_BASE', 'https://api.higgsfield.ai'),
+        'timeout' => (int) env('HIGGSFIELD_TIMEOUT', 20),
+        'connect_timeout' => (int) env('HIGGSFIELD_CONNECT_TIMEOUT', 5),
+        // WAMP ships no CA bundle; the TRON one is the same file.
+        'ca_bundle' => env('HIGGSFIELD_CACERT', env('TRON_CACERT')),
+    ],
 ];

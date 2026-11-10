@@ -7,10 +7,17 @@ use Illuminate\Http\Request;
 use Symfony\Component\HttpFoundation\Response;
 
 /**
- * Allows every admin-portal role PLUS the read-only `collaborator` through.
+ * Allows every admin-portal role PLUS the `collaborator` through.
  *
- * Guards only the handful of admin GET reads a collaborator may open (the
- * dashboard Overview, User Management, Strategies — see routes/api.php).
+ * Guards the handful of admin GET reads a collaborator may open (the
+ * dashboard Overview, User Management, Strategies, Visitors — see
+ * routes/api.php) and ONE writable area: Admin → Creatives
+ * (`admin/creatives/*`, owner 2026-11-10 — collaborators are the marketing
+ * team, who plan posts and generate images / videos there). Creatives is the
+ * only place a collaborator may write; everywhere else they stay read-only,
+ * and even inside Creatives the monthly spending cap is set by full admins
+ * (PUT /admin/creatives/budget sits in the `admin` group).
+ *
  * Everything else stays behind EnsureAdmin, whose list deliberately does NOT
  * contain `collaborator`: that list also decides who may connect a staff-only
  * exchange (ExchangeAccountController::store), so widening it would open far
