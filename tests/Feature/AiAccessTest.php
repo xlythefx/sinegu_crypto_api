@@ -423,6 +423,42 @@ class AiAccessTest extends EngineTestCase
             ->assertJsonPath('entries.0.key_name', 'Boss Grok');
     }
 
+    public function test_a_key_can_be_made_that_never_expires_and_is_still_revocable(): void
+    {
+        $headers = $this->adminHeaders();
+
+        $made = $this->postJson('/api/admin/ai-access/keys', ['name' => 'Boss Grok', 'never_expires' => true], $headers)
+            ->assertCreated()
+            ->assertJsonPath('key.expires_at', null)
+            ->assertJsonPath('key.state', 'active')
+            ->json();
+        $plain = $made['plain_key'];
+
+        // Years later it still works — nothing but a revoke stops it.
+        $this->travel(5 * 365)->days();
+        $this->mcp(['jsonrpc' => '2.0', 'id' => 1, 'method' => 'ping'], $plain)->assertOk();
+
+        // A fresh sign-in: the admin's own session token expired long ago.
+        $later = ['Authorization' => 'Bearer '.UserCredential::where('name', 'Staff admin')->first()->createToken('spa')->plainTextToken];
+        $this->deleteJson('/api/admin/ai-access/keys/'.$made['key']['id'], [], $later)
+            ->assertOk()
+            ->assertJsonPath('key.state', 'revoked');
+        $this->mcp(['jsonrpc' => '2.0', 'id' => 1, 'method' => 'ping'], $plain)->assertStatus(401);
+    }
+
+    public function test_a_key_with_no_lifetime_given_gets_the_default_not_forever(): void
+    {
+        $made = $this->postJson('/api/admin/ai-access/keys', ['name' => 'Default'], $this->adminHeaders())
+            ->assertCreated()
+            ->json();
+
+        $this->assertNotNull($made['key']['expires_at']);
+        $this->assertSame(
+            now()->addDays(AiAccessKeys::DEFAULT_EXPIRY_DAYS)->toDateString(),
+            substr($made['key']['expires_at'], 0, 10),
+        );
+    }
+
     public function test_only_full_admins_manage_keys(): void
     {
         $this->getJson('/api/admin/ai-access', $this->adminHeaders('collaborator'))->assertForbidden();

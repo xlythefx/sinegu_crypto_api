@@ -13,8 +13,9 @@ use Throwable;
  *
  * A key is `pxa_` + 40 random characters. Only its SHA-256 is stored, so a
  * database dump hands nobody a working key, and the admin who made it sees it
- * exactly once. Every key expires (EXPIRY_DAYS), can be revoked in one click,
- * and records when and from where it was last used.
+ * exactly once. A key expires after one of EXPIRY_DAYS or NEVER (owner's
+ * request, 2026-11-10: `expires_at` NULL), can be revoked in one click either
+ * way, and records when and from where it was last used.
  *
  * The key opens READ tools only — McpServer has no write tool to reach — and
  * it is not a user: it never passes `auth:sanctum`, so no admin route accepts it.
@@ -35,9 +36,10 @@ final class AiAccessKeys
     private const TOUCH_SECONDS = 60;
 
     /**
+     * @param  int|null  $days  null = never expires (it stays usable until revoked)
      * @return array{0: AiAccessKey, 1: string} the row and the plain key (shown once)
      */
-    public function issue(string $name, int $days, ?string $adminUniId, ?string $adminName): array
+    public function issue(string $name, ?int $days, ?string $adminUniId, ?string $adminName): array
     {
         $plain = self::PREFIX.Str::random(40);
 
@@ -47,7 +49,7 @@ final class AiAccessKeys
             'key_hash' => self::hash($plain),
             'created_by' => $adminUniId,
             'created_by_name' => $adminName,
-            'expires_at' => now()->addDays($days),
+            'expires_at' => $days === null ? null : now()->addDays($days),
         ]);
 
         return [$key, $plain];

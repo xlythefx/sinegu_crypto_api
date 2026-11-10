@@ -44,12 +44,17 @@ class AdminAiAccessController extends Controller
         ]);
     }
 
-    /** POST /api/admin/ai-access/keys {name, expires_in_days} — the key, shown once. */
+    /**
+     * POST /api/admin/ai-access/keys {name, expires_in_days | never_expires: true}
+     * — the key, shown once. `never_expires` must be sent explicitly: a missing
+     * lifetime still means the default, never "forever" by accident.
+     */
     public function store(Request $request): JsonResponse
     {
         $data = $request->validate([
             'name' => ['required', 'string', 'min:2', 'max:80'],
             'expires_in_days' => ['nullable', 'integer', Rule::in(AiAccessKeys::EXPIRY_DAYS)],
+            'never_expires' => ['nullable', 'boolean'],
         ]);
         if ($this->keys->activeCount() >= AiAccessKeys::MAX_ACTIVE) {
             return response()->json([
@@ -62,7 +67,7 @@ class AdminAiAccessController extends Controller
         $admin = $request->user();
         [$key, $plain] = $this->keys->issue(
             trim($data['name']),
-            (int) ($data['expires_in_days'] ?? AiAccessKeys::DEFAULT_EXPIRY_DAYS),
+            ! empty($data['never_expires']) ? null : (int) ($data['expires_in_days'] ?? AiAccessKeys::DEFAULT_EXPIRY_DAYS),
             $admin?->uni_id,
             $admin?->name,
         );
