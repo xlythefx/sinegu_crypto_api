@@ -510,6 +510,11 @@ class AssetController extends Controller
             'enabled' => ['required', 'boolean'],
             // Kill switch (KillSwitch): absent = unchanged, '' / null = off.
             'kill_switch_losses' => ['sometimes', 'nullable', 'integer', 'between:1,'.StreakSizing::MAX_STEPS],
+            // The coin's own leverage, which replaces the alert's on every entry:
+            // absent = unchanged (the card's on/off switch sends none), '' / null =
+            // not set (the alert's applies). Applies at once — it is not sizing, and
+            // the engine sets it before each entry anyway.
+            'leverage' => ['sometimes', 'nullable', 'integer', 'between:1,125'],
             'asset_image' => ['nullable', 'image', 'mimes:jpeg,jpg,png,gif,webp,svg', 'max:2048'],
         ]);
 

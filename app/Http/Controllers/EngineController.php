@@ -184,6 +184,8 @@ class EngineController extends Controller
                 'side' => $a->side,
                 'base_size' => (float) $a->base_size,
                 'max_increments' => (float) $a->max_increments,
+                // The coin's own leverage, which beats the alert's; null = the alert's.
+                'leverage' => $a->leverage === null ? null : (int) $a->leverage,
                 'enabled' => (bool) $a->enabled,
                 // Streak sizing (StreakSizing): [{kind, streak, size}]. A list,
                 // not a map: PHP encodes an empty map as [] and the engine

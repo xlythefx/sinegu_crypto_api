@@ -73,6 +73,8 @@ final class AssetTools implements Toolset
                 // The column is named max_increments but holds a SIZE; the count is derived.
                 'max_position_size' => $a['max_increments'] ?? null,
                 'max_entries' => $base > 0 && $max > 0 ? max(1, (int) round($max / $base)) : null,
+                // null = the TradingView alert's leverage applies (25x when it names none).
+                'leverage' => $a['leverage'] ?? null,
                 'kill_switch_after_losses' => $a['kill_switch_losses'] ?? null,
                 'kill_switch_tripped_at' => $a['killed_at'] ?? null,
                 'kill_switch_reason' => $a['killed_reason'] ?? null,

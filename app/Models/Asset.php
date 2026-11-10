@@ -21,6 +21,8 @@ class Asset extends Model
         'asset_image',
         'max_increments',
         'base_size',
+        // Leverage the engine asks for on entries; NULL = the alert's (25x by default).
+        'leverage',
         'streak_sizing_enabled',
         'kill_switch_losses',
         'enabled',
@@ -31,6 +33,7 @@ class Asset extends Model
         return [
             'max_increments' => 'float',
             'base_size' => 'float',
+            'leverage' => 'integer',
             'streak_sizing_enabled' => 'boolean',
             'kill_switch_losses' => 'integer',
             'kill_switch_armed_at' => 'datetime',

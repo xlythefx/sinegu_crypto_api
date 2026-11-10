@@ -22,7 +22,7 @@ final class AssetHistory
 {
     /** What the history tracks — every column that changes how, or whether, a coin trades. */
     public const FIELDS = [
-        'ticker', 'type', 'broker', 'side', 'base_size', 'max_increments', 'enabled',
+        'ticker', 'type', 'broker', 'side', 'base_size', 'max_increments', 'leverage', 'enabled',
         'kill_switch_losses', 'streak_sizing_enabled', 'streak_sizes', 'asset_image',
     ];
 
@@ -46,6 +46,7 @@ final class AssetHistory
             'side' => $asset->side,
             'base_size' => (float) $asset->base_size,
             'max_increments' => (float) $asset->max_increments,
+            'leverage' => $asset->leverage === null ? null : (int) $asset->leverage,
             'enabled' => (bool) $asset->enabled,
             'kill_switch_losses' => $asset->kill_switch_losses === null ? null : (int) $asset->kill_switch_losses,
             'streak_sizing_enabled' => (bool) $asset->streak_sizing_enabled,

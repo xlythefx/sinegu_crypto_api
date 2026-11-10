@@ -25,9 +25,9 @@ use Illuminate\Support\Facades\Log;
  *   blocked keys, with total_deposit (initial + net transfers) at least the engine's
  *   MIN_DEPOSIT and a balance. Live accounts, or the demo ones when no live account
  *   qualifies (`demo_only`);
- * - leverage: leverage is the SIGNAL's on this engine, not the asset's, so the figure
- *   is the latest one a main-feed Binance signal carried for this coin, else for any
- *   coin, else any feed's.
+ * - leverage: the latest one a main-feed Binance signal carried for this coin, else
+ *   for any coin, else any feed's. A coin's OWN leverage (assets.leverage, 2026-11-10)
+ *   beats the signal's in the engine; the form knows it and uses it before this one.
  */
 class BinanceSizingCheck
 {
