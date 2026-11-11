@@ -5,7 +5,6 @@ namespace App\Services\Billing;
 use App\Mail\InvoicePaidNotice;
 use App\Mail\PaymentReceived;
 use App\Models\Invoice;
-use App\Models\TronTransfer;
 use App\Services\EngineCache;
 use App\Services\Notifications\AccountMail;
 use Illuminate\Support\Carbon;
@@ -34,7 +33,11 @@ class PaymentNotifier
 {
     private const SANDBOX_KEY_PREFIX = 'SBXINV-';
 
-    public function __construct(private EngineCache $engine) {}
+    public function __construct(
+        private EngineCache $engine,
+        // How it was paid — the same words the admin invoice page shows.
+        private PaymentMethod $methods,
+    ) {}
 
     /**
      * @param  bool  $wasPaused  trading had been switched off for this invoice and
@@ -78,7 +81,7 @@ class PaymentNotifier
         $name = $ownName !== '' ? $ownName : 'A customer';
         $email = trim((string) ($owner->email ?? ''));
 
-        $method = $this->method($invoice);
+        $method = $this->methods->describe($invoice);
         $test = $method['test'] || ($owner->type ?? null) === 'developer';
         $amount = round($invoice->paid_amount !== null ? (float) $invoice->paid_amount : $invoice->feeCents() / 100, 2);
         $period = Carbon::createFromFormat('!Y-m', (string) $invoice->month_year)->format('F Y');
@@ -129,41 +132,6 @@ class PaymentNotifier
         ]);
 
         return $sent;
-    }
-
-    /**
-     * How it was paid, in the words a person uses — and whether the money was
-     * play money (a Stripe test session or the TRON Nile testnet), so a
-     * developer's rehearsal never reads as revenue.
-     *
-     * @return array{label: string, test: bool}
-     */
-    private function method(Invoice $invoice): array
-    {
-        $reference = (string) $invoice->payment_reference;
-
-        return match ((string) $invoice->payment_provider) {
-            'stripe' => str_starts_with($reference, 'cs_test_')
-                ? ['label' => 'Card (Stripe test mode)', 'test' => true]
-                : ['label' => 'Card (Stripe)', 'test' => false],
-            'tron' => $this->tronNetwork($invoice) === 'nile'
-                ? ['label' => 'USDT (TRC-20, Nile testnet)', 'test' => true]
-                : ['label' => 'USDT (TRC-20)', 'test' => false],
-            'coinsbuy' => ['label' => 'Crypto (Coinsbuy)', 'test' => false],
-            'manual' => ['label' => 'Marked paid by an admin', 'test' => false],
-            default => ['label' => ucfirst((string) $invoice->payment_provider) ?: 'Unknown', 'test' => false],
-        };
-    }
-
-    private function tronNetwork(Invoice $invoice): ?string
-    {
-        if ((string) $invoice->payment_reference === '') {
-            return null;
-        }
-
-        return TronTransfer::where('tx_hash', $invoice->payment_reference)
-            ->where('invoice_id', $invoice->id)
-            ->value('network');
     }
 
     /** @param  list<string>  $to */

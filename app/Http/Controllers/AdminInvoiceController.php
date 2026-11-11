@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\BinanceAccount;
 use App\Models\Invoice;
+use App\Services\Billing\PaymentMethod;
 use App\Services\InvoiceService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -17,7 +18,10 @@ use Illuminate\Support\Facades\DB;
  */
 class AdminInvoiceController extends Controller
 {
-    public function __construct(private InvoiceService $invoices) {}
+    public function __construct(
+        private InvoiceService $invoices,
+        private PaymentMethod $methods,
+    ) {}
 
     /** GET /api/admin/invoices — every invoice + filters + summary. */
     public function index(Request $request): JsonResponse
@@ -88,9 +92,19 @@ class AdminInvoiceController extends Controller
             return $this->notFound();
         }
 
+        $user = DB::table('user_credentials')->where('uni_id', $invoice->user_id)->first(['name', 'email']);
+
         return response()->json([
             'success' => true,
-            'invoice' => $invoice->toApiArray($invoice->account?->name, $this->invoices->isFirstInvoice($invoice)),
+            'invoice' => $invoice->toApiArray($invoice->account?->name, $this->invoices->isFirstInvoice($invoice)) + [
+                // The admin invoice page (/admin/invoices/{id}) is opened straight
+                // from a link, so it carries its own customer and payment.
+                'user_name' => $user->name ?? null,
+                'user_email' => $user->email ?? null,
+                // How it was paid (card / crypto / by hand), the reference and,
+                // for USDT, the TronScan link — null while unpaid.
+                'payment' => $this->methods->details($invoice),
+            ],
         ]);
     }
 
