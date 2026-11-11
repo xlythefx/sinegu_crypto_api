@@ -70,7 +70,12 @@ final class CreativeModels
             'endpoint' => 'kling-video/v2.5-turbo/pro/image-to-video',
             'description' => 'Brings one still to life as a short video. The video keeps the image\'s shape, so make the still 9:16 for TikTok.',
             'images' => 'image_url',
-            'price_hint' => 'about $0.30 for 5 s, $0.60 for 10 s',
+            'price_hint' => 'about $0.26 for 5 s, $0.53 for 10 s',
+            // Kling's price check stopped answering a number by 2026-11-11 and
+            // now answers a description ("1080p: $0.0525 per video second"),
+            // which left every animate step unpriced. One output resolution,
+            // so one rate (seen live 2026-11-11).
+            'usd_per_second' => 0.0525,
             'params' => [
                 ['name' => 'duration', 'label' => 'Length (seconds)', 'type' => 'select', 'options' => [5, 10], 'default' => 5],
                 ['name' => 'negative_prompt', 'label' => 'Avoid (optional)', 'type' => 'text', 'default' => null, 'max_length' => 500],
@@ -274,18 +279,20 @@ final class CreativeModels
 
     /**
      * Our own price for a model whose estimate answers a description instead
-     * of a number (Seedance): usd_per_second[resolution] × duration. Null for
-     * every other model — no number from Higgsfield, no generation.
+     * of a number (Seedance, Kling): the per-second rate × duration — a table
+     * by resolution, or one rate for a model with a single output resolution.
+     * Null for every other model — no number from Higgsfield, no generation.
      *
      * @param  array<string, mixed>  $params
      */
     public function fallbackUsd(string $key, array $params): ?float
     {
         $rates = self::PRESETS[$key]['usd_per_second'] ?? null;
-        if (! is_array($rates)) {
-            return null;
-        }
-        $rate = $rates[(string) ($params['resolution'] ?? '')] ?? null;
+        $rate = match (true) {
+            is_array($rates) => $rates[(string) ($params['resolution'] ?? '')] ?? null,
+            is_float($rates) => $rates,
+            default => null,
+        };
         $seconds = (int) ($params['duration'] ?? 0);
         if ($rate === null || $seconds <= 0) {
             return null;

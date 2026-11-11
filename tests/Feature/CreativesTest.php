@@ -398,7 +398,7 @@ class CreativesTest extends EngineTestCase
             ->assertStatus(502)
             ->assertJsonPath('error_code', 'ESTIMATE_UNAVAILABLE');
 
-        // A description with no fallback table (only Seedance has one) is no price either.
+        // A description with no fallback rate (only the video models have one) is no price either.
         $this->fakeHiggsfield(['estimate' => fn () => Http::response(['type' => 'description', 'pricing_description' => 'depends'])]);
         $this->api('POST', '/api/admin/creatives/generations', $this->soulBody())
             ->assertStatus(502)
@@ -432,6 +432,28 @@ class CreativesTest extends EngineTestCase
         $this->api('POST', '/api/admin/creatives/generations/estimate', [
             'model' => 'seedance-reference', 'prompt' => 'Pixel dances', 'params' => ['duration' => 16],
         ])->assertStatus(422)->assertJsonValidationErrors('params.duration');
+    }
+
+    public function test_kling_description_estimate_falls_back_to_its_per_second_rate(): void
+    {
+        // Seen live 2026-11-11: Kling's price check answers a description, not
+        // a number, which left every animate step "not priced".
+        $ref = $this->makeRef();
+        $this->fakeHiggsfield(['estimate' => fn () => Http::response([
+            'type' => 'description',
+            'pricing_description' => 'Standard self-serve rates in USD per video second: 1080p: $0.0525.',
+        ])]);
+
+        $this->api('POST', '/api/admin/creatives/generations/estimate', [
+            'model' => 'kling-animate', 'prompt' => 'Pixel waves', 'source' => ['ref_id' => $ref->id], 'params' => ['duration' => 10],
+        ])->assertOk()->assertJsonPath('usd', 0.525)->assertJsonPath('allowed', true);
+
+        // The default (5 s) is what gets reserved on submit.
+        $this->api('POST', '/api/admin/creatives/generations', [
+            'model' => 'kling-animate', 'prompt' => 'Pixel waves', 'source' => ['ref_id' => $ref->id],
+        ])->assertStatus(201)
+            ->assertJsonPath('generation.estimated_usd', 0.2625)
+            ->assertJsonPath('generation.charged_usd', 0.2625);
     }
 
     public function test_seedance_always_uses_the_character_even_when_switched_off(): void
