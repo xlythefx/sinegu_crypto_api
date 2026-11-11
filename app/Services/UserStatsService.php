@@ -792,9 +792,12 @@ class UserStatsService
      * reported; chaining each day's P&L over the capital THAT day started
      * with cannot, because a flow only changes the days after it.
      *
-     * The walk is deliberately the one {@see PublicStatsController} publishes,
-     * so the two screens differ in scope and not in method: flows land before
-     * the day's trades, and capital compounds with realized P&L.
+     * The walk is modeled on the one {@see PublicStatsController} publishes,
+     * and capital compounds with realized P&L. One difference since
+     * 2026-11-11: here a DEPOSIT lands before the day's trades and a
+     * WITHDRAWAL after them (the public walk still lands both before), because
+     * a customer who empties the account mid-day had those trades sized on
+     * the money that was still there — see the loop below.
      *
      * Two details are load-bearing:
      * - **Seeded from `initial_deposit`**, plus flows — the same capital base
@@ -860,12 +863,19 @@ class UserStatsService
         $start = [];
         $end = [];
         foreach ($days as $day) {
-            $capital += $flowByDay[$day] ?? 0.0;
+            $flow = $flowByDay[$day] ?? 0.0;
+            // A deposit lands BEFORE the day's trades, a withdrawal AFTER them
+            // (2026-11-11). The trades of a withdrawal day were sized on the
+            // money still in the account: Lloyd withdrew 15,611 at 16:19 UTC
+            // on 22 Oct, between two losing closes on positions sized for
+            // ~16k, and "withdrawal first" measured −335 on the 706 left —
+            // −47% for a day the master lost −2%.
+            $capital += max($flow, 0.0);
             // Recorded even when non-positive: the card's `capital > 0` guard
             // is what drops such a day out of the chain, and a missing key
             // would instead read as "no data for this day".
             $start[$day] = round($capital, 2);
-            $capital += ($pnlByDay[$day] ?? 0.0) - ($unchargedFeeByDay[$day] ?? 0.0);
+            $capital += ($pnlByDay[$day] ?? 0.0) - ($unchargedFeeByDay[$day] ?? 0.0) + min($flow, 0.0);
             $end[$day] = round($capital, 2);
         }
 

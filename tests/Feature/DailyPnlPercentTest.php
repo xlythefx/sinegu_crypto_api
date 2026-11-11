@@ -8,7 +8,8 @@ use Laravel\Sanctum\Sanctum;
 
 /**
  * The P&L calendar's percentage is each day's P&L over the balance THAT day
- * started with (after its transfers, before its trades) — never over today's
+ * started with (after its deposits, before its trades; a withdrawal counts
+ * after them) — never over today's
  * balance, which let a deposit rewrite every day already on screen.
  *
  * Seeded (initial_deposit 1000, both closes after the fee cutoff):
@@ -72,6 +73,30 @@ class DailyPnlPercentTest extends EngineTestCase
         $this->assertEquals(2049.5, $days['2026-09-15']['start_balance']);
         $this->assertEquals(-1.02, $days['2026-09-15']['pct']);       // −20.90 / 2049.50
         $this->assertEquals(-1.0, $days['2026-09-15']['pct_gross']);  // −20.40 / 2049.50
+    }
+
+    /**
+     * A withdrawal lands AFTER the day's trades (2026-11-11): Lloyd emptied
+     * ~16k between two losing closes on positions sized for it, and
+     * "withdrawal first" measured the loss on the ~700 left (−47%).
+     */
+    public function test_a_withdrawal_counts_after_the_days_trades_never_before(): void
+    {
+        $this->makeAccount($this->uniId, ['initial_deposit' => 16000, 'balance' => 300, 'api_key' => 'pct-key']);
+        $this->trade(1, '2026-10-22 11:45:00', -100, 0);
+        DB::table('binance_transactions')->insert([
+            'uni_id' => $this->uniId, 'api_key' => 'pct-key', 'type' => 'WITHDRAWAL',
+            'amount' => 15300, 'currency' => 'USDT', 'created_at' => '2026-10-22 16:19:00',
+        ]);
+        $this->trade(2, '2026-10-22 20:00:00', -300, 0);
+        $this->trade(3, '2026-10-23 10:00:00', 6, 0);
+
+        $days = $this->getJson('/api/dashboard/daily-pnl')->assertOk()->json('days');
+
+        $this->assertEquals(16000.0, $days['2026-10-22']['start_balance']);
+        $this->assertEquals(-2.5, $days['2026-10-22']['pct']);          // −400 / 16,000, not / 700
+        $this->assertEquals(300.0, $days['2026-10-23']['start_balance']); // the next day starts after it
+        $this->assertEquals(2.0, $days['2026-10-23']['pct']);
     }
 
     public function test_no_capital_on_record_gives_no_percentage_rather_than_a_huge_one(): void

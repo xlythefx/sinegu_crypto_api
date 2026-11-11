@@ -121,7 +121,13 @@ class AnalyticsPeriodReturnTest extends EngineTestCase
         $this->assertEquals(61000, $after['2026-09-05']);
     }
 
-    public function test_a_withdrawal_lowers_capital_from_its_own_day_on(): void
+    /**
+     * A withdrawal lowers capital from the day AFTER it (2026-11-11): that
+     * day's trades were sized on the money still in the account. Until then
+     * it counted before them, and a customer who emptied the account between
+     * two losing closes read −47% for a day the master lost −2%.
+     */
+    public function test_a_withdrawal_lowers_capital_after_its_own_days_trades(): void
     {
         $this->seedAugust();
         $this->flow('2026-08-15 09:00:00', 2000, 'WITHDRAWAL');
@@ -129,8 +135,8 @@ class AnalyticsPeriodReturnTest extends EngineTestCase
         $capital = $this->analytics()['daily_capital'];
 
         $this->assertEquals(10000, $capital['2026-08-10']);   // before it
-        $this->assertEquals(8500, $capital['2026-08-15']);    // 10,500 − 2,000
-        $this->assertEquals(8500, $capital['2026-08-20']);    // after it
+        $this->assertEquals(10500, $capital['2026-08-15']);   // its own day: before it leaves
+        $this->assertEquals(8500, $capital['2026-08-20']);    // after it: 10,500 − 2,000
     }
 
     public function test_capital_ignores_the_date_and_chip_filters(): void
