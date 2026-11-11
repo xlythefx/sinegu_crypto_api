@@ -49,12 +49,15 @@ class AdminTronTransferController extends Controller
     public function index(Request $request): JsonResponse
     {
         $status = $request->query('status');
+        $networks = $this->visibleNetworks($request);
 
         // `disputed` is not a transfer status but a filter: transfers with an
         // open "two customers claim it" row (TronPaymentClaims).
-        $disputedIds = TronPaymentClaim::openDisputes()->pluck('tron_transfer_id')->unique()->all();
+        $disputedIds = TronPaymentClaim::openDisputes()->whereIn('network', $networks)
+            ->pluck('tron_transfer_id')->unique()->all();
 
         $rows = TronTransfer::query()
+            ->whereIn('network', $networks)
             ->when($request->query('network'), fn ($q, $n) => $q->where('network', $n))
             ->when($status === 'disputed', fn ($q) => $q->whereIn('id', $disputedIds))
             ->when($status && $status !== 'disputed', fn ($q) => $q->where('status', $status))
@@ -104,12 +107,13 @@ class AdminTronTransferController extends Controller
         }, $built);
 
         $counts = TronTransfer::selectRaw('status, COUNT(*) as total')
+            ->whereIn('network', $networks)
             ->groupBy('status')
             ->pluck('total', 'status');
 
         return response()->json([
             'success' => true,
-            'networks' => $this->networkHealth(),
+            'networks' => $this->networkHealth($networks),
             'counts' => [
                 'all' => (int) $counts->sum(),
                 'unmatched' => (int) ($counts[TronTransfer::STATUS_UNMATCHED] ?? 0),
@@ -289,11 +293,31 @@ class AdminTronTransferController extends Controller
             ->claim($intent, $transfer->tx_hash, (string) $transfer->value_units);
     }
 
-    /** @return list<array<string, mixed>> */
-    private function networkHealth(): array
+    /**
+     * The networks this viewer sees: every one for a `developer` (they pay on
+     * the testnet), and for everyone else only the network CUSTOMERS pay on
+     * here — mainnet on prod, Nile on a sandbox box. Two fake-money rehearsal
+     * transfers sat in "Needs attention" for months and read as customers'
+     * payments to the desk (2026-11-11). Listing only; the actions still
+     * re-check every transfer server-side.
+     *
+     * @return list<string>
+     */
+    private function visibleNetworks(Request $request): array
     {
-        $names = array_keys((array) config('payments.tron.networks', []));
+        if ($request->user()?->type === 'developer') {
+            return array_keys((array) config('payments.tron.networks', []));
+        }
 
+        return [$this->env->tronNetworkFor(false)];
+    }
+
+    /**
+     * @param  list<string>  $names
+     * @return list<array<string, mixed>>
+     */
+    private function networkHealth(array $names): array
+    {
         return array_map(function (string $network) {
             $t = $this->env->tron($network);
 

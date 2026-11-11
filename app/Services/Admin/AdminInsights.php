@@ -38,6 +38,9 @@ class AdminInsights
     /** Invoice-scenario scratch accounts (SandboxInvoiceController) — never business. */
     public const SANDBOX_KEY_PREFIX = 'SBXINV-';
 
+    /** The Overview's "Payments received" window. */
+    public const RECENT_PAYMENT_DAYS = 7;
+
     /** The Overview's Platform view: whose money it pools. */
     public const PLATFORM_SCOPES = ['all', 'customers', 'master'];
 
@@ -98,11 +101,21 @@ class AdminInsights
                     'count' => $unpaid->count(),
                     'amount' => round((float) $unpaid->sum('total_fee'), 2),
                 ],
-                'unmatched_transfers' => TronTransfer::where('status', TronTransfer::STATUS_UNMATCHED)->count(),
+                // The network CUSTOMERS pay on only (mainnet on prod): a
+                // developer's testnet rehearsal is never the desk's to act on —
+                // and Crypto Transfers no longer lists it for them (2026-11-11).
+                'unmatched_transfers' => TronTransfer::where('status', TronTransfer::STATUS_UNMATCHED)
+                    ->where('network', $this->env->tronNetworkFor(false))->count(),
+                // Every invoice a customer paid in the last 7 days, card and
+                // crypto alike (2026-11-11 — a card payment was invisible on
+                // Crypto Transfers, the only payments page there was).
+                'recent_payments' => $this->recentPayments(),
                 // Two customers saying the same crypto payment is theirs — the
                 // Overview's caution strip (TronPaymentClaims). Cache-busted by
                 // the claim that opens one and the admin action that closes it.
-                'disputed_payments' => TronPaymentClaim::openDisputes()->distinct()->count('tron_transfer_id'),
+                'disputed_payments' => TronPaymentClaim::openDisputes()
+                    ->where('network', $this->env->tronNetworkFor(false))
+                    ->distinct()->count('tron_transfer_id'),
                 // Coins the kill switch switched off and nobody has turned back
                 // on (App\Services\Assets\KillSwitch) — the Overview's other
                 // caution strip. Cache-busted by the trip and by the re-enable.
@@ -950,6 +963,45 @@ class AdminInsights
      *
      * @return array{count: int, latest: list<array<string, mixed>>}
      */
+    /**
+     * Invoices CUSTOMERS paid in the last `RECENT_PAYMENT_DAYS`, newest first
+     * — fee > 0 (a $0 month is stored paid but collected nothing), real
+     * accounts only (invoiceQuery drops `SBXINV-`). Cache-busted by
+     * InvoiceService::settle, so a payment shows the moment it lands.
+     *
+     * @return array{count: int, amount: float, days: int, latest: list<array<string, mixed>>}
+     */
+    private function recentPayments(): array
+    {
+        $rows = $this->invoiceQuery()
+            ->join('user_credentials as u', 'u.uni_id', '=', 'invoices.user_id')
+            ->where('u.type', 'user')
+            ->where('invoices.status', 'paid')
+            ->where('invoices.total_fee', '>', 0)
+            ->where('invoices.paid_at', '>=', now()->subDays(self::RECENT_PAYMENT_DAYS))
+            ->orderByDesc('invoices.paid_at')
+            ->get(['invoices.id', 'invoices.user_id', 'u.name', 'invoices.exchange', 'invoices.month_year',
+                'invoices.total_fee', 'invoices.paid_amount', 'invoices.payment_provider', 'invoices.paid_at']);
+
+        $amount = fn ($r) => round((float) ($r->paid_amount ?? $r->total_fee), 2);
+
+        return [
+            'count' => $rows->count(),
+            'amount' => round($rows->sum($amount), 2),
+            'days' => self::RECENT_PAYMENT_DAYS,
+            'latest' => $rows->take(8)->map(fn ($r) => [
+                'invoice_id' => (int) $r->id,
+                'uni_id' => $r->user_id,
+                'name' => $r->name,
+                'exchange' => $r->exchange ?: 'binance',
+                'month_year' => $r->month_year,
+                'amount' => $amount($r),
+                'provider' => $r->payment_provider,
+                'paid_at' => $this->iso($r->paid_at),
+            ])->values()->all(),
+        ];
+    }
+
     private function outsideCloses(): array
     {
         $since = now()->subDays(7)->toDateTimeString();

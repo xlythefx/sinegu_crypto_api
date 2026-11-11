@@ -263,6 +263,49 @@ class TronEndpointTest extends PaymentTestCase
             ->assertStatus(403);
     }
 
+    /**
+     * Two Nile rehearsal transfers sat in "Needs attention" for months and read
+     * as customers' payments to the desk (2026-11-11): on the live box only a
+     * developer, who pays on the testnet, sees the testnet — its wallet card,
+     * rows and counts. Everyone else sees the network customers pay on.
+     */
+    public function test_on_the_live_box_the_testnet_is_listed_for_developers_only(): void
+    {
+        $this->usePayments(PaymentEnvironment::PRODUCTION);
+        $this->seedTransfer(['network' => 'nile']);
+        $this->seedTransfer([
+            'network' => 'mainnet',
+            'contract_address' => (string) config('payments.tron.networks.mainnet.contract'),
+            'to_address' => $this->tronMainnetAddress,
+        ]);
+        $admin = $this->makeUser(['type' => 'admin']);
+
+        $asAdmin = $this->getJson('/api/admin/tron-transfers', $this->userHeaders($admin))->assertOk();
+        $this->assertSame(['mainnet'], array_column($asAdmin->json('transfers'), 'network'));
+        $this->assertSame(['mainnet'], array_column($asAdmin->json('networks'), 'name'));
+        $asAdmin->assertJsonPath('counts.all', 1)->assertJsonPath('counts.unmatched', 1);
+
+        $asDev = $this->getJson('/api/admin/tron-transfers', $this->userHeaders($this->devId))->assertOk();
+        $this->assertEqualsCanonicalizing(['mainnet', 'nile'], array_column($asDev->json('transfers'), 'network'));
+        $asDev->assertJsonPath('counts.all', 2);
+    }
+
+    /** The Overview's "transfers need attention" is the customers' network only, for everyone. */
+    public function test_on_the_live_box_the_overview_never_counts_testnet_transfers(): void
+    {
+        $this->usePayments(PaymentEnvironment::PRODUCTION);
+        $this->seedTransfer(['network' => 'nile']);
+        $this->seedTransfer([
+            'network' => 'mainnet',
+            'contract_address' => (string) config('payments.tron.networks.mainnet.contract'),
+            'to_address' => $this->tronMainnetAddress,
+        ]);
+
+        $this->getJson('/api/admin/insights/overview', $this->userHeaders($this->devId))
+            ->assertOk()
+            ->assertJsonPath('attention.unmatched_transfers', 1);
+    }
+
     public function test_the_listing_reports_health_counts_and_a_suggestion(): void
     {
         $this->makeIntent($this->invoice, ['expires_at' => now()->subHour(), 'status' => PaymentIntent::STATUS_EXPIRED, 'open_units' => null]);

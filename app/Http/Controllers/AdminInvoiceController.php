@@ -57,7 +57,13 @@ class AdminInvoiceController extends Controller
             }));
         }
 
-        $paid = $invoices->where('status', 'paid');
+        // A $0 month (a loss, or still under the high-water mark) is stored
+        // `paid` but collected nothing and owes nothing: it is neither a paid
+        // invoice nor an outstanding one, so it counts as "no fee" on its own
+        // (2026-11-11 — "13 paid" read as 13 customers paying, against 9).
+        $charged = $invoices->filter(fn (Invoice $i) => $i->feeCents() > 0);
+        $paid = $charged->where('status', 'paid');
+        $unpaid = $charged->where('status', '!=', 'paid');
 
         return response()->json([
             'success' => true,
@@ -66,11 +72,9 @@ class AdminInvoiceController extends Controller
                 'total_collected' => round((float) $paid->sum('total_fee'), 2),
                 'count_total' => $invoices->count(),
                 'count_paid' => $paid->count(),
-                'count_pending' => $invoices->where('status', '!=', 'paid')->count(),
-                'outstanding_amount' => round(
-                    (float) $invoices->where('status', '!=', 'paid')->sum('total_fee'),
-                    2
-                ),
+                'count_pending' => $unpaid->count(),
+                'count_no_fee' => $invoices->count() - $charged->count(),
+                'outstanding_amount' => round((float) $unpaid->sum('total_fee'), 2),
             ],
         ]);
     }
@@ -234,6 +238,10 @@ class AdminInvoiceController extends Controller
         $validated = $request->validate([
             'total_fee' => ['nullable', 'numeric', 'min:0'],
             'status' => ['nullable', 'in:pending,paid,failed,overdue'],
+            // Admin → Sandbox → Invoice Testing marks its rehearsal invoices
+            // paid through this same route; it sends sandbox: true so nobody
+            // is thanked for (or told about) a payment that never happened.
+            'sandbox' => ['sometimes', 'boolean'],
         ]);
 
         $invoice = Invoice::find($id);
@@ -248,7 +256,7 @@ class AdminInvoiceController extends Controller
 
         if (! empty($validated['status'])) {
             if ($validated['status'] === 'paid') {
-                $this->invoices->settle($invoice, 'manual');
+                $this->invoices->settle($invoice, 'manual', notify: ! $request->boolean('sandbox'));
             } else {
                 $invoice->status = $validated['status'];
                 $invoice->save();

@@ -3,11 +3,14 @@
 namespace App\Services;
 
 use App\Models\BinanceAccount;
+use App\Http\Controllers\AdminInsightsController;
 use App\Models\Invoice;
+use App\Services\Billing\PaymentNotifier;
 use App\Services\Exchanges\ExchangeSchema;
 use App\Services\Pnl\BinancePnlSource;
 use App\Services\Pnl\PnlSource;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 
 /**
@@ -21,6 +24,7 @@ class InvoiceService
     public function __construct(
         private BinancePnlSource $binance,
         private EngineCache $engineCache,
+        private PaymentNotifier $payments,
     ) {}
 
     private function sourceFor(string $exchange): PnlSource
@@ -342,8 +346,14 @@ class InvoiceService
      * short-circuit still runs first, so a replayed webhook returns false and
      * cannot overwrite the provenance: the FIRST successful settlement owns it.
      *
-     * @param  string       $method     'manual' | 'stripe' | 'coinsbuy'
-     * @param  string|null  $reference  provider handle (cs_… / Coinsbuy deposit id)
+     * A settlement is ANNOUNCED (2026-11-11, `Billing\PaymentNotifier`):
+     * the customer's thank-you, the team's "invoice paid" and the admin
+     * Telegram line, once, after the commit, and only by the call that did the
+     * settling. `$notify = false` is the rehearsal opt-out (Admin → Sandbox,
+     * the scenario runner); $0 invoices and `SBXINV-` rows are never announced.
+     *
+     * @param  string       $method     'manual' | 'stripe' | 'coinsbuy' | 'tron'
+     * @param  string|null  $reference  provider handle (cs_… / Coinsbuy deposit id / tx hash)
      * @param  float|null   $paid       amount actually received; defaults to total_fee
      * @return bool  true if this call did the settling, false if already settled
      */
@@ -351,13 +361,19 @@ class InvoiceService
         Invoice $invoice,
         string $method = 'manual',
         ?string $reference = null,
-        ?float $paid = null
+        ?float $paid = null,
+        bool $notify = true,
     ): bool {
-        $settled = DB::transaction(function () use ($invoice, $method, $reference, $paid) {
+        // Set inside the transaction: trading was switched off for this invoice
+        // and settling it switched it back on — the thank-you says so.
+        $wasPaused = false;
+
+        $settled = DB::transaction(function () use ($invoice, $method, $reference, $paid, &$wasPaused) {
             $locked = Invoice::whereKey($invoice->getKey())->lockForUpdate()->first();
             if (! $locked || $locked->status === 'paid') {
                 return false;
             }
+            $statusBefore = (string) $locked->status;
 
             $locked->status = 'paid';
             $locked->paid_at = now();
@@ -382,6 +398,10 @@ class InvoiceService
                     ->exists();
 
                 if (! $stillOwing) {
+                    $wasPaused = in_array($statusBefore, ['overdue', 'failed'], true)
+                        && ExchangeSchema::for($exchange)->accountQuery()
+                            ->whereKey($locked->account_id)->where('enabled', 0)->exists();
+
                     ExchangeSchema::for($exchange)->accountQuery()
                         ->whereKey($locked->account_id)
                         ->update(['enabled' => 1]);
@@ -398,6 +418,13 @@ class InvoiceService
         // rather than at the next TTL expiry.
         if ($settled) {
             $this->engineCache->refreshAccounts();
+            // The Overview's "Payments received" card is cached for a minute;
+            // a payment should be on it the moment it lands.
+            Cache::forget(AdminInsightsController::CACHE_PREFIX.'overview');
+
+            if ($notify) {
+                $this->payments->paid($invoice->fresh() ?? $invoice, $wasPaused);
+            }
         }
 
         return $settled;

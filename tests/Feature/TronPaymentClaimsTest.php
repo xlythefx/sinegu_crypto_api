@@ -182,8 +182,9 @@ class TronPaymentClaimsTest extends PaymentTestCase
         });
 
         // Pasting again neither duplicates the row nor mails the team twice.
+        // (B's settlement itself sent the payment-received pair — counted apart.)
         $this->claim($this->uniA, $this->invoiceA, $txB)->assertStatus(409);
-        Mail::assertSentCount(1);
+        Mail::assertSent(PaymentDisputedNotice::class, 1);
         $this->assertSame(1, TronPaymentClaim::openDisputes()->count());
     }
 

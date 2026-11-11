@@ -86,6 +86,18 @@ class EngineCache
     }
 
     /**
+     * Ask the engine to tell the admin Telegram group that an invoice was paid
+     * (App\Services\Billing\PaymentNotifier). Same messenger arrangement as the
+     * kill switch: the engine owns the bot token and the admin chat.
+     *
+     * @param  array{invoice_id: int, name: string, amount: float, period: string, method: string, exchange: string, was_paused: bool, test: bool}  $payment
+     */
+    public function paymentReceived(array $payment): bool
+    {
+        return $this->ping('payment-received', $payment);
+    }
+
+    /**
      * Sync balances for specific accounts NOW, instead of at the poller's next
      * tick. Scoped by api_key on purpose: one trader pressing "Refresh balance"
      * must cost one Binance call, not one per account on the platform.

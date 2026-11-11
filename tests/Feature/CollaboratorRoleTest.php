@@ -269,7 +269,7 @@ class CollaboratorRoleTest extends EngineTestCase
 
         // Served from the same cache entry — the redaction is per request.
         $collab = $this->actor($this->collaborator)->getJson('/api/admin/insights/overview')->assertOk()->json();
-        foreach (['blocked_keys', 'blocked_keys_count', 'overdue_invoices', 'unpaid_invoices', 'unmatched_transfers', 'paused_for_payment'] as $key) {
+        foreach (['blocked_keys', 'blocked_keys_count', 'overdue_invoices', 'unpaid_invoices', 'unmatched_transfers', 'paused_for_payment', 'recent_payments'] as $key) {
             $this->assertArrayNotHasKey($key, $collab['attention']);
         }
         $this->assertArrayNotHasKey('collected_this_month', $collab['headline']);

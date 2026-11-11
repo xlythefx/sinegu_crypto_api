@@ -531,7 +531,8 @@ class SandboxInvoiceController extends Controller
         $after = $spec['after'] ?? null;
 
         if ($after === 'settle_then_regenerate') {
-            $this->invoices->settle($invoice, 'manual');
+            // A scenario rehearsal: never announced (PaymentNotifier also skips SBXINV- rows).
+            $this->invoices->settle($invoice, 'manual', notify: false);
             $steps[] = 'Marked it paid.';
 
             $mutate = $spec['mutate'] ?? [];

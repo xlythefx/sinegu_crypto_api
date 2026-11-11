@@ -135,8 +135,8 @@ class EmailCatalogue
                 'title' => 'Thank you for paying',
                 'trigger' => 'When an invoice is paid.',
                 'to' => 'The customer who paid',
-                'live' => false,
-                'note' => 'If trading had been paused for the invoice, it says trading is back on.',
+                'live' => true,
+                'note' => 'Sent once, the moment any invoice with a fee is settled (card, USDT, or marked paid by an admin). Never for a $0 invoice or a Sandbox rehearsal. If trading had been paused for the invoice, it says trading is back on.',
                 'mail' => new PaymentReceived(
                     name: $customer['first'],
                     invoiceId: $inv['id'],
@@ -248,8 +248,8 @@ class EmailCatalogue
                 'title' => 'Invoice paid',
                 'trigger' => 'When a customer pays an invoice.',
                 'to' => $team,
-                'live' => false,
-                'note' => '',
+                'live' => true,
+                'note' => 'Sent with the customer thank-you; the same news goes to the admin Telegram group.',
                 'mail' => new InvoicePaidNotice(
                     name: $customer['name'],
                     email: $customer['email'],
