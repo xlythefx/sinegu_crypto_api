@@ -300,7 +300,6 @@ class AdminInsights
         );
 
         $closed7 = $this->pastRows($live, $now->copy()->subDays(7));
-        $closed30 = $this->pastRows($live, $now->copy()->subDays(30));
 
         $logs30 = TradeLog::mainFeed()->where('ts', '>=', $now->copy()->subDays(30))->get();
         $filledSince = fn (Carbon $since) => count($this->outcomes(
@@ -346,8 +345,6 @@ class AdminInsights
 
         $capitalByUser = $connected->groupBy('uni_id')
             ->map(fn ($rows) => (float) $rows->sum('balance'));
-        $pnlByUser = $closed30->groupBy('uni_id')
-            ->map(fn ($rows) => (float) $rows->sum('realized_pnl'));
 
         $top = fn (Collection $values) => $values->sortDesc()->take(10)
             ->map(fn ($v, $uni) => ['uni_id' => $uni, 'name' => $names[$uni] ?? $uni, 'value' => round($v, 2)])
@@ -382,9 +379,105 @@ class AdminInsights
             'signups_weekly' => $weeks,
             'by_exchange' => $byExchange,
             'top_capital' => $top($capitalByUser),
-            'top_pnl_30d' => $top($pnlByUser),
+            'profit' => $this->customerProfit($now, $names),
             'most_missed_7d' => $mostMissed,
         ];
+    }
+
+    /**
+     * Every customer who closed a real-money trade this month and last
+     * month, ranked by RETURN, with the master's figure beside them.
+     *
+     * Replaces "top customers by profit" (2026-11-11, Dima: "not correct").
+     * Its dollars were right, but it ranked by dollars over a rolling 30
+     * days: a month where the strategy lost read as a top list of losers,
+     * and size decided the order. The return is the P&L calendar's own
+     * figure — each day's P&L after fees over the capital that day STARTED
+     * with ({@see UserStatsService::dailyReturns}), added up like the
+     * analytics page's Period Return — so a withdrawal cannot inflate it:
+     * a customer who lost 911 on 17k and then took 7k out reads −5%, not −9%
+     * of what is left (Lloyd, Oct 2026). Months are UTC, like every P&L day.
+     *
+     * Real money only (demo, sandbox, SBXINV- excluded). A disconnected
+     * account still counts for the months it traded.
+     *
+     * @param  Collection<string, string>  $names
+     */
+    private function customerProfit(Carbon $now, Collection $names): array
+    {
+        $windows = [
+            'this_month' => [$now->copy()->startOfMonth()->toDateString(), $now->toDateString()],
+            'last_month' => [
+                $now->copy()->startOfMonth()->subMonthNoOverflow()->toDateString(),
+                $now->copy()->startOfMonth()->subDay()->toDateString(),
+            ],
+        ];
+
+        $daysFor = function (Collection $accounts): array {
+            $trades = UserStatsService::withFeeBasis(
+                $this->stats->pastPositions($accounts, [...UserStatsService::DAY_TRADE_COLUMNS, 'is_sandbox'])
+                    ->filter(fn ($t) => (int) $t->is_sandbox === 0)
+                    ->values()
+            );
+            $flows = UserStatsService::flowsByDay(
+                $this->stats->transactions($accounts, ['type', 'amount', 'created_at'])
+            );
+
+            return UserStatsService::dailyReturns($trades, $flows, $accounts);
+        };
+
+        $summarise = function (array $days, string $from, string $to): ?array {
+            $pnl = $gross = $pct = 0.0;
+            $trades = 0;
+            $pctKnown = true;
+            foreach ($days as $date => $d) {
+                if ($date < $from || $date > $to) {
+                    continue;
+                }
+                $pnl += $d['pnl'];
+                $gross += $d['pnl_gross'];
+                $trades += $d['trades'];
+                $d['pct'] === null ? $pctKnown = false : $pct += $d['pct'];
+            }
+            if ($trades === 0) {
+                return null;
+            }
+
+            return [
+                'pnl' => round($pnl, 2),
+                'pnl_gross' => round($gross, 2),
+                'fees' => round($gross - $pnl, 2),
+                // Null when a day had no capital on record: no honest %.
+                'pct' => $pctKnown ? round($pct, 2) : null,
+                'trades' => $trades,
+            ];
+        };
+
+        $customerDays = $this->customerAccounts()->groupBy('uni_id')
+            ->map(fn ($accs) => $daysFor($accs->values()));
+        $master = $this->masterAccounts()->values();
+        $masterDays = $master->isEmpty() ? [] : $daysFor($master);
+
+        $out = [];
+        foreach ($windows as $key => [$from, $to]) {
+            $rows = $customerDays
+                ->map(fn ($days, $uni) => ($s = $summarise($days, $from, $to))
+                    ? ['uni_id' => $uni, 'name' => $names[$uni] ?? $uni] + $s
+                    : null)
+                ->filter()
+                // Best return first; a row with no % goes last, by dollars.
+                ->sort(fn ($a, $b) => [$b['pct'] !== null, $b['pct'] ?? 0, $b['pnl']]
+                    <=> [$a['pct'] !== null, $a['pct'] ?? 0, $a['pnl']])
+                ->values();
+            $out[$key] = [
+                'from' => $from,
+                'to' => $to,
+                'master' => $summarise($masterDays, $from, $to),
+                'customers' => $rows->all(),
+            ];
+        }
+
+        return $out;
     }
 
     // ------------------------------------------------------------------

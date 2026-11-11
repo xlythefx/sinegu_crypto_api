@@ -44,6 +44,59 @@ class AdminInsightsTest extends EngineTestCase
         ], $overrides));
     }
 
+    /**
+     * Customer profit ranks by RETURN on the capital each day started with,
+     * per calendar month, real money only, with the master beside it — so a
+     * withdrawal after a loss cannot make it look bigger (Dima, 2026-11-11).
+     */
+    public function test_customer_profit_ranks_by_return_per_month_real_money_only(): void
+    {
+        \Illuminate\Support\Carbon::setTestNow('2026-11-11 12:00:00');
+        $admin = $this->makeUser(['type' => 'admin']);
+        $fee = ['exchange_fee' => 0, 'fee_source' => 'actual'];
+
+        // Lost 500 on 10,000, then took 5,000 out: −5%, not −10% of what is left.
+        $big = $this->makeUser(['name' => 'Big Loser']);
+        $bigAcc = $this->makeAccount($big, ['initial_deposit' => 10000, 'balance' => 4500]);
+        $this->closeTrade('binance', $bigAcc, ['realized_pnl' => -500, 'closed_at' => '2026-11-03 10:00:00'] + $fee);
+        DB::table('binance_transactions')->insert([
+            'uni_id' => $big, 'api_key' => DB::table('binance_accounts')->find($bigAcc)->api_key,
+            'type' => 'WITHDRAWAL', 'amount' => 5000, 'currency' => 'USDT', 'created_at' => '2026-11-05 09:00:00',
+        ]);
+
+        // +10 in October on 1,000, then +20 in November on 1,010.
+        $small = $this->makeUser(['name' => 'Small Winner']);
+        $smallAcc = $this->makeAccount($small, ['initial_deposit' => 1000, 'balance' => 1030]);
+        $this->closeTrade('binance', $smallAcc, ['realized_pnl' => 10, 'closed_at' => '2026-10-20 10:00:00'] + $fee);
+        $this->closeTrade('binance', $smallAcc, ['realized_pnl' => 20, 'closed_at' => '2026-11-04 10:00:00'] + $fee);
+        // Play money never counts.
+        $demo = $this->makeAccount($small, ['demo' => 1], 'mexc');
+        $this->closeTrade('mexc', $demo, ['realized_pnl' => -900, 'closed_at' => '2026-11-04 11:00:00'] + $fee);
+
+        $master = $this->makeUser(['type' => 'master']);
+        $masterAcc = $this->makeAccount($master, ['initial_deposit' => 20000]);
+        $this->closeTrade('binance', $masterAcc, ['realized_pnl' => -400, 'closed_at' => '2026-11-03 10:00:00'] + $fee);
+
+        $profit = $this->getJson('/api/admin/insights/customers', $this->headersFor($admin))
+            ->assertOk()->json('profit');
+        \Illuminate\Support\Carbon::setTestNow();
+
+        $now = $profit['this_month'];
+        $this->assertSame(['2026-11-01', '2026-11-11'], [$now['from'], $now['to']]);
+        $this->assertSame(['Small Winner', 'Big Loser'], array_column($now['customers'], 'name'));
+        $this->assertEquals(1.98, $now['customers'][0]['pct']);
+        $this->assertEquals(20, $now['customers'][0]['pnl']);
+        $this->assertEquals(-5.0, $now['customers'][1]['pct']);
+        $this->assertEquals(-500, $now['customers'][1]['pnl']);
+        $this->assertEquals(-2.0, $now['master']['pct']);
+
+        $last = $profit['last_month'];
+        $this->assertSame(['2026-10-01', '2026-10-31'], [$last['from'], $last['to']]);
+        $this->assertSame(['Small Winner'], array_column($last['customers'], 'name'));
+        $this->assertEquals(1.0, $last['customers'][0]['pct']);
+        $this->assertNull($last['master']);
+    }
+
     public function test_every_tab_is_admin_only(): void
     {
         $user = $this->makeUser();
