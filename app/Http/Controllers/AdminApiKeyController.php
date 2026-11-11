@@ -52,7 +52,22 @@ class AdminApiKeyController extends Controller
     public function __construct(
         private EngineCache $engineCache,
         private DiscordRoleSync $discordRoles,
+        private \App\Services\Admin\AdminAudit $audit,
     ) {}
+
+    /** The admin audit (2026-11-11): what happened to a customer's key, and who did it. */
+    private function keyAudit(string $exchange, $account, string $action, string $summary, array $details = []): void
+    {
+        $this->audit->record(request()->user()?->uni_id, $account->uni_id, $action, $summary,
+            $details + ['exchange' => $exchange, 'account_id' => $account->id]);
+    }
+
+    private function accountLabel(string $exchange, $account): string
+    {
+        $venue = $exchange === 'mexc' ? 'MEXC' : ucfirst($exchange);
+
+        return "the {$venue} account \"{$account->name}\"".($account->demo ? ' (demo)' : '');
+    }
 
     /**
      * GET /api/admin/api-keys
@@ -139,7 +154,17 @@ class AdminApiKeyController extends Controller
         ]);
 
         $wasEnabled = (bool) $account->enabled;
+        $wasName = $account->name;
         $account->update($validated);
+
+        if (array_key_exists('enabled', $validated) && (bool) $validated['enabled'] !== $wasEnabled) {
+            $this->keyAudit($exchange, $account, 'account.updated', ($validated['enabled'] ? 'Switched on ' : 'Switched off ').$this->accountLabel($exchange, $account),
+                ['enabled' => ['from' => $wasEnabled, 'to' => (bool) $validated['enabled']]]);
+        }
+        if (array_key_exists('name', $validated) && $validated['name'] !== $wasName) {
+            $this->keyAudit($exchange, $account, 'account.updated', "Renamed the ".($exchange === 'mexc' ? 'MEXC' : ucfirst($exchange))." account \"{$wasName}\" to \"{$validated['name']}\"",
+                ['name' => ['from' => $wasName, 'to' => $validated['name']]]);
+        }
 
         // Only an enabled-flag change alters who the fan-out reaches; a rename
         // is a label, so it does not deserve a cache invalidation.
@@ -288,6 +313,7 @@ class AdminApiKeyController extends Controller
         }
 
         $account->delete();
+        $this->keyAudit($exchange, $account, 'account.disconnected', 'Disconnected '.$this->accountLabel($exchange, $account));
         $this->engineCache->refreshAccounts();
         // The owner may have just lost their last live account → Trader role off.
         $this->discordRoles->syncUniId($account->uni_id);
@@ -353,6 +379,7 @@ class AdminApiKeyController extends Controller
         // cache must drop a credential that no longer exists.
         $this->engineCache->refreshAccounts();
         $this->discordRoles->syncUniId($account->uni_id);
+        $this->keyAudit($exchange, $account, 'account.purged', 'Permanently deleted '.$this->accountLabel($exchange, $account), ['removed' => $removed]);
 
         return response()->json([
             'success' => true,
@@ -399,6 +426,7 @@ class AdminApiKeyController extends Controller
             foreach ($deletable as $account) {
                 $account->delete();
                 $owners[$account->uni_id] = true;
+                $this->keyAudit($exchange, $account, 'account.disconnected', 'Disconnected '.$this->accountLabel($exchange, $account).' (bulk)');
             }
 
             $deleted += $deletable->count();

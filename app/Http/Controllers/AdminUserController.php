@@ -7,6 +7,7 @@ use App\Http\Middleware\EnsureStaff;
 use App\Models\Invoice;
 use App\Models\ReferralTracking;
 use App\Models\UserCredential;
+use App\Services\Admin\AdminAudit;
 use App\Services\Discord\DiscordRoleSync;
 use App\Services\EngineCache;
 use App\Services\InvoiceService;
@@ -54,6 +55,8 @@ class AdminUserController extends Controller
         private UserStatsService $stats,
         private InvoiceService $invoices,
         private DiscordRoleSync $discordRoles,
+        private AdminAudit $audit,
+        private \App\Services\Admin\CustomerStatus $customerStatus,
     ) {}
 
     /**
@@ -122,9 +125,15 @@ class AdminUserController extends Controller
             ->where('user_id', $uniId)
             ->get(['exchange', 'account_id', 'month_year', 'hwm_after']));
 
+        // Is the bot trading for them, and if not why; what they owe and how
+        // they last paid (the admin audit, 2026-11-11). Same answer as the list.
+        $standing = $this->customerStatus->forUser($uniId);
+
         return response()->json([
             'success' => true,
             'user' => $this->userPayload($user) + [
+                'standing' => array_diff_key($standing, ['accounts' => 1]) ?: null,
+                'referred_by' => $this->referredBy($uniId),
                 'accounts' => $accounts->map(fn ($a) => [
                     'id' => $a->id,
                     'name' => $a->name,
@@ -139,6 +148,12 @@ class AdminUserController extends Controller
                     'currency_type' => $a->currency_type,
                     'hwm' => round((float) ($hwmByAccount[$a->exchange.':'.$a->id] ?? 0), 2),
                     'deleted_at' => $a->deleted_at?->toISOString(),
+                    // The key's verdict, shown on the account card (it used to
+                    // show only on API Keys) — and why the account is not trading.
+                    'key_status' => $a->key_status,
+                    'key_error_reason' => $a->key_error_reason,
+                    'key_blocked_at' => $a->key_blocked_at?->toISOString(),
+                    'trading' => $standing['accounts'][$a->exchange.':'.$a->id] ?? null,
                 ])->values(),
                 'delete_blockers' => $this->deleteBlockers($user, $request->user()->uni_id),
             ],
@@ -196,6 +211,9 @@ class AdminUserController extends Controller
 
         Cache::forget(AdminInsightsController::CACHE_PREFIX.'overview');
         Cache::forget(AdminInsightsController::CACHE_PREFIX.'customers');
+
+        $this->audit->record($request->user()->uni_id, $user->uni_id, 'user.deleted',
+            'Deleted '.($user->name ?: $user->email), ['email' => $user->email, 'type' => $user->type]);
 
         return response()->json(['success' => true, 'message' => 'User deleted.']);
     }
@@ -312,7 +330,7 @@ class AdminUserController extends Controller
                 'initial_deposit' => round($initialDeposit, 2),
                 'capital' => round($initialDeposit + $flow['net_flow'], 2),
             ],
-            'commissions' => $this->stats->commissions($uniId, $exchange),
+            'commissions' => $this->stats->commissions($uniId, $exchange) + $this->billingNow($user, $exchange),
         ];
 
         // The HWM and the commission totals come off the user's invoices,
@@ -549,6 +567,9 @@ class AdminUserController extends Controller
             $user->refresh();
         }
 
+        $this->audit->record($request->user()->uni_id, $user->uni_id, 'user.created',
+            'Created the account for '.($user->name ?: $user->email), ['type' => $user->type]);
+
         return response()->json([
             'success' => true,
             'message' => 'User created.',
@@ -644,9 +665,12 @@ class AdminUserController extends Controller
 
         $statusChanged = isset($validated['status']) && $validated['status'] !== $user->status;
         $typeChanged = isset($validated['type']) && $validated['type'] !== $user->type;
+        $before = $user->only(['status', 'type', 'realized_percentage', 'unrealized_percentage', 'affiliate_percentage']);
 
         // Percentage columns are not fillable — forceFill is deliberate.
         $user->forceFill($validated)->save();
+
+        $this->recordUpdate($request->user()->uni_id, $user, $before, $validated);
 
         // The engine caches its account list for 90 s, and two of the fields
         // it trades on are derived from the role: `feed` (tester ↔ test) and
@@ -678,6 +702,39 @@ class AdminUserController extends Controller
             'user' => $this->userPayload($user),
         ]);
     }
+
+    /**
+     * The admin audit (2026-11-11): one row per KIND of change, so the
+     * Timeline reads "Suspended" and "Fees changed: realized 20% → 15%" as
+     * two lines rather than one blob.
+     */
+    private function recordUpdate(string $actor, UserCredential $user, array $before, array $validated): void
+    {
+        $who = $user->name ?: $user->email;
+        if (isset($validated['status']) && $validated['status'] !== $before['status']) {
+            $this->audit->record($actor, $user->uni_id, 'user.status',
+                ($validated['status'] === 'suspended' ? 'Suspended ' : 'Reactivated ').$who,
+                ['from' => $before['status'], 'to' => $validated['status']]);
+        }
+        if (isset($validated['type']) && $validated['type'] !== $before['type']) {
+            $this->audit->record($actor, $user->uni_id, 'user.role',
+                "Changed {$who}'s role from {$before['type']} to {$validated['type']}",
+                ['from' => $before['type'], 'to' => $validated['type']]);
+        }
+        $fees = AdminAudit::changes(
+            array_map(fn ($v) => $v === null ? null : (float) $v, array_intersect_key($before, array_flip(self::FEE_KEYS))),
+            array_map(fn ($v) => (float) $v, array_intersect_key($validated, array_flip(self::FEE_KEYS))),
+        );
+        if ($fees) {
+            $parts = array_map(
+                fn ($k, $c) => str_replace('_percentage', '', $k).' '.(float) $c['from'].'% → '.(float) $c['to'].'%',
+                array_keys($fees), $fees,
+            );
+            $this->audit->record($actor, $user->uni_id, 'user.fees', "Changed {$who}'s fees: ".implode(', ', $parts), $fees);
+        }
+    }
+
+    private const FEE_KEYS = ['realized_percentage', 'unrealized_percentage', 'affiliate_percentage'];
 
     /**
      * Venues on which the user holds an open position (a non-zero
@@ -722,6 +779,95 @@ class AdminUserController extends Controller
                 : null,
             'last_activity' => $user->last_activity?->toISOString(),
             'referrals_count' => ReferralTracking::where('referrer_uni_id', $user->uni_id)->count(),
+            // Typed at sign-up / in Settings (unverified), and the Discord
+            // confirmed through "Sign in with Discord", which wins on screen.
+            'contacts' => [
+                'telegram' => DB::table('user_contact_handles')->where('uni_id', $user->uni_id)->value('telegram'),
+                'discord' => $user->discord_username
+                    ?: DB::table('user_contact_handles')->where('uni_id', $user->uni_id)->value('discord'),
+                'discord_linked' => (bool) $user->discord_username,
+            ],
+        ];
+    }
+
+    /**
+     * The fee building up THIS month and the last invoice (2026-11-11). The
+     * old "Commission this month" summed invoices FOR the running month,
+     * which do not exist until it ends — so every profile read $0.00.
+     *
+     * The estimate is InvoiceService::computeForAccount over the month so
+     * far, the same math the 1st-of-the-month run bills with (the Money tab's
+     * forecast reads it too), so it can never drift from the real invoice.
+     * Only what the monthly run would bill: a customer (`type = user`), a
+     * live real-money account on an invoiced venue. Best-effort: a failed
+     * read is null ("not available"), never a 500 on the profile.
+     *
+     * @return array{month_estimate: ?float, month_estimate_note: string, last_invoice: ?array}
+     */
+    private function billingNow(UserCredential $user, string $exchange): array
+    {
+        $last = Invoice::query()->forUser($user->uni_id)
+            ->when($exchange !== 'all', fn ($q) => $q->where('exchange', $exchange))
+            ->where(fn ($q) => $q->whereNull('api_key')->orWhere('api_key', 'not like', 'SBXINV-%'))
+            ->orderByDesc('month_year')->orderByDesc('id')
+            ->first();
+        $lastInvoice = $last ? [
+            'id' => (int) $last->id,
+            'month_year' => $last->month_year,
+            'total_fee' => $last->feeCents() / 100,
+            'status' => $last->status === 'paid' ? 'paid' : ($last->due_date?->isPast() ? 'overdue' : 'pending'),
+            'paid_at' => $last->paid_at?->toIso8601String(),
+            'kind' => \App\Services\Admin\CustomerStatus::kind($last->payment_provider),
+        ] : null;
+
+        if ($user->type !== 'user') {
+            return ['month_estimate' => null, 'month_estimate_note' => 'Not billed: staff and the master are never invoiced.', 'last_invoice' => $lastInvoice];
+        }
+
+        $month = now()->format('Y-m');
+        $rates = [
+            'realized' => (float) ($user->realized_percentage ?? 20),
+            'unrealized' => (float) ($user->unrealized_percentage ?? 6),
+        ];
+        $total = 0.0;
+        $counted = 0;
+        try {
+            foreach (ExchangeSchema::supported() as $ex) {
+                if (! InvoiceService::canInvoice($ex) || ($exchange !== 'all' && $exchange !== $ex)) {
+                    continue;
+                }
+                $model = ExchangeSchema::for($ex)->accountModel;
+                foreach ($model::where('uni_id', $user->uni_id)->where('demo', 0)->where('is_sandbox', 0)->get() as $account) {
+                    $total += (float) $this->invoices->computeForAccount($account, $month, $rates, $ex)['total_fee'];
+                    $counted++;
+                }
+            }
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::warning('Admin profile: month fee estimate failed.', ['uni_id' => $user->uni_id, 'error' => $e->getMessage()]);
+
+            return ['month_estimate' => null, 'month_estimate_note' => 'Could not be worked out right now.', 'last_invoice' => $lastInvoice];
+        }
+
+        return [
+            'month_estimate' => $counted ? round($total, 2) : null,
+            'month_estimate_note' => $counted
+                ? 'If the month ended now: '.(float) $rates['realized'].'% of the profit after fees, only above the high-water mark.'
+                : 'No live account on a billed exchange.',
+            'last_invoice' => $lastInvoice,
+        ];
+    }
+
+    /** Who brought this customer in, through a referral link (null = nobody). */
+    private function referredBy(string $uniId): ?array
+    {
+        $referrer = ReferralTracking::where('referred_user_uni_id', $uniId)->value('referrer_uni_id');
+        if (! $referrer) {
+            return null;
+        }
+
+        return [
+            'uni_id' => $referrer,
+            'name' => DB::table('user_credentials')->where('uni_id', $referrer)->value('name') ?: $referrer,
         ];
     }
 

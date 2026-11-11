@@ -4,11 +4,14 @@ namespace App\Http\Controllers;
 
 use App\Models\BinanceAccount;
 use App\Models\Invoice;
+use App\Services\Admin\AdminAudit;
 use App\Services\Billing\PaymentMethod;
 use App\Services\InvoiceService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\Rule;
+use Illuminate\Validation\ValidationException;
 
 /**
  * Admin invoice management (auth:sanctum + admin middleware): list/inspect,
@@ -21,6 +24,7 @@ class AdminInvoiceController extends Controller
     public function __construct(
         private InvoiceService $invoices,
         private PaymentMethod $methods,
+        private AdminAudit $audit,
     ) {}
 
     /** GET /api/admin/invoices — every invoice + filters + summary. */
@@ -256,6 +260,11 @@ class AdminInvoiceController extends Controller
             // paid through this same route; it sends sandbox: true so nobody
             // is thanked for (or told about) a payment that never happened.
             'sandbox' => ['sometimes', 'boolean'],
+            // Marking paid BY HAND says how the money came and why (2026-11-11
+            // — "we don't know how it was paid"). Required for a real invoice;
+            // a sandbox rehearsal is exempt.
+            'method' => ['nullable', Rule::in(PaymentMethod::MANUAL_METHODS)],
+            'note' => ['nullable', 'string', 'max:500'],
         ]);
 
         $invoice = Invoice::find($id);
@@ -263,14 +272,51 @@ class AdminInvoiceController extends Controller
             return $this->notFound();
         }
 
-        if (array_key_exists('total_fee', $validated) && $validated['total_fee'] !== null) {
+        $sandbox = $request->boolean('sandbox');
+        $marksPaid = ($validated['status'] ?? null) === 'paid' && $invoice->status !== 'paid';
+        if ($marksPaid && ! $sandbox) {
+            $errors = [];
+            if (empty($validated['method'])) {
+                $errors['method'] = ['Say how the money came: bank transfer, crypto to another wallet, cash or other.'];
+            }
+            if (mb_strlen(trim((string) ($validated['note'] ?? ''))) < 3) {
+                $errors['note'] = ['Add a short note: who paid, where it arrived, any reference.'];
+            }
+            if ($errors) {
+                throw ValidationException::withMessages($errors);
+            }
+        }
+
+        $actor = $request->user()->uni_id;
+        $label = $this->label($invoice);
+
+        if (array_key_exists('total_fee', $validated) && $validated['total_fee'] !== null
+            && round((float) $validated['total_fee'], 2) !== round((float) $invoice->total_fee, 2)) {
+            $before = round((float) $invoice->total_fee, 2);
             $invoice->total_fee = $validated['total_fee'];
             $invoice->save();
+            if (! $sandbox) {
+                $this->audit->record($actor, $invoice->user_id, 'invoice.fee_changed',
+                    \sprintf('Changed %s from $%s to $%s', $label, number_format($before, 2), number_format((float) $validated['total_fee'], 2)),
+                    ['invoice_id' => $invoice->id, 'from' => $before, 'to' => round((float) $validated['total_fee'], 2)]);
+            }
         }
 
         if (! empty($validated['status'])) {
             if ($validated['status'] === 'paid') {
-                $this->invoices->settle($invoice, 'manual', notify: ! $request->boolean('sandbox'));
+                $method = $validated['method'] ?? null;
+                $note = trim((string) ($validated['note'] ?? '')) ?: null;
+                $settled = $this->invoices->settle($invoice, 'manual', notify: ! $sandbox, record: [
+                    'paid_by' => $actor,
+                    'manual_method' => $method,
+                    'payment_note' => $note,
+                ]);
+                if ($settled && ! $sandbox) {
+                    $this->audit->record($actor, $invoice->user_id, 'invoice.marked_paid',
+                        \sprintf('Marked %s paid ($%s): %s', $label, number_format($invoice->feeCents() / 100, 2),
+                            PaymentMethod::manualLabel($method)),
+                        ['invoice_id' => $invoice->id, 'method' => $method, 'note' => $note]);
+                }
             } else {
                 $invoice->status = $validated['status'];
                 $invoice->save();
@@ -286,16 +332,30 @@ class AdminInvoiceController extends Controller
     }
 
     /** DELETE /api/admin/invoices/{id}. */
-    public function destroy(int $id): JsonResponse
+    public function destroy(Request $request, int $id): JsonResponse
     {
         $invoice = Invoice::find($id);
         if (! $invoice) {
             return $this->notFound();
         }
 
+        $label = $this->label($invoice);
+        $fee = $invoice->feeCents() / 100;
         $invoice->delete();
 
+        $this->audit->record($request->user()->uni_id, $invoice->user_id, 'invoice.deleted',
+            \sprintf('Deleted %s ($%s, %s)', $label, number_format($fee, 2), $invoice->status),
+            ['invoice_id' => $id, 'month_year' => $invoice->month_year, 'total_fee' => $fee, 'status' => $invoice->status]);
+
         return response()->json(['success' => true, 'deleted' => $id]);
+    }
+
+    /** "invoice #15 (October 2026)" — how the audit names an invoice. */
+    private function label(Invoice $invoice): string
+    {
+        $period = \Illuminate\Support\Carbon::createFromFormat('!Y-m', (string) $invoice->month_year);
+
+        return "invoice #{$invoice->id} ({$period->format('F Y')})";
     }
 
     private function notFound(): JsonResponse

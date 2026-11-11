@@ -30,6 +30,8 @@ class AdminController extends Controller
         private UserStatsService $stats,
         private DiscordRoleSync $discordRoles,
         private AccountMail $mail,
+        private \App\Services\Admin\AdminAudit $audit,
+        private \App\Services\Admin\CustomerStatus $customerStatus,
     ) {}
 
     /**
@@ -542,6 +544,9 @@ class AdminController extends Controller
                     'balance' => round((float) $a->balance, 2),
                     'unrealized_pnl' => round((float) $a->unrealized_pnl, 2),
                     'currency_type' => $a->currency_type,
+                    // A refused key, shown on the row (it only showed on API Keys).
+                    'key_status' => $a->key_status,
+                    'key_blocked_at' => $a->key_blocked_at?->toISOString(),
                     'created_at' => $a->created_at,
                     'deleted_at' => $a->deleted_at?->toISOString(),
                 ]);
@@ -556,6 +561,10 @@ class AdminController extends Controller
                     ['uni_id' => 1, 'created_at' => 1] + ($limited ? ['api_key' => 1] : []),
                 ))
                 ->values());
+
+        // Trading / owes / last payment / P&L this month (the admin audit,
+        // 2026-11-11). Billing, so a read-only collaborator gets none of it.
+        $status = $limited ? [] : $this->customerStatus->forUsers($users->pluck('uni_id')->all());
 
         return response()->json([
             'success' => true,
@@ -572,7 +581,8 @@ class AdminController extends Controller
                 'created_at' => $u->created_at?->toISOString(),
                 'last_activity' => $u->last_activity?->toISOString(),
                 'accounts' => $accounts->get($u->uni_id, collect())->values(),
-            ], $limited ? ['realized_percentage' => 1, 'unrealized_percentage' => 1] : []))->values(),
+            ] + (isset($status[$u->uni_id]) ? array_diff_key($status[$u->uni_id], ['accounts' => 1]) : []),
+                $limited ? ['realized_percentage' => 1, 'unrealized_percentage' => 1] : []))->values(),
         ]);
     }
 
@@ -582,7 +592,7 @@ class AdminController extends Controller
      */
     public function acceptUser(Request $request, string $uniId): JsonResponse
     {
-        return $this->resolvePending($uniId, 'active', 'User approved');
+        return $this->resolvePending($uniId, 'active', 'User approved', $request->user()->uni_id);
     }
 
     /**
@@ -591,11 +601,11 @@ class AdminController extends Controller
      */
     public function rejectUser(Request $request, string $uniId): JsonResponse
     {
-        return $this->resolvePending($uniId, 'suspended', 'User rejected');
+        return $this->resolvePending($uniId, 'suspended', 'User rejected', $request->user()->uni_id);
     }
 
     /** Shared accept/reject transition — only pending users can be resolved. */
-    private function resolvePending(string $uniId, string $status, string $message): JsonResponse
+    private function resolvePending(string $uniId, string $status, string $message, ?string $actor = null): JsonResponse
     {
         $user = UserCredential::find($uniId);
 
@@ -614,6 +624,9 @@ class AdminController extends Controller
         }
 
         $user->forceFill(['status' => $status])->save();
+
+        $this->audit->record($actor, $user->uni_id, $status === 'active' ? 'user.approved' : 'user.rejected',
+            ($status === 'active' ? 'Approved ' : 'Rejected ').($user->name ?: $user->email));
 
         // A rejected sign-up is a suspended account: whatever session the
         // registration opened (register signs the user in, so there is one)

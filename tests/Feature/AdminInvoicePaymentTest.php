@@ -80,12 +80,16 @@ class AdminInvoicePaymentTest extends PaymentTestCase
     public function test_marked_paid_by_hand_says_so(): void
     {
         [$invoice, $admin] = $this->invoice();
-        $this->putJson("/api/admin/invoices/{$invoice->id}", ['status' => 'paid'], $admin)->assertOk();
+        $this->putJson("/api/admin/invoices/{$invoice->id}",
+            ['status' => 'paid', 'method' => 'cash', 'note' => 'Paid at the office'], $admin)->assertOk();
 
         $payment = $this->payment($invoice->id, $admin);
 
         $this->assertSame('manual', $payment['kind']);
-        $this->assertSame('Marked paid by an admin', $payment['label']);
+        $this->assertSame('Cash (marked paid by an admin)', $payment['label']);
+        $this->assertSame('cash', $payment['manual_method']);
+        $this->assertSame('Paid at the office', $payment['note']);
+        $this->assertNotNull($payment['marked_by']);
     }
 
     public function test_an_unpaid_invoice_has_no_payment(): void

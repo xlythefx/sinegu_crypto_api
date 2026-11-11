@@ -41,6 +41,7 @@ class AdminTronTransferController extends Controller
     public function __construct(
         private TronWatcher $watcher,
         private PaymentEnvironment $env,
+        private \App\Services\Admin\AdminAudit $audit,
     ) {}
 
     /**
@@ -238,6 +239,12 @@ class AdminTronTransferController extends Controller
             $intent,
             'admin:'.$request->user()->uni_id,
         );
+
+        if ($settled) {
+            $this->audit->record($request->user()->uni_id, $invoice->user_id, 'invoice.attributed',
+                sprintf('Matched a USDT payment (%s) to invoice #%d by hand', $this->shortHash($transfer->tx_hash), $invoice->id),
+                ['invoice_id' => $invoice->id, 'transfer_id' => $transfer->id, 'tx_hash' => $transfer->tx_hash]);
+        }
 
         return response()->json([
             'success' => true,

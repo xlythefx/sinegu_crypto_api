@@ -22,6 +22,7 @@ class Invoice extends Model
         'hwm_before', 'hwm_after', 'new_realized_profit', 'new_unrealized_profit',
         'fee_realized', 'fee_unrealized', 'total_fee', 'fee_source', 'status', 'due_date',
         'paid_at', 'payment_provider', 'payment_reference', 'paid_amount',
+        'paid_by', 'manual_method', 'payment_note',
     ];
 
     protected function casts(): array

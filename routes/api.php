@@ -3,6 +3,7 @@
 use App\Http\Controllers\AdminAiAccessController;
 use App\Http\Controllers\AdminApiKeyController;
 use App\Http\Controllers\AdminController;
+use App\Http\Controllers\AdminCustomerActivityController;
 use App\Http\Controllers\AdminCreativeAgentController;
 use App\Http\Controllers\AdminCreativeAiController;
 use App\Http\Controllers\AdminCreativeBriefController;
@@ -378,6 +379,12 @@ Route::middleware(['auth:sanctum', 'account.active', 'email.verified'])->group(f
         Route::post('/users/{uniId}/reject', [AdminController::class, 'rejectUser']);
         Route::get('/users/{uniId}/positions', [AdminUserController::class, 'positions']);
         Route::get('/users/{uniId}/invoices', [AdminUserController::class, 'invoices']);
+        // The admin audit (2026-11-11): a customer's timeline, notes, and the
+        // bot's last signals for them. Full admins only.
+        Route::get('/users/{uniId}/timeline', [AdminCustomerActivityController::class, 'timeline']);
+        Route::get('/users/{uniId}/signals', [AdminCustomerActivityController::class, 'signals']);
+        Route::post('/users/{uniId}/notes', [AdminCustomerActivityController::class, 'addNote']);
+        Route::delete('/users/{uniId}/notes/{id}', [AdminCustomerActivityController::class, 'deleteNote'])->whereNumber('id');
 
         // Admin dashboard tabs — read-only aggregates, cached a minute.
         // overview / platform / platform/daily-pnl are in the staff group.

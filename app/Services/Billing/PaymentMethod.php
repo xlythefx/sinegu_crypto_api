@@ -6,6 +6,7 @@ use App\Models\Invoice;
 use App\Models\TronTransfer;
 use App\Services\Payments\PaymentEnvironment;
 use App\Services\Payments\TronUnits;
+use Illuminate\Support\Facades\DB;
 
 /**
  * HOW an invoice was paid, in the words a person uses — the ONE answer, read
@@ -20,7 +21,22 @@ use App\Services\Payments\TronUnits;
  */
 class PaymentMethod
 {
+    /** How the money came, for a payment an admin marks by hand (2026-11-11). */
+    public const MANUAL_METHODS = ['bank_transfer', 'crypto_wallet', 'cash', 'other'];
+
     public function __construct(private PaymentEnvironment $env) {}
+
+    /** "Bank transfer" … — null (a payment marked before 2026-11-11) reads as before. */
+    public static function manualLabel(?string $method): string
+    {
+        return match ($method) {
+            'bank_transfer' => 'Bank transfer',
+            'crypto_wallet' => 'Crypto to another wallet',
+            'cash' => 'Cash',
+            'other' => 'Other',
+            default => 'Marked paid by an admin',
+        };
+    }
 
     /**
      * @return array{provider: ?string, kind: string, label: string, test: bool}
@@ -39,7 +55,11 @@ class PaymentMethod
                 ? ['crypto', 'USDT (TRC-20, Nile testnet)', true]
                 : ['crypto', 'USDT (TRC-20)', false],
             'coinsbuy' => ['crypto', 'Crypto (Coinsbuy)', false],
-            'manual' => ['manual', 'Marked paid by an admin', false],
+            // The customer's email reads this too, so it names the way the
+            // money came and never the admin (that is `marked_by`, admin-only).
+            'manual' => ['manual', $invoice->manual_method
+                ? self::manualLabel($invoice->manual_method).' (marked paid by an admin)'
+                : 'Marked paid by an admin', false],
             null, '' => ['unknown', 'Not recorded', false],
             default => ['unknown', ucfirst($provider), false],
         };
@@ -68,12 +88,23 @@ class PaymentMethod
             'network' => null,
             'explorer_url' => null,
             'received' => null,
+            // A payment an ADMIN recorded: by hand ("Mark paid"), or a USDT
+            // transfer matched to this invoice by hand on Crypto Transfers.
+            'manual_method' => $invoice->manual_method,
+            'note' => $invoice->payment_note,
+            'marked_by' => $this->person($invoice->paid_by),
         ];
 
         $transfer = $out['provider'] === 'tron' ? $this->transfer($invoice) : null;
         if ($transfer) {
             $tron = $this->env->tron((string) $transfer->network);
             $out['network'] = $transfer->network;
+            // 'watcher' = matched automatically; 'admin:{uni_id}' = by hand.
+            $by = (string) $transfer->settled_by;
+            if ($by !== '' && $by !== 'watcher') {
+                $out['marked_by'] ??= $this->person(str_starts_with($by, 'admin:') ? substr($by, 6) : $by);
+                $out['note'] ??= $transfer->note ?: null;
+            }
             $out['explorer_url'] = $tron['explorer_tx'] !== '' ? $tron['explorer_tx'].$transfer->tx_hash : null;
             if ($transfer->value_units !== null) {
                 $out['received'] = [
@@ -84,6 +115,17 @@ class PaymentMethod
         }
 
         return $out;
+    }
+
+    /** @return array{uni_id: string, name: string}|null */
+    private function person(?string $uniId): ?array
+    {
+        if (! $uniId) {
+            return null;
+        }
+        $name = DB::table('user_credentials')->where('uni_id', $uniId)->value('name');
+
+        return ['uni_id' => $uniId, 'name' => $name ?: $uniId];
     }
 
     /** The on-chain transfer that paid this invoice, when it was paid on TRON. */

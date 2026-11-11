@@ -355,6 +355,9 @@ class InvoiceService
      * @param  string       $method     'manual' | 'stripe' | 'coinsbuy' | 'tron'
      * @param  string|null  $reference  provider handle (cs_… / Coinsbuy deposit id / tx hash)
      * @param  float|null   $paid       amount actually received; defaults to total_fee
+     * @param  array{paid_by?: string|null, manual_method?: string|null, payment_note?: string|null}  $record
+     *   a payment marked by an ADMIN (2026-11-11): who, how the money came and
+     *   their note — written in the same transaction, so the notices carry it.
      * @return bool  true if this call did the settling, false if already settled
      */
     public function settle(
@@ -363,12 +366,13 @@ class InvoiceService
         ?string $reference = null,
         ?float $paid = null,
         bool $notify = true,
+        array $record = [],
     ): bool {
         // Set inside the transaction: trading was switched off for this invoice
         // and settling it switched it back on — the thank-you says so.
         $wasPaused = false;
 
-        $settled = DB::transaction(function () use ($invoice, $method, $reference, $paid, &$wasPaused) {
+        $settled = DB::transaction(function () use ($invoice, $method, $reference, $paid, $record, &$wasPaused) {
             $locked = Invoice::whereKey($invoice->getKey())->lockForUpdate()->first();
             if (! $locked || $locked->status === 'paid') {
                 return false;
@@ -380,6 +384,9 @@ class InvoiceService
             $locked->payment_provider = $method;
             $locked->payment_reference = $reference;
             $locked->paid_amount = $paid ?? $locked->feeCents() / 100;
+            $locked->paid_by = $record['paid_by'] ?? null;
+            $locked->manual_method = $record['manual_method'] ?? null;
+            $locked->payment_note = $record['payment_note'] ?? null;
             $locked->save();
 
             // Paying switches the account back on — but only when nothing else

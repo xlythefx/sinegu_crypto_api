@@ -147,9 +147,12 @@ class PaymentNotificationTest extends PaymentTestCase
         $this->assertSame('paid', $rehearsal->fresh()->status);
         $this->assertNothingAnnounced();
 
-        $this->putJson("/api/admin/invoices/{$real->id}", ['status' => 'paid'], $admin)->assertOk();
+        // Since 2026-11-11 a hand-marked payment says how the money came; the
+        // customer's email names the way, never the admin.
+        $this->putJson("/api/admin/invoices/{$real->id}",
+            ['status' => 'paid', 'method' => 'bank_transfer', 'note' => 'Wise, ref 4471'], $admin)->assertOk();
         Mail::assertSent(PaymentReceived::class, fn (PaymentReceived $m) => $m->hasTo('alex@example.test')
-            && $m->method === 'Marked paid by an admin'
+            && $m->method === 'Bank transfer (marked paid by an admin)'
             && $m->reference === '—');
         $this->assertCount(1, $this->telegramPings());
     }
