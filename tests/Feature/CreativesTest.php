@@ -327,7 +327,11 @@ class CreativesTest extends EngineTestCase
             ->json();
 
         $models = collect($meta['models'])->keyBy('key');
-        $this->assertSame(['soul-image', 'grok-image', 'kling-animate', 'seedance-reference'], $models->keys()->all());
+        $this->assertSame(['soul-image', 'grok-image', 'kling-animate', 'seedance-reference', 'seedance-text-video'], $models->keys()->all());
+        // Seedance from text: no references, no mascot required, exactly four params.
+        $this->assertFalse($models['seedance-text-video']['uses_references']);
+        $this->assertFalse($models['seedance-text-video']['requires_character']);
+        $this->assertSame(['duration', 'resolution', 'aspect_ratio', 'generate_audio'], array_column($models['seedance-text-video']['params'], 'name'));
         $this->assertTrue($models['grok-image']['uses_references']);
         $this->assertTrue($models['seedance-reference']['uses_references']);
         $this->assertTrue($models['seedance-reference']['requires_character']);
@@ -411,21 +415,28 @@ class CreativesTest extends EngineTestCase
     public function test_seedance_description_estimate_falls_back_to_per_second_pricing(): void
     {
         $this->makeRef();
-        $this->fakeHiggsfield(['estimate' => fn () => Http::response(['type' => 'description', 'pricing_description' => '$0.4622 per second at 720p'])]);
+        $this->fakeHiggsfield(['estimate' => fn () => Http::response(['type' => 'description', 'pricing_description' => '$0.2647 per second at 720p'])]);
 
+        // 6 s × 0.2647 = 1.5882 (rates corrected 2026-11-12 to Higgsfield's live answer).
         $this->api('POST', '/api/admin/creatives/generations/estimate', [
             'model' => 'seedance-reference', 'prompt' => 'Pixel dances', 'params' => ['duration' => 6, 'resolution' => '720p'],
-        ])->assertOk()->assertJsonPath('usd', 2.7732)->assertJsonPath('allowed', true);
+        ])->assertOk()->assertJsonPath('usd', 1.5882)->assertJsonPath('allowed', true);
 
+        // 4 s × 0.1177 = 0.4708.
         $this->api('POST', '/api/admin/creatives/generations/estimate', [
             'model' => 'seedance-reference', 'prompt' => 'Pixel dances', 'params' => ['duration' => '4', 'resolution' => '480p'],
-        ])->assertOk()->assertJsonPath('usd', 0.8224);
+        ])->assertOk()->assertJsonPath('usd', 0.4708);
 
-        // The default (5 s, 720p) is what gets reserved on submit.
+        // The text-to-video preset uses the same table: 10 s × 0.2647 = 2.647.
+        $this->api('POST', '/api/admin/creatives/generations/estimate', [
+            'model' => 'seedance-text-video', 'prompt' => 'A neon city at night', 'params' => ['duration' => 10],
+        ])->assertOk()->assertJsonPath('usd', 2.647);
+
+        // The default (5 s, 720p) is what gets reserved on submit: 5 × 0.2647 = 1.3235.
         $created = $this->api('POST', '/api/admin/creatives/generations', ['model' => 'seedance-reference', 'prompt' => 'Pixel dances'])
             ->assertStatus(201)
-            ->assertJsonPath('generation.estimated_usd', 2.311)
-            ->assertJsonPath('generation.charged_usd', 2.311)
+            ->assertJsonPath('generation.estimated_usd', 1.3235)
+            ->assertJsonPath('generation.charged_usd', 1.3235)
             ->assertJsonPath('generation.params.generate_audio', true);
         $this->assertSame(5, $created->json('generation.params.duration'));
 
@@ -466,7 +477,7 @@ class CreativesTest extends EngineTestCase
 
         $this->api('POST', '/api/admin/creatives/generations/estimate', [
             'model' => 'seedance-reference', 'prompt' => 'Pixel dances', 'use_character' => false,
-        ])->assertOk()->assertJsonPath('usd', 2.311);
+        ])->assertOk()->assertJsonPath('usd', 1.3235);
 
         $body = $this->sent('estimate')[0][0]->data();
         $this->assertCount(1, $body['image_urls']);

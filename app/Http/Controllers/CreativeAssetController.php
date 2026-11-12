@@ -2,8 +2,10 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\CreativeAudioAsset;
 use App\Models\CreativeCharacterRef;
 use App\Models\CreativeGeneration;
+use App\Services\Creatives\CreativeAudio;
 use App\Services\Creatives\CreativeReferences;
 use App\Services\Creatives\HiggsfieldGateway;
 use Illuminate\Http\JsonResponse;
@@ -11,8 +13,8 @@ use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 
 /**
- * The two Creatives routes an `<img src>` or a download link opens, which
- * cannot carry a Bearer token. They sit OUTSIDE the auth group and are
+ * The Creatives routes an `<img src>`, an `<audio src>` or a download link
+ * opens, which cannot carry a Bearer token. They sit OUTSIDE the auth group and are
  * reachable only through a short-lived SIGNED relative path that the staff
  * API hands out (CreativePresenter) — the signature is the authorisation.
  */
@@ -37,6 +39,22 @@ class CreativeAssetController extends Controller
 
         return $disk->response($ref->path, null, [
             'Content-Type' => $ref->mime,
+            'Cache-Control' => 'private, max-age=3600',
+            'X-Content-Type-Options' => 'nosniff',
+        ], 'inline');
+    }
+
+    /** GET /api/creatives/audio/{id}/file (signed, 2 h) — a stored audio file, inline, for the editor. */
+    public function audioFile(int $id): Response
+    {
+        $asset = CreativeAudioAsset::find($id);
+        $disk = CreativeAudio::disk();
+        if (! $asset || ! $disk->exists($asset->path)) {
+            return $this->error('NOT_FOUND', 'Audio file not found.', 404);
+        }
+
+        return $disk->response($asset->path, null, [
+            'Content-Type' => $asset->mime,
             'Cache-Control' => 'private, max-age=3600',
             'X-Content-Type-Options' => 'nosniff',
         ], 'inline');

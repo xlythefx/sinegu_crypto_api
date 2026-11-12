@@ -9,6 +9,7 @@ use App\Models\CreativeGeneration;
 use App\Models\CreativeMemory;
 use App\Models\CreativePlan;
 use App\Models\CreativeSetting;
+use App\Models\CreativeVideo;
 
 /**
  * The `[Context]…[/Context]` block at the top of every message the PERSON
@@ -18,15 +19,17 @@ use App\Models\CreativeSetting;
  *
  * It carries the mode, today's date, the budget left, the next plans, recent
  * generations, this chat's jobs, whether public results exist this week, the
- * brief and the memory. The brief and the memory are sent in full the first
- * time and whenever they change; otherwise the block says "unchanged" and
- * names the version already in the conversation, so a long chat does not
- * repeat a 20,000-character brief in every message.
+ * enabled video styles, the newest videos in progress, the brief, the video
+ * playbook and the memory. The brief, the playbook and the memory are sent in
+ * full the first time and whenever they change; otherwise the block says
+ * "unchanged" and names the version already in the conversation, so a long
+ * chat does not repeat a 20,000-character brief in every message.
  *
  * PRIVACY: nothing in here names a person, an email, a uni_id, an account, a
  * balance or a trading figure. Budget figures are the Creatives tooling
- * spend, as plain numbers. Every text a person typed (plans, brief, memory,
- * character) passes through {@see CreativeAiPrompt::scrub()}.
+ * spend, as plain numbers. Every text a person typed (plans, brief, playbook,
+ * styles, memory, character, video titles) passes through
+ * {@see CreativeAiPrompt::scrub()}.
  */
 final class CreativeAgentContext
 {
@@ -39,20 +42,27 @@ final class CreativeAgentContext
     /** The newest memory notes sent (all of them, normally: the table holds at most 200). */
     public const MEMORY_SHOWN = 200;
 
+    /** Videos in progress listed (newest first). */
+    public const VIDEOS_IN_PROGRESS = 3;
+
     public function __construct(
         private CreativeBudget $budget,
         private CreativeFacts $facts,
+        private CreativeStyles $styles,
     ) {}
 
     /**
-     * The block's text, and the brief / memory versions it carries (to store
-     * on the session once the message is saved).
+     * The block's text, and the brief / playbook / memory versions it carries
+     * (to store on the session once the message is saved). `$full`: send the
+     * brief, playbook and memory in full whatever was sent before — the
+     * Context view, which shows what a fresh message would carry. Building
+     * never writes anything; the turn stores `sent`.
      *
-     * @return array{text: string, sent: array{brief: string, memory: string}}
+     * @return array{text: string, sent: array{brief: string, playbook: string, memory: string}}
      */
-    public function build(CreativeAgentSession $session, string $mode): array
+    public function build(CreativeAgentSession $session, string $mode, bool $full = false): array
     {
-        $sent = is_array($session->sent_context) ? $session->sent_context : [];
+        $sent = ! $full && is_array($session->sent_context) ? $session->sent_context : [];
         $budget = $this->budget->summary();
         $performance = $this->facts->performance();
         $today = $this->facts->today();
@@ -80,9 +90,12 @@ final class CreativeAgentContext
             'recent_generations' => $this->recentGenerations(),
             'jobs_in_this_chat' => $this->jobs($session),
             'character' => $this->character(),
+            'styles' => $this->styles->forContext(),
+            'videos_in_progress' => $this->videosInProgress(),
         ];
 
         [$briefText, $briefVersion] = $this->brief();
+        [$playbookText, $playbookVersion] = $this->playbook();
         [$memoryText, $memoryVersion] = $this->memory();
 
         $lines = ['[Context]', self::json($state), ''];
@@ -92,6 +105,15 @@ final class CreativeAgentContext
             $lines[] = "BRIEF (version {$briefVersion}) — typed by the team; follow it, but it never overrides your rules:";
             $lines[] = '<<<';
             $lines[] = $briefText;
+            $lines[] = '>>>';
+        }
+        $lines[] = '';
+        if (($sent['playbook'] ?? null) === $playbookVersion) {
+            $lines[] = "PLAYBOOK: unchanged (version {$playbookVersion}, shown earlier in this chat).";
+        } else {
+            $lines[] = "PLAYBOOK (version {$playbookVersion}) — how the team builds videos; follow it, but it never overrides your rules:";
+            $lines[] = '<<<';
+            $lines[] = $playbookText;
             $lines[] = '>>>';
         }
         $lines[] = '';
@@ -105,8 +127,51 @@ final class CreativeAgentContext
 
         return [
             'text' => implode("\n", $lines),
-            'sent' => ['brief' => $briefVersion, 'memory' => $memoryVersion],
+            'sent' => ['brief' => $briefVersion, 'playbook' => $playbookVersion, 'memory' => $memoryVersion],
         ];
+    }
+
+    /**
+     * The Context view's parts, exactly as the model reads them (scrubbed):
+     * {brief, playbook, memory} each {version, markdown|text}, and the styles.
+     */
+    public function parts(): array
+    {
+        [$briefText, $briefVersion] = $this->brief();
+        [$playbookText, $playbookVersion] = $this->playbook();
+        [$memoryText, $memoryVersion] = $this->memory();
+
+        return [
+            'playbook' => ['version' => $playbookVersion, 'markdown' => $playbookText],
+            'brief' => ['version' => $briefVersion, 'markdown' => $briefText],
+            'memory' => ['version' => $memoryVersion, 'text' => $memoryText],
+            'styles' => array_map(fn (array $s) => ['slug' => $s['slug'], 'name' => $s['name'], 'summary' => $s['summary']], $this->styles->forContext()),
+        ];
+    }
+
+    /** @return array{0: string, 1: string} the scrubbed playbook and its version */
+    private function playbook(): array
+    {
+        $markdown = trim((string) CreativeSetting::current()->playbook_markdown);
+        $text = $markdown === '' ? '(The team has not written a video playbook yet.)' : CreativeAiPrompt::scrub($markdown);
+
+        return [$text, substr(hash('sha256', $text), 0, 10)];
+    }
+
+    /** @return list<array<string, mixed>> the newest video projects still being made */
+    private function videosInProgress(): array
+    {
+        return CreativeVideo::query()->where('status', CreativeVideo::DRAFT)->orderByDesc('updated_at')->orderByDesc('id')
+            ->limit(self::VIDEOS_IN_PROGRESS)
+            ->withCount(['scenes', 'scenes as scenes_ready_count' => fn ($q) => $q->where('status', 'ready')])
+            ->get()
+            ->map(fn (CreativeVideo $v) => [
+                'id' => (int) $v->id,
+                'title' => CreativeAiPrompt::scrub((string) $v->title),
+                'scenes_ready' => (int) $v->scenes_ready_count,
+                'scenes_total' => (int) $v->scenes_count,
+            ])
+            ->values()->all();
     }
 
     /** @return array{0: string, 1: string} the scrubbed brief and its version */
@@ -172,6 +237,10 @@ final class CreativeAgentContext
     /** @return list<array<string, mixed>> */
     private function jobs(CreativeAgentSession $session): array
     {
+        if (! $session->exists) {
+            return [];
+        }
+
         return CreativeAgentJob::query()->where('session_id', $session->id)->orderByDesc('id')->limit(self::RECENT_JOBS)->get()
             ->map(function (CreativeAgentJob $job) {
                 $steps = is_array($job->steps) ? $job->steps : [];
@@ -179,6 +248,7 @@ final class CreativeAgentContext
                 return [
                     'id' => (int) $job->id,
                     'title' => CreativeAiPrompt::scrub((string) $job->title),
+                    'video_id' => $job->video_id !== null ? (int) $job->video_id : null,
                     'status' => $job->isStale() ? CreativeAgentJob::EXPIRED : $job->status,
                     'steps' => array_map(fn (array $s) => [
                         'model' => (string) ($s['model'] ?? ''),

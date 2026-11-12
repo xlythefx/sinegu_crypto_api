@@ -22,8 +22,10 @@ use Throwable;
  *               calls Claude once. Tool calls in the answer are executed at
  *               once (fast DB work and free price checks) and their results
  *               appended → `continue`, and the client asks again (no text).
- *   …           until `done` (an answer with no tools), `awaiting_approval`
- *               (a job was proposed — Go is the person's), or `error`. At most
+ *   …           until `done` (an answer with no tools, or buttons were shown
+ *               with ask_choices — the pick is the person's next message),
+ *               `awaiting_approval` (a job was proposed — Go is the person's),
+ *               or `error`. At most
  *               {@see MAX_CALLS} model calls per person message: the next one
  *               answers `done` with a short "I stopped here" note.
  *
@@ -39,7 +41,8 @@ use Throwable;
  *    off at max_tokens is never stored (a cut tool_use cannot be replayed)
  *    and its tools never run.
  *  - The tools array is identical on every call; modes are enforced by the
- *    tool executor's error results.
+ *    tool executor's error results. A chat started on an older tools array
+ *    ({@see CreativeAgentPrompt::TOOLS_VERSION}) is over: a fresh one opens.
  *  - A short cache lock per session (SESSION_BUSY) so two tabs cannot
  *    interleave their appends.
  *
@@ -87,24 +90,44 @@ final class CreativeAgent
     /**
      * The caller's chat: the one named if it is theirs and still live, else
      * their newest live one, else a new one. Another person's id → NOT_FOUND.
+     *
+     * "Live" includes the tool list: a chat started before the agent's tools
+     * changed cannot continue (its replayed history would meet a different
+     * tools array), so a fresh chat opens and is flagged
+     * (`replacedForNewTools`) for the snapshot's one-time `new_tools` notice.
      */
     public function resolveSession(UserCredential $user, ?string $id): CreativeAgentSession
     {
+        $outdated = false;
         if ($id !== null && $id !== '') {
             $named = CreativeAgentSession::find($id);
             if ($named !== null && $named->uni_id !== $user->uni_id) {
                 throw CreativeException::notFound('Chat not found.');
             }
             if ($named !== null && $named->isLive()) {
-                return $named;
+                if ($named->hasCurrentTools()) {
+                    return $named;
+                }
+                $outdated = true;
             }
         }
 
-        return CreativeAgentSession::query()
+        $live = CreativeAgentSession::query()
             ->where('uni_id', $user->uni_id)
-            ->where('updated_at', '>', now()->subDays(CreativeAgentSession::MAX_AGE_DAYS)->toDateTimeString())
+            ->where('updated_at', '>', now()->subDays(CreativeAgentSession::MAX_AGE_DAYS)->toDateTimeString());
+        $newest = (clone $live)
+            ->where('tools_version', '>=', CreativeAgentPrompt::TOOLS_VERSION)
             ->orderByDesc('updated_at')->orderByDesc('created_at')
-            ->first() ?? $this->newSession($user);
+            ->first();
+        if ($newest !== null) {
+            return $newest;
+        }
+
+        // Only chats from before the new tools are left (or none at all).
+        $fresh = $this->newSession($user);
+        $fresh->replacedForNewTools = $outdated || (clone $live)->exists();
+
+        return $fresh;
     }
 
     public function newSession(UserCredential $user): CreativeAgentSession
@@ -113,6 +136,7 @@ final class CreativeAgent
             'uni_id' => $user->uni_id,
             'user_name' => $user->name !== null ? mb_substr($user->name, 0, 120) : null,
             'last_mode' => CreativeAgentSession::ASK,
+            'tools_version' => CreativeAgentPrompt::TOOLS_VERSION,
         ]);
     }
 
@@ -126,21 +150,33 @@ final class CreativeAgent
         if (! $session->isLive()) {
             throw CreativeException::notFound('This chat is more than '.CreativeAgentSession::MAX_AGE_DAYS.' days old. Start a new chat.');
         }
+        if (! $session->hasCurrentTools()) {
+            throw CreativeException::notFound('The assistant learned new tools, so this chat was closed. Start a new chat.');
+        }
 
         return $session;
     }
 
-    /** The session read's payload: `{session, messages, jobs, budget}` (jobs advanced first). */
+    /**
+     * The session read's payload: `{session, messages, jobs, budget}` (jobs
+     * advanced first), plus `notice: "new_tools"` once — when this chat was
+     * just opened because the previous one predates the agent's new tools.
+     */
     public function snapshot(CreativeAgentSession $session): array
     {
         $this->jobs->refreshSession($session);
 
-        return [
+        $snapshot = [
             'session' => ['id' => $session->id, 'mode' => $session->last_mode],
             'messages' => $this->presenter->messages($session->messages()->get()),
             'jobs' => $this->presenter->jobs($session->jobs()->get()),
             'budget' => $this->budget->summary(),
         ];
+        if ($session->replacedForNewTools) {
+            $snapshot['notice'] = 'new_tools';
+        }
+
+        return $snapshot;
     }
 
     // ---- the turn ---------------------------------------------------------------
@@ -304,7 +340,8 @@ final class CreativeAgent
         // Tool calls: the answer, every result in ONE user message — together.
         $jobs = [];
         $awaiting = false;
-        DB::transaction(function () use ($session, $reply, $assistantDisplay, $mode, $effectiveMode, $toolUses, $user, &$new, &$jobs, &$awaiting) {
+        $asked = false;
+        DB::transaction(function () use ($session, $reply, $assistantDisplay, $mode, $effectiveMode, $toolUses, $user, &$new, &$jobs, &$awaiting, &$asked) {
             $new[] = $this->storeRaw($session, CreativeAgentMessage::ASSISTANT, (string) $reply->content, $assistantDisplay, $mode, $reply->stopReason);
 
             $results = [];
@@ -322,11 +359,15 @@ final class CreativeAgent
                     $jobs[] = $outcome['job'];
                     $awaiting = true;
                 }
+                if (! $outcome['is_error'] && collect($outcome['display'])->contains(fn ($item) => ($item['kind'] ?? null) === 'choices')) {
+                    $asked = true;
+                }
             }
             $new[] = $this->store($session, CreativeAgentMessage::USER, $results, $display, $effectiveMode);
         });
 
-        return $this->answer($awaiting ? 'awaiting_approval' : 'continue', $new, $jobs, $cost);
+        // Buttons were shown: the person answers next (a job card wins — Go is theirs too).
+        return $this->answer($awaiting ? 'awaiting_approval' : ($asked ? 'done' : 'continue'), $new, $jobs, $cost);
     }
 
     // ---- history ----------------------------------------------------------------

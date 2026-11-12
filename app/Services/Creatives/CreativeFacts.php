@@ -67,18 +67,30 @@ final class CreativeFacts
      * The Facts shape of the API contract for the $days days (default 7,
      * 1–31) ending on $endDay (default today, in the track record's calendar):
      * `{available, period, return_pct, trades, trading_days, green_days,
-     * best_day, top_coins}`. `available: false` = nothing published in that
-     * window; the model is then told it has no figures.
+     * best_day, top_coins, daily, exchange, coin}`. `available: false` =
+     * nothing published in that window; the model is then told it has no
+     * figures.
+     *
+     * $exchange narrows it to one exchange's slice of the published record
+     * (measured on that exchange's own capital, exactly as
+     * /api/public/track-record/{exchange} publishes it); $coin to one market
+     * (its trades over the whole account's capital, as `?symbols=` does).
+     * Null = every exchange / every coin. `daily` is the window's days, one
+     * entry per day with closed trades: `{date, pct, trades}`.
      */
-    public function performance(?CarbonImmutable $endDay = null, int $days = self::WINDOW_DAYS): array
+    public function performance(?CarbonImmutable $endDay = null, int $days = self::WINDOW_DAYS, ?string $exchange = null, ?string $coin = null): array
     {
         $timezone = $this->timezone();
         $days = max(1, min(self::MAX_WINDOW_DAYS, $days));
         $end = ($endDay ?? $this->today())->setTimezone($timezone)->startOfDay();
         $start = $end->subDays($days - 1);
         $period = self::periodLabel($start, $end);
+        $coin = $coin !== null && trim($coin) !== '' ? PublicStatsController::symbolKey($coin) : null;
+        $scope = ['exchange' => $exchange ?? 'any', 'coin' => $coin];
 
-        $record = $this->stats->record();
+        $record = $exchange === null && $coin === null
+            ? $this->stats->record()
+            : $this->stats->recordFor($exchange, $coin !== null ? [$coin] : []);
         $points = [];
         if (($record['available'] ?? false) === true && is_array($record['series'] ?? null)) {
             $from = $start->toDateString();
@@ -101,7 +113,8 @@ final class CreativeFacts
                 'green_days' => 0,
                 'best_day' => null,
                 'top_coins' => [],
-            ];
+                'daily' => [],
+            ] + $scope;
         }
 
         // Chained, not summed — exactly the engine's weekly Telegram recap.
@@ -110,8 +123,10 @@ final class CreativeFacts
         $green = 0;
         $best = null;
         $shares = [];
+        $daily = [];
         foreach ($points as $point) {
             $pct = (float) $point['pct'];
+            $daily[] = ['date' => (string) $point['date'], 'pct' => round($pct, 2), 'trades' => (int) ($point['trades'] ?? 0)];
             $growth *= max(0.0, 1 + $pct / 100);
             $trades += (int) ($point['trades'] ?? 0);
             if ($pct > 0) {
@@ -143,7 +158,8 @@ final class CreativeFacts
             'green_days' => $green,
             'best_day' => ['date' => $best['date'], 'pct' => round($best['pct'], 2)],
             'top_coins' => $top,
-        ];
+            'daily' => array_slice($daily, 0, self::MAX_WINDOW_DAYS),
+        ] + $scope;
     }
 
     /**

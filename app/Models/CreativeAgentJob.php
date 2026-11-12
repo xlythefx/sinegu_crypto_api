@@ -14,12 +14,19 @@ use Illuminate\Support\Carbon;
  * the monthly cap as every generation does.
  *
  * `steps`: each {model, label, prompt, full_prompt?, params, use_character,
- * source, usd, generation_id, status, error}; status waiting | running |
- * completed | failed | canceled.
+ * source, usd, generation_id, status, error, scene_id?}; status waiting |
+ * running | completed | failed | canceled. `scene_id` sits on the step whose
+ * output IS a video scene's clip (the animation, not its still).
+ *
+ * A job proposed by the video editor has no chat (`session_id` NULL): any
+ * staff member may Go it, and `owner_uni_id` says whose spend its later
+ * steps are.
  *
  * @property int $id
- * @property string $session_id
+ * @property string|null $session_id
  * @property int|null $plan_id
+ * @property int|null $video_id
+ * @property string|null $owner_uni_id
  * @property string $title
  * @property string $status
  * @property array $steps
@@ -37,11 +44,17 @@ class CreativeAgentJob extends Model
 
     public const COMPLETED = 'completed';
 
+    /** Every step ended, and some failed: the clips that worked still landed. */
+    public const COMPLETED_WITH_FAILURES = 'completed_with_failures';
+
     public const FAILED = 'failed';
 
     public const CANCELED = 'canceled';
 
     public const EXPIRED = 'expired';
+
+    /** A job in one of these will never change again. */
+    public const FINISHED = [self::COMPLETED, self::COMPLETED_WITH_FAILURES, self::FAILED, self::CANCELED, self::EXPIRED];
 
     /** A proposal not approved within this many minutes expires. */
     public const EXPIRES_MINUTES = 60;
@@ -49,7 +62,7 @@ class CreativeAgentJob extends Model
     protected $table = 'creative_agent_jobs';
 
     protected $fillable = [
-        'session_id', 'plan_id', 'title', 'status', 'steps', 'estimated_usd',
+        'session_id', 'plan_id', 'video_id', 'owner_uni_id', 'title', 'status', 'steps', 'estimated_usd',
         'approved_by_name', 'approved_at', 'finished_at',
     ];
 
@@ -57,6 +70,7 @@ class CreativeAgentJob extends Model
     {
         return [
             'plan_id' => 'integer',
+            'video_id' => 'integer',
             'steps' => 'array',
             'estimated_usd' => 'decimal:4',
             'approved_at' => 'datetime',
@@ -72,6 +86,11 @@ class CreativeAgentJob extends Model
     public function plan(): BelongsTo
     {
         return $this->belongsTo(CreativePlan::class, 'plan_id');
+    }
+
+    public function video(): BelongsTo
+    {
+        return $this->belongsTo(CreativeVideo::class, 'video_id');
     }
 
     /** When a proposal stops being approvable. */

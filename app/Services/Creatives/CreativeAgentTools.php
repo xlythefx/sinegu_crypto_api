@@ -2,6 +2,7 @@
 
 namespace App\Services\Creatives;
 
+use App\Http\Controllers\PublicStatsController;
 use App\Http\Requests\CreativePlanRequest;
 use App\Models\CreativeAgentJob;
 use App\Models\CreativeAgentSession;
@@ -10,6 +11,12 @@ use App\Models\CreativeCharacterRef;
 use App\Models\CreativeGeneration;
 use App\Models\CreativeMemory;
 use App\Models\CreativePlan;
+use App\Models\CreativeStyle;
+use App\Models\CreativeVideo;
+use App\Models\CreativeVideoScene;
+use App\Models\UserCredential;
+use App\Services\Ai\AiTools;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Validation\ValidationException;
@@ -21,18 +28,29 @@ use Throwable;
  *
  * Every call answers one tool_result (JSON text, or an error the model can
  * act on) plus what the page shows for it: one `activity` line, a `plan` chip
- * for a created plan, a `job` card for a proposal.
+ * for a created plan, a `video` chip for a created video, a `job` card for a
+ * proposal, a `choices` row of buttons for ask_choices.
  *
  * Rules enforced HERE, not by the tool list (which is identical in both
  * modes):
- *  - Ask mode refuses create_plan / update_plan / propose_job with an error
- *    result ("Ask mode: switch to Generate to do this").
- *  - Nothing private ever goes back to the model: no person's name, email or
- *    uni_id, no balance, no trading money figure. Performance figures come
- *    only from the public track record ({@see CreativeFacts}); team-typed
- *    text is scrubbed ({@see CreativeAiPrompt::scrub()}); the Creatives
- *    budget is plain numbers.
- *  - propose_job never spends: it prices and stores; only Go starts anything.
+ *  - Ask mode refuses create_plan / update_plan / propose_job / create_video
+ *    / add_scenes with an error result ("Ask mode: switch to Generate to do
+ *    this").
+ *  - Two kinds of figures (owner's decision, 2026-11-12). The model may READ
+ *    private data through query_data — the AI connector's own read-only
+ *    tools, redacted of every credential and contact field
+ *    ({@see AiTools}, the AiRedactor) — to understand
+ *    and to answer the team. Anything meant to be POSTED (a plan, a video's
+ *    title, prompts, labels, captions, template text) is refused with
+ *    PRIVATE_IN_POST when it carries a money amount or a customer's name
+ *    ({@see CreativeAiOutput::privateIn()}): the wall is here, server-side,
+ *    not in the model's good manners. Public figures come only from the
+ *    published track record ({@see CreativeFacts}).
+ *  - Team-typed text the other tools return is still scrubbed
+ *    ({@see CreativeAiPrompt::scrub()}); the Creatives budget is plain
+ *    numbers.
+ *  - propose_job, create_video and add_scenes never spend: they price and
+ *    store; only Go starts anything.
  */
 final class CreativeAgentTools
 {
@@ -43,12 +61,22 @@ final class CreativeAgentTools
     /** Fields where an empty string from the model means "clear it". */
     private const NULLABLE_PLAN_FIELDS = ['planned_for', 'hook', 'script', 'caption', 'hashtags', 'notes', 'video_prompt', 'posted_url'];
 
+    /** The plan fields a post shows (checked by the post guard). Notes are the team's own. */
+    private const POSTED_PLAN_FIELDS = ['title', 'hook', 'script', 'caption', 'hashtags', 'video_prompt'];
+
+    /** A query_data answer longer than this asks the model to narrow the question. */
+    public const QUERY_MAX_BYTES = 60_000;
+
     public function __construct(
         private CreativeFacts $facts,
         private CreativeBudget $budget,
         private CreativeModels $models,
         private CreativeAgentJobs $jobs,
         private GenerationPoller $poller,
+        private CreativeStyles $styles,
+        private CreativeVideos $videos,
+        private CreativeVideoPresenter $videoPresenter,
+        private AiTools $data,
     ) {}
 
     /**
@@ -80,6 +108,13 @@ final class CreativeAgentTools
                 'create_plan' => $this->createPlan($input, $session, $personName),
                 'update_plan' => $this->updatePlan($input, $personName),
                 'propose_job' => $this->proposeJob($input, $session),
+                'query_data' => $this->queryData($input),
+                'ask_choices' => $this->askChoices($input),
+                'get_style' => $this->getStyle($input),
+                'create_video' => $this->createVideo($input, $session),
+                'add_scenes' => $this->addScenes($input, $session),
+                'get_video' => $this->getVideo($input),
+                'list_videos' => $this->listVideos($input),
                 default => self::error($name, "There is no tool called {$name}.", 'Unknown tool'),
             };
         } catch (ValidationException $e) {
@@ -121,6 +156,37 @@ final class CreativeAgentTools
 
             case 'get_week_results':
                 $input = self::dropNonPositive($input, ['days']);
+                $input = self::dropValues($input, ['exchange'], ['any', '']);
+                $input = self::dropValues($input, ['coin'], ['', 'any', 'all']);
+                break;
+
+            case 'query_data':
+                $arguments = $input['arguments'] ?? '{}';
+                if (is_string($arguments)) {
+                    $decoded = trim($arguments) === '' ? [] : json_decode($arguments, true);
+                    if (! is_array($decoded) || ($decoded !== [] && array_is_list($decoded))) {
+                        throw ValidationException::withMessages(['arguments' => 'arguments is a JSON object written as text, e.g. "{\"coin\":\"LTC\"}" or "{}".']);
+                    }
+                    $input['arguments'] = $decoded;
+                } elseif (! is_array($arguments)) {
+                    $input['arguments'] = [];
+                }
+                break;
+
+            case 'list_videos':
+                $input = self::dropNonPositive($input, ['limit']);
+                break;
+
+            case 'create_video':
+            case 'add_scenes':
+                $input = self::dropNonPositive($input, ['plan_id', 'replace_scene_id']);
+                $input = self::dropValues($input, ['style'], ['', 'none']);
+                if (($input['music'] ?? null) === 'none') {
+                    $input['music'] = null;
+                }
+                if (is_array($input['scenes'] ?? null) && array_is_list($input['scenes'])) {
+                    $input['scenes'] = array_map(fn ($scene) => is_array($scene) ? self::sceneDraft($scene) : $scene, $input['scenes']);
+                }
                 break;
 
             case 'update_plan':
@@ -208,6 +274,42 @@ final class CreativeAgentTools
         }
 
         return $step;
+    }
+
+    /**
+     * One scene of create_video / add_scenes, from the strict schema's shape
+     * (every field present, "" / "none" / false for nothing, the template as
+     * four flat fields) to the SceneDraft contract. A draft already in the
+     * contract's shape passes through.
+     *
+     * @param  array<string, mixed>  $scene
+     * @return array<string, mixed>
+     */
+    private static function sceneDraft(array $scene): array
+    {
+        if (array_key_exists('template', $scene) || ! array_key_exists('template_key', $scene)) {
+            return $scene;
+        }
+        $kind = $scene['kind'] ?? CreativeVideoScene::CLIP;
+        $text = fn (string $key) => is_string($scene[$key] ?? null) ? $scene[$key] : '';
+
+        return [
+            'kind' => $kind,
+            'label' => $text('label'),
+            'prompt' => $kind === CreativeVideoScene::TEMPLATE ? null : $text('prompt'),
+            'seconds' => $scene['seconds'] ?? null,
+            'engine' => in_array($scene['engine'] ?? null, ['', 'none'], true) ? null : ($scene['engine'] ?? null),
+            'with_character' => (bool) ($scene['with_pixel'] ?? false),
+            'caption' => trim($text('caption')) !== '' ? $text('caption') : null,
+            'template' => $kind === CreativeVideoScene::TEMPLATE
+                ? [
+                    'key' => ($scene['template_key'] ?? 'none') === 'none' ? null : $scene['template_key'],
+                    'title' => $text('template_title'),
+                    'value' => $text('template_value'),
+                    'subtitle' => $text('template_subtitle'),
+                ]
+                : null,
+        ];
     }
 
     /** Unset the keys whose value is one of the "nothing" values. */
@@ -323,19 +425,52 @@ final class CreativeAgentTools
     private function getWeekResults(array $input): array
     {
         $days = self::clamp($input['days'] ?? CreativeFacts::WINDOW_DAYS, 1, CreativeFacts::MAX_WINDOW_DAYS);
-        $performance = $this->facts->performance(null, $days);
+        $exchange = $input['exchange'] ?? null;
+        if ($exchange !== null && ! in_array($exchange, ['binance', 'bybit', 'mexc'], true)) {
+            throw ValidationException::withMessages(['exchange' => 'exchange is one of: any, binance, bybit, mexc.']);
+        }
+        $coin = isset($input['coin']) ? self::coinKey((string) $input['coin']) : null;
+
+        $performance = $this->facts->performance(null, $days, $exchange, $coin);
         $brand = $this->facts->forPrompt(null, null)['brand'];
+        // Per coin: its share of the period's return, measured on the
+        // account's whole capital (the recap's "assets" ranking).
+        $performance['top_coins'] = array_map(
+            fn (array $c) => ['symbol' => $c['symbol'], 'share_of_capital_pct' => $c['share_pct']],
+            $performance['top_coins'],
+        );
+
+        $scope = trim(implode(' on ', array_filter([$coin, $exchange !== null ? ucfirst($exchange) : null])));
+        $label = match (true) {
+            $scope !== '' => "Read the public results: {$scope}, {$days} days",
+            $days === CreativeFacts::WINDOW_DAYS => 'Read this week\'s public results',
+            default => "Read the public results for {$days} days",
+        };
 
         return self::ok('get_week_results', [
             'performance' => $performance + [
                 'days' => $days,
-                'source' => 'Pixel Alpha\'s published track record (the master account), days in Asia/Manila time. return_pct is the period\'s compounded return; best_day.pct and top_coins[].share_pct are percentages of the account; trades counts closed trades.',
+                'source' => 'Pixel Alpha\'s published track record (the master account), days in Asia/Manila time. return_pct is the period\'s compounded return; daily[].pct and best_day.pct are each day\'s return; top_coins[].share_of_capital_pct is that coin\'s share of the return, as a percentage of the account\'s capital; trades counts closed trades. With an exchange, every figure is measured on that exchange\'s own capital; with a coin, only that coin\'s trades count.',
                 'rules' => $performance['available']
                     ? 'Copy these figures exactly. Any caption citing a percentage ends with: '.CreativeAi::DISCLAIMER
                     : 'Nothing was published in this window: use no performance figures at all.',
             ],
             'brand' => $brand,
-        ], $days === CreativeFacts::WINDOW_DAYS ? 'Read this week\'s public results' : "Read the public results for {$days} days");
+        ], $label);
+    }
+
+    /** "ltc" / "LTC_USDT" / "LTCUSDT" → "LTCUSDT" (a bare coin is quoted in USDT). */
+    private static function coinKey(string $coin): string
+    {
+        $key = PublicStatsController::symbolKey($coin);
+        if ($key !== '' && preg_match('/(USDT|USDC|USD|BUSD|FDUSD)$/', $key) !== 1) {
+            $key .= 'USDT';
+        }
+        if (preg_match('/^[A-Z0-9]{3,20}$/', $key) !== 1) {
+            throw ValidationException::withMessages(['coin' => 'coin is a ticker like "LTCUSDT" or "LTC", or "" for every coin.']);
+        }
+
+        return $key;
     }
 
     private function getBudget(): array
@@ -443,6 +578,7 @@ final class CreativeAgentTools
     private function createPlan(array $input, CreativeAgentSession $session, ?string $personName): array
     {
         $data = $this->planInput($input, partial: false);
+        $this->guardPost(array_intersect_key($data, array_flip(self::POSTED_PLAN_FIELDS)));
         $data['caption'] = CreativeAiOutput::ensureDisclaimer($data['caption'] ?? null, $data['hook'] ?? null, $data['script'] ?? null);
 
         $plan = new CreativePlan;
@@ -478,6 +614,7 @@ final class CreativeAgentTools
         if ($data === []) {
             return self::error('update_plan', 'Name at least one field to change.', 'Could not update the plan');
         }
+        $this->guardPost(array_intersect_key($data, array_flip(self::POSTED_PLAN_FIELDS)));
         $plan->fill($data);
         $plan->caption = CreativeAiOutput::ensureDisclaimer($plan->caption, $plan->hook, $plan->script);
         $plan->ai_drafted_at ??= now();
@@ -549,6 +686,320 @@ final class CreativeAgentTools
         ];
     }
 
+    // ---- data (both modes) --------------------------------------------------------
+
+    /**
+     * query_data: one of the AI connector's read-only tools (AiTools — the
+     * same answers the admin pages give, every credential and contact field
+     * redacted). The answer is private: for understanding, never for a post.
+     */
+    private function queryData(array $input): array
+    {
+        $tool = (string) ($input['tool'] ?? '');
+        if (! in_array($tool, CreativeAgentPrompt::QUERY_TOOLS, true) || ! $this->data->has($tool)) {
+            return self::error('query_data', 'tool is one of: '.implode(', ', CreativeAgentPrompt::QUERY_TOOLS).'.', 'Could not look that up');
+        }
+        $label = 'Looked up '.str_replace('_', ' ', $tool);
+
+        [$ok, $text] = $this->data->run($tool, is_array($input['arguments'] ?? null) ? $input['arguments'] : []);
+        if (! $ok) {
+            return self::error('query_data', $text, $label);
+        }
+        if (strlen($text) > self::QUERY_MAX_BYTES) {
+            return self::error('query_data', 'The answer is too large ('.(int) ceil(strlen($text) / 1024).' KB). Narrow it: a shorter date range, one coin or exchange, a lower limit, or a grouped count instead of rows.', $label);
+        }
+
+        return [
+            'content' => '{"tool":'.json_encode($tool).',"private":"Internal figures: use them to understand and to answer the person. Never put a money amount, balance, user count or anyone\'s name in a plan, caption, prompt or video.","answer":'.$text.'}',
+            'is_error' => false,
+            'display' => [['kind' => 'activity', 'activity' => ['tool' => 'query_data', 'label' => $label, 'ok' => true]]],
+            'job' => null,
+        ];
+    }
+
+    /** ask_choices: buttons in the chat; the turn ends and the pick is the person's next message. */
+    private function askChoices(array $input): array
+    {
+        $question = trim(is_string($input['question'] ?? null) ? $input['question'] : '');
+        if ($question === '' || mb_strlen($question) > 300) {
+            throw ValidationException::withMessages(['question' => 'The question is 1 to 300 characters.']);
+        }
+        $raw = $input['options'] ?? null;
+        if (! is_array($raw) || ! array_is_list($raw) || count($raw) < 2 || count($raw) > 6) {
+            throw ValidationException::withMessages(['options' => 'Give 2 to 6 options.']);
+        }
+        $options = [];
+        foreach ($raw as $option) {
+            $label = trim(is_array($option) && is_string($option['label'] ?? null) ? $option['label'] : '');
+            $value = trim(is_array($option) && is_string($option['value'] ?? null) ? $option['value'] : '');
+            if ($label === '' || mb_strlen($label) > 60 || $value === '' || mb_strlen($value) > 300) {
+                throw ValidationException::withMessages(['options' => 'Each option has a label (1 to 60 characters) and a value (1 to 300).']);
+            }
+            $options[] = ['label' => $label, 'value' => $value];
+        }
+        $choices = ['question' => $question, 'options' => $options, 'allow_other' => (bool) ($input['allow_other'] ?? false)];
+
+        return [
+            'content' => self::json([
+                'shown' => true,
+                'instruction' => 'The buttons are on the person\'s screen. Stop here: their pick (or their own words) arrives as their next message.',
+            ]),
+            'is_error' => false,
+            // The buttons ARE this call's line on the page.
+            'display' => [['kind' => 'choices', 'choices' => $choices]],
+            'job' => null,
+        ];
+    }
+
+    private function getStyle(array $input): array
+    {
+        $slug = trim(is_string($input['slug'] ?? null) ? $input['slug'] : '');
+        $style = $slug !== '' ? $this->styles->bySlug($slug) : null;
+        if ($style === null || ! $style->enabled) {
+            $valid = CreativeStyle::query()->where('enabled', true)->orderBy('sort')->orderBy('name')->pluck('slug')->all();
+
+            return self::error('get_style', "There is no style \"{$slug}\". The styles are: ".implode(', ', $valid).'.', 'Could not open the style');
+        }
+
+        return self::ok('get_style', ['style' => [
+            'slug' => $style->slug,
+            'name' => self::clean($style->name),
+            'summary' => self::clean($style->summary),
+            'default_platform' => $style->default_platform,
+            'default_aspect' => $style->default_aspect,
+            'pixel_default' => $style->pixel_default,
+            'default_engine' => $style->default_engine,
+            'caption_style' => $style->caption_style,
+            'template_family' => $style->template_family,
+            'music_default' => $style->music_default,
+            'pixel_look' => (bool) $style->pixel_look,
+            'markdown' => self::clean($style->markdown),
+        ]], 'Read the style: '.mb_substr((string) $style->name, 0, 60));
+    }
+
+    private function getVideo(array $input): array
+    {
+        $video = CreativeVideo::find((int) ($input['id'] ?? 0));
+        if ($video === null) {
+            return self::error('get_video', 'There is no video #'.(int) ($input['id'] ?? 0).'.', 'Could not open the video');
+        }
+
+        return self::ok('get_video', ['video' => $this->videoForModel($video)], 'Opened video: '.mb_substr((string) $video->title, 0, 80));
+    }
+
+    private function listVideos(array $input): array
+    {
+        $limit = self::clamp($input['limit'] ?? 10, 1, 20);
+        $rows = CreativeVideo::query()->orderByDesc('updated_at')->orderByDesc('id')->limit($limit)
+            ->withCount(['scenes', 'scenes as scenes_ready_count' => fn ($q) => $q->where('status', CreativeVideoScene::READY)])
+            ->get()
+            ->map(fn (CreativeVideo $v) => [
+                'id' => (int) $v->id,
+                'title' => self::clean($v->title),
+                'scenes_total' => (int) $v->scenes_count,
+                'scenes_ready' => (int) $v->scenes_ready_count,
+                'status' => $v->status,
+                'updated_at' => $v->updated_at?->toIso8601String(),
+            ])->values()->all();
+
+        return self::ok('list_videos', ['videos' => $rows], 'Looked at the video projects');
+    }
+
+    // ---- videos (Generate mode) ---------------------------------------------------
+
+    private function createVideo(array $input, CreativeAgentSession $session): array
+    {
+        $user = UserCredential::find($session->uni_id) ?? throw new CreativeException('NOT_FOUND', 'The person of this chat no longer exists.', 404);
+        $title = trim(is_string($input['title'] ?? null) ? $input['title'] : '');
+        if ($title === '' || mb_strlen($title) > 160) {
+            throw ValidationException::withMessages(['title' => 'The video needs a title of at most 160 characters.']);
+        }
+        foreach (['platform' => CreativeVideo::PLATFORMS, 'aspect' => CreativeVideo::ASPECTS, 'caption_style' => CreativeStyles::CAPTION_STYLES] as $field => $allowed) {
+            if (! in_array($input[$field] ?? null, $allowed, true)) {
+                throw ValidationException::withMessages([$field => "{$field} is one of: ".implode(', ', $allowed).'.']);
+            }
+        }
+        $music = $input['music'] ?? null;
+        if ($music !== null && ! in_array($music, CreativeStyles::MUSIC_PRESETS, true)) {
+            throw ValidationException::withMessages(['music' => 'music is "none" or one of: '.implode(', ', CreativeStyles::MUSIC_PRESETS).'.']);
+        }
+        $style = null;
+        if (isset($input['style'])) {
+            $style = $this->styles->bySlug((string) $input['style']);
+            if ($style === null || ! $style->enabled) {
+                $valid = CreativeStyle::query()->where('enabled', true)->orderBy('sort')->pluck('slug')->all();
+                throw ValidationException::withMessages(['style' => 'There is no style "'.$input['style'].'". The styles are: '.implode(', ', $valid).'.']);
+            }
+        }
+        $planId = isset($input['plan_id']) ? (int) $input['plan_id'] : null;
+        if ($planId !== null && ! CreativePlan::whereKey($planId)->exists()) {
+            throw ValidationException::withMessages(['plan_id' => "There is no plan #{$planId}."]);
+        }
+        $drafts = $this->drafts($input, $style, $title);
+
+        // A savepoint: a refusal while pricing leaves no half-made video.
+        $made = DB::transaction(function () use ($input, $user, $title, $style, $planId, $music, $drafts, $session) {
+            $video = $this->videos->create([
+                'title' => $title,
+                'platform' => $input['platform'],
+                'aspect' => $input['aspect'],
+                'style_id' => $style?->id,
+                'plan_id' => $planId,
+            ], $user, [
+                'caption_style' => $input['caption_style'],
+                'music' => $music,
+                'pixel_look' => (bool) ($input['pixel_look'] ?? false),
+            ]);
+
+            return $this->videos->proposeScenes($video, $drafts, null, $user, $session);
+        });
+
+        return $this->videoAnswer('create_video', $made);
+    }
+
+    private function addScenes(array $input, CreativeAgentSession $session): array
+    {
+        $user = UserCredential::find($session->uni_id) ?? throw new CreativeException('NOT_FOUND', 'The person of this chat no longer exists.', 404);
+        $video = CreativeVideo::find((int) ($input['video_id'] ?? 0));
+        if ($video === null) {
+            return self::error('add_scenes', 'There is no video #'.(int) ($input['video_id'] ?? 0).'.', 'Could not add the scenes');
+        }
+        $style = $video->style_id !== null ? CreativeStyle::find($video->style_id) : null;
+        $drafts = $this->drafts($input, $style, null);
+        $replace = isset($input['replace_scene_id']) ? (int) $input['replace_scene_id'] : null;
+
+        $made = DB::transaction(fn () => $this->videos->proposeScenes($video, $drafts, $replace, $user, $session));
+
+        return $this->videoAnswer('add_scenes', $made);
+    }
+
+    /**
+     * The scenes checked as SceneDrafts, and the post guard over every text a
+     * video shows (its title, the prompts, labels, captions and card text).
+     *
+     * @return list<array<string, mixed>>
+     */
+    private function drafts(array $input, ?CreativeStyle $style, ?string $title): array
+    {
+        $raw = $input['scenes'] ?? null;
+        if (! is_array($raw) || ! array_is_list($raw) || $raw === [] || count($raw) > CreativeVideos::MAX_DRAFTS) {
+            throw ValidationException::withMessages(['scenes' => 'Give 1 to '.CreativeVideos::MAX_DRAFTS.' scenes.']);
+        }
+        $drafts = [];
+        $texts = $title !== null ? ['title' => $title] : [];
+        foreach ($raw as $i => $scene) {
+            $draft = CreativeVideos::validateDraft(is_array($scene) ? $scene : [], (int) $i, $style);
+            $n = $i + 1;
+            $texts["scene {$n} label"] = $draft['label'];
+            $texts["scene {$n} prompt"] = $draft['prompt'];
+            $texts["scene {$n} caption"] = $draft['caption'];
+            foreach (['title', 'value', 'subtitle'] as $field) {
+                $texts["scene {$n} card {$field}"] = $draft['template'][$field] ?? null;
+            }
+            $drafts[] = $draft;
+        }
+        $this->guardPost($texts);
+
+        return $drafts;
+    }
+
+    /** create_video / add_scenes' answer: the video chip, the job card (when clips were proposed). */
+    private function videoAnswer(string $tool, array $made): array
+    {
+        /** @var CreativeVideo $video */
+        $video = $made['video'];
+        /** @var CreativeAgentJob|null $job */
+        $job = $made['job'];
+        $budget = $this->budget->summary();
+        $total = $job !== null ? round((float) $job->estimated_usd, 4) : 0.0;
+
+        $display = [['kind' => 'video', 'video_id' => (int) $video->id, 'text' => (string) $video->title]];
+        if ($job !== null) {
+            $display[] = ['kind' => 'job', 'job_id' => (int) $job->id];
+        }
+
+        return [
+            'content' => self::json([
+                'video_id' => (int) $video->id,
+                'editor_path' => CreativeVideo::editorPath((int) $video->id),
+                'job_id' => $job !== null ? (int) $job->id : null,
+                'usd' => $total,
+                'steps' => $job !== null ? array_map(fn (array $s) => ['label' => $s['label'], 'model' => $s['model'], 'usd' => $s['usd']], $job->steps) : [],
+                'scene_ids' => $made['scene_ids'],
+                'fits_budget' => (int) round($total * 10000) <= (int) round($budget['remaining_usd'] * 10000),
+                'budget_left_usd' => $budget['remaining_usd'],
+                'instruction' => $job !== null
+                    ? 'The video is in the editor and its clips are PROPOSED, not started; nothing was spent. Tell the person the total and that the clips are made together when they click Go on the job card, then land in the editor in order; it expires in '.CreativeAgentJob::EXPIRES_MINUTES.' minutes. Do not call more tools now.'
+                    : 'The video is in the editor; its scenes are free template cards, ready now. Tell the person they can open it in the editor.',
+            ]),
+            'is_error' => false,
+            'display' => $display,
+            'job' => $job,
+        ];
+    }
+
+    /** A video as the model sees it: scenes with their status, the time used and left. */
+    private function videoForModel(CreativeVideo $video): array
+    {
+        $shape = $this->videoPresenter->video($video);
+        $timeline = (array) $shape['timeline'];
+        $music = is_array($timeline['music'] ?? null) ? $timeline['music'] : null;
+
+        return [
+            'id' => $shape['id'],
+            'title' => self::clean($shape['title']),
+            'platform' => $shape['platform'],
+            'aspect' => $shape['aspect'],
+            'style' => $shape['style']['slug'] ?? null,
+            'plan_id' => $shape['plan_id'],
+            'status' => $shape['status'],
+            'editor_path' => CreativeVideo::editorPath((int) $shape['id']),
+            'duration_ms' => $shape['duration_ms'],
+            'seconds_used' => round($shape['duration_ms'] / 1000, 1),
+            'seconds_left' => round(max(0, $shape['max_seconds'] * 1000 - $shape['duration_ms']) / 1000, 1),
+            'scenes' => array_map(fn (array $s) => [
+                'id' => $s['id'],
+                'position' => $s['position'],
+                'kind' => $s['kind'],
+                'label' => self::clean($s['label']),
+                'engine' => $s['engine'],
+                'with_pixel' => $s['with_character'],
+                'seconds' => $s['seconds'],
+                'duration_ms' => $s['duration_ms'],
+                'status' => $s['status'],
+                'error' => $s['error'],
+                'template' => $s['template'],
+                'job_id' => $s['agent_job_id'],
+            ], $shape['scenes']),
+            'captions' => array_values(array_map(fn ($c) => [
+                'text' => is_array($c) ? self::clean((string) ($c['text'] ?? '')) : '',
+                'start_ms' => is_array($c) ? ($c['start_ms'] ?? null) : null,
+                'end_ms' => is_array($c) ? ($c['end_ms'] ?? null) : null,
+            ], is_array($timeline['captions'] ?? null) ? $timeline['captions'] : [])),
+            'music' => $music === null ? 'none' : (($music['source'] ?? null) === 'chiptune' ? 'chiptune: '.($music['preset'] ?? '?') : 'an uploaded track'),
+            'caption_style' => $timeline['caption_style'] ?? null,
+        ];
+    }
+
+    /**
+     * The privacy wall for anything meant to be posted: a money amount or a
+     * customer's name refuses the whole call (PRIVATE_IN_POST) — nothing is
+     * saved, and the model is told what to take out.
+     *
+     * @param  array<string, string|null>  $texts
+     */
+    private function guardPost(array $texts): void
+    {
+        $why = CreativeAiOutput::privateIn($texts);
+        if ($why !== null) {
+            throw new CreativeException(
+                'PRIVATE_IN_POST',
+                "PRIVATE_IN_POST: {$why}. Posts carry only public figures from get_week_results and never a money amount, a balance, a user count or a customer's name — rewrite it without them.",
+                422,
+            );
+        }
+    }
+
     // ---- shapes ---------------------------------------------------------------
 
     /** A plan as the model sees it: the team's text scrubbed, no person's name. */
@@ -599,6 +1050,13 @@ final class CreativeAgentTools
             'create_plan' => 'create the plan',
             'update_plan' => 'update the plan',
             'propose_job' => 'prepare the job',
+            'create_video' => 'create the video',
+            'add_scenes' => 'add the scenes',
+            'query_data' => 'look that up',
+            'ask_choices' => 'show the choices',
+            'get_style' => 'open the style',
+            'get_video' => 'open the video',
+            'list_videos' => 'list the videos',
             'remember' => 'save to memory',
             'forget' => 'remove from memory',
             'update_memory' => 'update memory',

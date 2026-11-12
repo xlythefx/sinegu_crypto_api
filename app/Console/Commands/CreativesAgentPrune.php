@@ -18,6 +18,10 @@ use Illuminate\Support\Facades\DB;
  *
  * A chat with a job still RUNNING is kept until the job ends, so a step is
  * never orphaned mid-way.
+ *
+ * A job that made a VIDEO's clips (create_video / add_scenes) outlives its
+ * chat: it is detached (session_id NULL, its owner kept) rather than deleted,
+ * because the video editor lists it beside the scenes it filled.
  */
 class CreativesAgentPrune extends Command
 {
@@ -41,6 +45,7 @@ class CreativesAgentPrune extends Command
         foreach ($ids->chunk(200) as $chunk) {
             DB::transaction(function () use ($chunk, &$deleted) {
                 // Explicit, not only the FK cascade: the children go whatever the driver enforces.
+                CreativeAgentJob::query()->whereIn('session_id', $chunk)->whereNotNull('video_id')->update(['session_id' => null]);
                 $jobIds = CreativeAgentJob::query()->whereIn('session_id', $chunk)->pluck('id');
                 if ($jobIds->isNotEmpty()) {
                     CreativeGeneration::query()->whereIn('agent_job_id', $jobIds)->update(['agent_job_id' => null]);

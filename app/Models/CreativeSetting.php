@@ -7,8 +7,9 @@ use Illuminate\Database\Eloquent\Model;
 /**
  * The single settings row of Admin → Creatives (id 1): the monthly spending
  * cap, whether the AI writer drafts a weekly recap on Saturdays, and the
- * brand brief the chat agent always follows (`brief_*`, with their own
- * "last edited by" — they never touch the cap's `updated_by_*`).
+ * brand brief and the video playbook the chat agent always follows
+ * (`brief_*`, `playbook_*`, each with its own "last edited by" — they never
+ * touch the cap's `updated_by_*`).
  * Generation and every AI call lock this row while they check the month's
  * spend (App\Services\Creatives\CreativeBudget).
  *
@@ -32,6 +33,7 @@ class CreativeSetting extends Model
     protected $fillable = [
         'monthly_cap_usd', 'ai_weekly_recap', 'updated_by_uni_id', 'updated_by_name',
         'brief_markdown', 'brief_updated_by_name', 'brief_updated_at',
+        'playbook_markdown', 'playbook_updated_by_name', 'playbook_updated_at',
     ];
 
     protected function casts(): array
@@ -40,6 +42,7 @@ class CreativeSetting extends Model
             'monthly_cap_usd' => 'decimal:2',
             'ai_weekly_recap' => 'boolean',
             'brief_updated_at' => 'datetime',
+            'playbook_updated_at' => 'datetime',
         ];
     }
 

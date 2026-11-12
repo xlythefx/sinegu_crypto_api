@@ -6,11 +6,15 @@ use App\Http\Controllers\AdminController;
 use App\Http\Controllers\AdminCustomerActivityController;
 use App\Http\Controllers\AdminCreativeAgentController;
 use App\Http\Controllers\AdminCreativeAiController;
+use App\Http\Controllers\AdminCreativeAudioController;
 use App\Http\Controllers\AdminCreativeBriefController;
 use App\Http\Controllers\AdminCreativeCharacterController;
 use App\Http\Controllers\AdminCreativeGenerationController;
 use App\Http\Controllers\AdminCreativeMemoryController;
 use App\Http\Controllers\AdminCreativePlanController;
+use App\Http\Controllers\AdminCreativePlaybookController;
+use App\Http\Controllers\AdminCreativeStyleController;
+use App\Http\Controllers\AdminCreativeVideoController;
 use App\Http\Controllers\AdminCreativesController;
 use App\Http\Controllers\AdminDatabaseController;
 use App\Http\Controllers\AdminEngineController;
@@ -322,6 +326,8 @@ Route::middleware(['auth:sanctum', 'account.active', 'email.verified'])->group(f
         Route::post('/agent/turn', [AdminCreativeAgentController::class, 'turn'])->middleware('throttle:40,1');
         Route::post('/agent/jobs/{id}/approve', [AdminCreativeAgentController::class, 'approve'])->whereNumber('id')->middleware('throttle:20,1');
         Route::post('/agent/jobs/{id}/cancel', [AdminCreativeAgentController::class, 'cancel'])->whereNumber('id');
+        // Read-only: what the agent is told (system, tools, docs, the [Context]).
+        Route::get('/agent/context', [AdminCreativeAgentController::class, 'context']);
 
         // The brand brief and the team memory the agent always reads.
         Route::get('/brief', [AdminCreativeBriefController::class, 'show']);
@@ -330,6 +336,32 @@ Route::middleware(['auth:sanctum', 'account.active', 'email.verified'])->group(f
         Route::post('/memory', [AdminCreativeMemoryController::class, 'store']);
         Route::put('/memory/{id}', [AdminCreativeMemoryController::class, 'update'])->whereNumber('id');
         Route::delete('/memory/{id}', [AdminCreativeMemoryController::class, 'destroy'])->whereNumber('id');
+
+        // Creatives v2 (2026-11-12): the video playbook and the style library
+        // the agent follows, the video editor's projects, and the audio library.
+        Route::get('/playbook', [AdminCreativePlaybookController::class, 'show']);
+        Route::put('/playbook', [AdminCreativePlaybookController::class, 'update']);
+        Route::get('/styles', [AdminCreativeStyleController::class, 'index']);
+        Route::post('/styles', [AdminCreativeStyleController::class, 'store']);
+        Route::put('/styles/{id}', [AdminCreativeStyleController::class, 'update'])->whereNumber('id');
+        Route::delete('/styles/{id}', [AdminCreativeStyleController::class, 'destroy'])->whereNumber('id');
+
+        Route::get('/videos', [AdminCreativeVideoController::class, 'index']);
+        Route::post('/videos', [AdminCreativeVideoController::class, 'store']);
+        // The read refreshes the video's running clips first.
+        Route::get('/videos/{id}', [AdminCreativeVideoController::class, 'show'])->whereNumber('id');
+        Route::put('/videos/{id}', [AdminCreativeVideoController::class, 'update'])->whereNumber('id');
+        Route::delete('/videos/{id}', [AdminCreativeVideoController::class, 'destroy'])->whereNumber('id');
+        Route::post('/videos/{id}/scenes', [AdminCreativeVideoController::class, 'addScene'])->whereNumber('id');
+        // Free price checks; nothing is started (Go is the job approve above).
+        Route::post('/videos/{id}/scenes/propose', [AdminCreativeVideoController::class, 'propose'])->whereNumber('id')->middleware('throttle:20,1');
+        Route::delete('/videos/{id}/scenes/{sceneId}', [AdminCreativeVideoController::class, 'destroyScene'])->whereNumber(['id', 'sceneId']);
+        // The MP4 is made in the browser and never stored: metadata only.
+        Route::post('/videos/{id}/exported', [AdminCreativeVideoController::class, 'exported'])->whereNumber('id');
+
+        Route::get('/audio', [AdminCreativeAudioController::class, 'index']);
+        Route::post('/audio', [AdminCreativeAudioController::class, 'store'])->middleware('throttle:20,1');
+        Route::delete('/audio/{id}', [AdminCreativeAudioController::class, 'destroy'])->whereNumber('id');
     });
 
     Route::prefix('admin')->middleware('admin')->group(function () {
@@ -633,6 +665,10 @@ Route::middleware('signed:relative')->group(function () {
     Route::get('/creatives/generations/{id}/download/{index}', [CreativeAssetController::class, 'download'])
         ->whereNumber(['id', 'index'])
         ->name('creatives.generations.download');
+    // An audio library file, for the editor's <audio> and its export (2 h).
+    Route::get('/creatives/audio/{id}/file', [CreativeAssetController::class, 'audioFile'])
+        ->whereNumber('id')
+        ->name('creatives.audio.file');
 });
 
 // The read-only AI connector (Model Context Protocol over Streamable HTTP) —

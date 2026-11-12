@@ -13,9 +13,13 @@ use Illuminate\Validation\ValidationException;
  * body is the prompt, the validated params and the image field(s).
  *
  * Prices (estimate endpoint, 2026-11-10) are only the picker's hint; the real
- * figure always comes from Higgsfield's free price check. The one exception
- * is Seedance, whose estimate answers a text description instead of a
- * number: its `usd_per_second` table is what we reserve against.
+ * figure always comes from Higgsfield's free price check. The exception is a
+ * model whose estimate answers a text description instead of a number
+ * (Seedance, Kling): its `usd_per_second` is what we reserve against.
+ *
+ * Seedance's rates were corrected on 2026-11-12 to Higgsfield's own live
+ * answer for a request "without video input" (480p 0.1177, 720p 0.2647 per
+ * second): the earlier table over-reserved the budget by about 75%.
  */
 final class CreativeModels
 {
@@ -26,6 +30,12 @@ final class CreativeModels
     public const KLING = 'kling-animate';
 
     public const SEEDANCE = 'seedance-reference';
+
+    /** Seedance from words alone, with sound: a video scene with no mascot. */
+    public const SEEDANCE_TEXT = 'seedance-text-video';
+
+    /** Seedance 2.5's per-second rates by resolution (both presets). */
+    private const SEEDANCE_USD_PER_SECOND = ['480p' => 0.1177, '720p' => 0.2647];
 
     /** How long Higgsfield keeps a result's files (its default; `expires_at` decides). */
     public const RETENTION_DAYS = 7;
@@ -92,13 +102,31 @@ final class CreativeModels
             // refuses the request (even its price check) with none, so this
             // model always uses the character. Seen live 2026-11-10.
             'requires_character' => true,
-            'price_hint' => 'about $0.46 per second at 720p ($2.31 for 5 s), $0.21 per second at 480p',
+            'price_hint' => 'about $0.26 per second at 720p ($1.32 for 5 s), $0.12 per second at 480p',
             // Seedance's price check answers a description, not a number.
-            'usd_per_second' => ['480p' => 0.2056, '720p' => 0.4622],
+            'usd_per_second' => self::SEEDANCE_USD_PER_SECOND,
             'params' => [
                 ['name' => 'duration', 'label' => 'Length (seconds)', 'type' => 'integer', 'min' => 4, 'max' => 15, 'default' => 5],
                 ['name' => 'resolution', 'label' => 'Resolution', 'type' => 'select', 'options' => ['480p', '720p'], 'default' => '720p'],
                 ['name' => 'aspect_ratio', 'label' => 'Shape', 'type' => 'select', 'options' => ['9:16', '16:9', '1:1', '3:4', '4:3'], 'default' => '9:16'],
+                ['name' => 'generate_audio', 'label' => 'Sound', 'type' => 'boolean', 'default' => true],
+            ],
+        ],
+        self::SEEDANCE_TEXT => [
+            'label' => 'Video from text, with sound (Seedance 2.5)',
+            'kind' => 'video',
+            'endpoint' => 'bytedance/seedance-2.5/text-to-video',
+            'description' => 'A video scene from your words alone, with its own sound if you want it. No mascot: for b-roll, places and objects.',
+            // The endpoint takes NO image field and refuses unknown fields
+            // (additionalProperties: false): the body is the prompt and
+            // exactly these four params.
+            'images' => null,
+            'price_hint' => 'about $0.26 per second at 720p ($1.32 for 5 s), $0.12 per second at 480p',
+            'usd_per_second' => self::SEEDANCE_USD_PER_SECOND,
+            'params' => [
+                ['name' => 'duration', 'label' => 'Length (seconds)', 'type' => 'integer', 'min' => 4, 'max' => 15, 'default' => 5],
+                ['name' => 'resolution', 'label' => 'Resolution', 'type' => 'select', 'options' => ['480p', '720p'], 'default' => '720p'],
+                ['name' => 'aspect_ratio', 'label' => 'Shape', 'type' => 'select', 'options' => ['9:16', '16:9', '1:1'], 'default' => '9:16'],
                 ['name' => 'generate_audio', 'label' => 'Sound', 'type' => 'boolean', 'default' => true],
             ],
         ],

@@ -12,7 +12,13 @@ use App\Models\CreativeGeneration;
 use App\Models\CreativeMemory;
 use App\Models\CreativePlan;
 use App\Models\CreativeSetting;
+use App\Models\CreativeStyle;
+use App\Models\CreativeVideo;
+use App\Models\CreativeVideoScene;
+use App\Models\Invoice;
+use App\Models\TradeLog;
 use App\Models\UserCredential;
+use App\Services\Ai\AiTools;
 use App\Services\Creatives\AgentReply;
 use App\Services\Creatives\ClaudeAgent;
 use App\Services\Creatives\ClaudeClient;
@@ -48,8 +54,15 @@ use Tests\Feature\Support\FakeCreativeAgentModel;
  * an error result); memory and brief, by tool and by REST; that propose_job
  * prices and validates but never spends, and only Go does — within the cap,
  * within the hour; how a job advances, fails and is cancelled; that every
- * model call is recorded as kind `agent` against the same cap; that nothing
- * private ever reaches the model; and the 7-day prune.
+ * model call is recorded as kind `agent` against the same cap; and the 7-day
+ * prune. Creatives v2: the new tools in their strict shapes (results per
+ * exchange and coin, query_data, ask_choices ending the turn, styles,
+ * create_video / add_scenes / get_video / list_videos); that query_data never
+ * carries a credential or an email; that a POST may never carry a money
+ * amount or a customer's name (the model may read private data since
+ * 2026-11-12; the server refuses to post it); the playbook and styles in the
+ * [Context]; the read-only Context view; and that a chat from before the
+ * tools changed is replaced.
  *
  * Claude is a FAKE bound over CreativeAgentModel (ANTHROPIC_API_KEY is pinned
  * empty in phpunit.xml as well). The one test of the real ClaudeAgent sends
@@ -146,6 +159,11 @@ class CreativesAgentTest extends EngineTestCase
             }
             if (str_starts_with($url, 'https://upload.s3.test/')) {
                 return Http::response('', 200);
+            }
+            if ($url === 'http://127.0.0.1:5010/health') {
+                // query_data's admin tools ask the local engine which venues
+                // it trades; silent = unknown, which every caller tolerates.
+                return Http::response(['detail' => 'engine not running in tests'], 503);
             }
             if (str_starts_with($url, 'https://api.higgsfield.ai/')) {
                 $n = ++$this->submits;
@@ -464,13 +482,32 @@ class CreativesAgentTest extends EngineTestCase
         $this->assertCount(1, $tools, 'The tools array changed between calls or modes.');
         $decoded = json_decode($tools[0], true);
         $this->assertSame(
-            ['list_plans', 'get_plan', 'list_generations', 'get_character', 'get_week_results', 'get_budget', 'list_models', 'remember', 'forget', 'update_memory', 'create_plan', 'update_plan', 'propose_job'],
+            ['list_plans', 'get_plan', 'list_generations', 'get_character', 'get_week_results', 'get_budget', 'list_models', 'remember', 'forget', 'update_memory', 'create_plan', 'update_plan', 'propose_job',
+                'query_data', 'ask_choices', 'get_style', 'create_video', 'add_scenes', 'get_video', 'list_videos'],
             array_column($decoded, 'name'),
         );
         foreach ($decoded as $tool) {
             $this->assertTrue($tool['strict']);
             $this->assertFalse($tool['inputSchema']['additionalProperties']);
         }
+        // Strict schemas allow few optional parameters per request: at ANY
+        // depth, every object requires all of its properties and allows no other.
+        $walk = function (array $schema, string $where) use (&$walk) {
+            if (($schema['type'] ?? null) === 'object') {
+                $this->assertFalse($schema['additionalProperties'], $where);
+                $this->assertSame(array_keys((array) ($schema['properties'] ?? [])), $schema['required'], $where);
+            }
+            foreach ((array) ($schema['properties'] ?? []) as $name => $property) {
+                $walk((array) $property, "{$where}.{$name}");
+            }
+            if (is_array($schema['items'] ?? null)) {
+                $walk($schema['items'], "{$where}[]");
+            }
+        };
+        foreach ($decoded as $tool) {
+            $walk($tool['inputSchema'], $tool['name']);
+        }
+        $this->assertSame(CreativeAgentPrompt::TOOLS_VERSION, CreativeAgentSession::find($session)->tools_version);
     }
 
     public function test_at_most_eight_model_calls_per_person_message(): void
@@ -763,7 +800,7 @@ class CreativesAgentTest extends EngineTestCase
             'stray' => ['title' => 'F', 'steps' => [['model' => 'soul-image', 'prompt' => 'Pixel.', 'source' => ['from_step' => 0]]]],
             'param' => ['title' => 'G', 'steps' => [['model' => 'soul-image', 'prompt' => 'Pixel.', 'params' => ['aspect_ratio' => 'square']]]],
             'prompt' => ['title' => 'H', 'steps' => [['model' => 'soul-image', 'prompt' => 'P']]],
-            'many' => ['title' => 'I', 'steps' => array_fill(0, 7, $grok)],
+            'many' => ['title' => 'I', 'steps' => array_fill(0, 13, $grok)],
             'plan' => ['title' => 'J', 'plan_id' => 999, 'steps' => [$grok]],
             'model' => ['title' => 'K', 'steps' => [['model' => 'dall-e', 'prompt' => 'Pixel.']]],
         ];
@@ -780,7 +817,7 @@ class CreativesAgentTest extends EngineTestCase
         $this->assertStringContainsString('exactly one image', $results[3]['content']);
         $this->assertStringContainsString('only the animate model', $results[5]['content']);
         $this->assertStringContainsString('Shape must be one of', $results[6]['content']);
-        $this->assertStringContainsString('1 to 6 steps', $results[8]['content']);
+        $this->assertStringContainsString('1 to 12 steps', $results[8]['content']);
         $this->assertStringContainsString('no plan #999', $results[9]['content']);
         $this->assertArrayNotHasKey('is_error', $results[count($bad)]);
 
@@ -1026,62 +1063,428 @@ class CreativesAgentTest extends EngineTestCase
         $this->assertCount(1, $this->sent('submit'));
     }
 
-    // ---- privacy ------------------------------------------------------------------
+    // ---- privacy: the post guard (Creatives v2) ---------------------------------------
 
-    public function test_nothing_private_reaches_the_model(): void
+    /**
+     * Since 2026-11-12 the model may READ private data (query_data, owner's
+     * decision); what it POSTS may not carry it. A money amount or a
+     * customer's name in a plan or a video is refused server-side and nothing
+     * is saved.
+     */
+    public function test_the_post_guard_refuses_money_and_customer_names_and_saves_nothing(): void
+    {
+        $this->makeUser(['name' => 'Juan Dela Cruz']);
+        $plan = CreativePlan::create(['title' => 'Weekly recap', 'platform' => 'tiktok', 'format' => 'video']);
+        $scene = fn (array $over = []) => array_merge([
+            'kind' => 'clip', 'label' => 'Screens', 'prompt' => 'Slow push-in on glowing trading screens', 'seconds' => 5, 'engine' => 'kling',
+            'with_pixel' => false, 'caption' => '', 'template_key' => 'none', 'template_title' => '', 'template_value' => '', 'template_subtitle' => '',
+        ], $over);
+        $video = fn (array $scenes, string $title = 'Recap') => [
+            'title' => $title, 'plan_id' => 0, 'style' => '', 'platform' => 'tiktok', 'aspect' => '9:16',
+            'caption_style' => 'bold', 'music' => 'none', 'pixel_look' => false, 'scenes' => $scenes,
+        ];
+        $calls = [
+            ['create_plan', ['title' => 'Big week', 'caption' => 'We made $120 for our users this week']],
+            ['create_plan', ['title' => 'Shout-out', 'hook' => 'Thanks to juan dela cruz for trading with us']],
+            ['update_plan', ['id' => $plan->id, 'changes' => [['field' => 'script', 'value' => '1. Juan Dela Cruz smiles at the camera']]]],
+            ['create_video', $video([$scene(['caption' => 'Up 300 USDT'])])],
+            ['create_video', $video([$scene()], 'Juan Dela Cruz recap')],
+            ['create_video', $video([$scene(['kind' => 'template', 'prompt' => '', 'seconds' => 3, 'engine' => 'none', 'template_key' => 'clean-stat', 'template_title' => 'Profit', 'template_value' => '$5k'])])],
+            ['create_plan', ['title' => 'Clean one', 'hook' => 'Pixel explains trade-only keys']],
+        ];
+        $this->claude->replies = [FakeCreativeAgentModel::tools($calls), FakeCreativeAgentModel::text('Done.')];
+        $this->turn($this->sessionId(), 'generate', 'Draft these')->assertOk()->assertJsonPath('status', 'continue');
+
+        $results = $this->lastResults(CreativeAgentSession::sole()->id);
+        foreach (range(0, 5) as $i) {
+            $this->assertTrue($results[$i]['is_error'] ?? false, "Call {$i} was accepted: {$results[$i]['content']}");
+            $this->assertStringStartsWith('PRIVATE_IN_POST:', $results[$i]['content']);
+        }
+        $this->assertStringContainsString('money amount ($120)', $results[0]['content']);
+        $this->assertStringContainsString('names a customer (juan dela cruz)', $results[1]['content']);
+        $this->assertStringContainsString('names a customer (Juan Dela Cruz)', $results[2]['content']);
+        $this->assertStringContainsString('300 USDT', $results[3]['content']);
+        $this->assertStringContainsString('the title names a customer', $results[4]['content']);
+        $this->assertStringContainsString('$5k', $results[5]['content']);
+        $this->assertArrayNotHasKey('is_error', $results[6]);
+
+        // Nothing private was saved: one clean plan, the old plan untouched, no video, no job.
+        $this->assertSame(['Weekly recap', 'Clean one'], CreativePlan::orderBy('id')->pluck('title')->all());
+        $this->assertNull($plan->fresh()->script);
+        $this->assertSame(0, CreativeVideo::count());
+        $this->assertSame(0, CreativeVideoScene::count());
+        $this->assertSame(0, CreativeAgentJob::count());
+        $this->assertCount(0, $this->sent('estimate'));
+    }
+
+    /**
+     * query_data runs the AI connector's read-only tools: names and dollar
+     * figures may come back (owner's decision), credentials and contact
+     * details never — whatever the tool. The list is pinned to AiTools.
+     */
+    public function test_query_data_answers_every_data_tool_with_no_credential_or_email(): void
+    {
+        $this->assertSame(CreativeAgentPrompt::QUERY_TOOLS, array_column(app(AiTools::class)->list(), 'name'));
+
+        $secretKey = 'SEEKRIT-secret-key-value-123';
+        $customer = $this->makeUser(['name' => 'Juan Dela Cruz', 'email' => 'juan@customer.test']);
+        $master = $this->makeUser(['type' => 'master', 'name' => 'House Master']);
+        $custAcct = $this->makeAccount($customer, ['name' => 'Juan Futures', 'balance' => 2500, 'initial_deposit' => 2000, 'secret_key' => $secretKey]);
+        $this->makeAccount($master, ['name' => 'master main', 'secret_key' => $secretKey]);
+        $apiKey = DB::table('binance_accounts')->find($custAcct)->api_key;
+        $passwordHash = DB::table('user_credentials')->where('uni_id', $customer)->value('password');
+        DB::table('binance_pastpositions')->insert([
+            'api_key' => $apiKey, 'uni_id' => $customer, 'symbol' => 'LTCUSDT', 'position_side' => 'LONG', 'position_amt' => 1.5,
+            'entry_price' => 90, 'exit_price' => 95, 'realized_pnl' => 30.0, 'exchange_fee' => 0.14, 'side' => 'SELL', 'order_id' => 1,
+            'closed_at' => now()->subDay()->toDateTimeString(), 'created_at' => now(),
+        ]);
+        $log = TradeLog::create([
+            'exchange' => 'binance', 'feed' => 'main', 'action' => 'BUY', 'ticker' => 'LTCUSDT', 'success' => true, 'price' => 90,
+            'category' => 'signal', 'target_count' => 1, 'filled' => 1, 'skipped' => 0, 'failed' => 0, 'ts' => now()->subDay()->toDateTimeString(),
+            'details' => [['account' => 'Juan Futures', 'uni_id' => $customer, 'status' => 'filled', 'quantity' => 1.5]],
+        ]);
+        Invoice::create([
+            'user_id' => $customer, 'account_id' => $custAcct, 'exchange' => 'binance', 'api_key' => $apiKey,
+            'month_year' => '2026-10', 'total_fee' => 42.5, 'status' => 'pending', 'due_date' => '2026-11-04',
+        ]);
+
+        $arguments = [
+            'search_signals' => ['include_accounts' => true], 'get_signal' => ['id' => $log->id],
+            'accounts' => ['status' => 'all'], 'invoices' => ['status' => 'all'],
+        ];
+        $calls = array_map(fn (string $tool) => ['query_data', ['tool' => $tool, 'arguments' => json_encode((object) ($arguments[$tool] ?? []))]], CreativeAgentPrompt::QUERY_TOOLS);
+        $calls[] = ['query_data', ['tool' => 'users', 'arguments' => 'not json']];
+        $calls[] = ['query_data', ['tool' => 'drop_tables', 'arguments' => '{}']];
+        $this->claude->replies = [FakeCreativeAgentModel::tools($calls), FakeCreativeAgentModel::text('Done.')];
+        $res = $this->turn($this->sessionId(), 'ask', 'Look at everything')->assertOk()->assertJsonPath('status', 'continue');
+
+        $results = $this->lastResults(CreativeAgentSession::sole()->id);
+        $this->assertCount(count($calls), $results);
+        foreach (CreativeAgentPrompt::QUERY_TOOLS as $i => $tool) {
+            $this->assertArrayNotHasKey('is_error', $results[$i], "{$tool} failed: {$results[$i]['content']}");
+            $text = $results[$i]['content'];
+            $this->assertSame($tool, json_decode($text, true)['tool']);
+            foreach ([$apiKey, $secretKey, 'juan@customer.test', $passwordHash] as $secret) {
+                $this->assertStringNotContainsString($secret, $text, "{$tool} leaked a credential");
+            }
+            $this->assertDoesNotMatchRegularExpression('/"(api_key|secret_key|email|password)"/', $text, "{$tool} carries a forbidden field");
+        }
+        // Names may come back (the owner's decision); the answer says they are private.
+        $this->assertStringContainsString('Juan Dela Cruz', $results[array_search('users', CreativeAgentPrompt::QUERY_TOOLS, true)]['content']);
+        $this->assertStringContainsString('Never put a money amount', $results[0]['content']);
+        $n = count(CreativeAgentPrompt::QUERY_TOOLS);
+        $this->assertTrue($results[$n]['is_error']);
+        $this->assertStringContainsString('JSON object', $results[$n]['content']);
+        $this->assertTrue($results[$n + 1]['is_error']);
+        $this->assertSame('Looked up closed trades', collect($res->json('messages'))->firstWhere('activity.label', 'Looked up closed trades')['activity']['label']);
+    }
+
+    // ---- new tools, in the strict schemas' shapes ----------------------------------------
+
+    /**
+     * What the REAL model sends to the v2 tools: every property present,
+     * "nothing" as a value ("any", "", 0, "none"). Exactly the shapes
+     * CreativeAgentPrompt::tools() declares.
+     */
+    public function test_v2_tool_inputs_in_the_strict_schema_shapes(): void
     {
         $this->publishWeek();
-        $plan = CreativePlan::create([
-            'title' => 'Recap for leak@example.com', 'platform' => 'tiktok', 'format' => 'video',
-            'hook' => 'We made $400 this week', 'created_by_uni_id' => $this->collaborator, 'created_by_name' => 'Mara Marketing',
-            'updated_by_name' => 'Mara Marketing',
-        ]);
-        $g = new CreativeGeneration;
-        $g->forceFill([
-            'plan_id' => $plan->id, 'kind' => 'image', 'model' => 'soul-image', 'endpoint' => 'higgsfield-ai/soul/v2/standard',
-            'prompt' => 'Pixel for '.$this->collaborator, 'full_prompt' => 'p', 'params' => [], 'used_character' => false,
-            'status' => 'completed', 'outputs' => [['type' => 'image', 'url' => 'https://cdn.higgsfield.test/img/a.png']],
-            'expires_at' => now()->addDays(3), 'estimated_usd' => 0.004, 'charged_usd' => 0.004,
-            'created_by_uni_id' => $this->collaborator, 'created_by_name' => 'Mara Marketing',
-        ])->save();
-        $this->api('POST', '/api/admin/creatives/memory', ['text' => 'Ask mara@pixel-alpha.test before posting', 'category' => 'process'])->assertCreated();
-        $this->api('PUT', '/api/admin/creatives/brief', ['markdown' => "# Brief\nCall Owner at owner@pixel-alpha.test or spend up to $250."])->assertOk();
-        CreativeCharacter::current()->update(['rules' => 'Never mention '.$this->admin]);
-
-        $session = $this->sessionId();
-        $reads = [
-            ['list_plans', []], ['get_plan', ['id' => $plan->id]], ['list_generations', []], ['get_character', []],
-            ['get_week_results', []], ['get_week_results', ['days' => 31]], ['get_budget', []], ['list_models', []],
-            ['remember', ['text' => 'Short hooks win.']],
+        $this->makeRef();
+        $plan = CreativePlan::create(['title' => 'Arcade week', 'platform' => 'tiktok', 'format' => 'video']);
+        $clip = fn (array $over = []) => array_merge([
+            'kind' => 'clip', 'label' => 'Arcade city', 'prompt' => 'A pixel-art city at night, 8-bit chiptune music and arcade sound effects',
+            'seconds' => 6, 'engine' => 'seedance', 'with_pixel' => false, 'caption' => 'Level up', 'template_key' => 'none',
+            'template_title' => '', 'template_value' => '', 'template_subtitle' => '',
+        ], $over);
+        $card = [
+            'kind' => 'template', 'label' => '', 'prompt' => '', 'seconds' => 3, 'engine' => 'none', 'with_pixel' => false, 'caption' => '',
+            'template_key' => 'pixel-scoreboard', 'template_title' => 'HIGH SCORE', 'template_value' => '+6.03%', 'template_subtitle' => '',
         ];
-        $this->claude->replies = [FakeCreativeAgentModel::tools($reads), FakeCreativeAgentModel::text('Done.')];
-        $this->turn($session, 'generate', 'Look at everything')->assertOk();
-        $this->turn($session, 'generate')->assertOk();
-
-        $results = $this->lastResults($session);
-        $this->assertCount(count($reads), $results);
-        foreach ($results as $i => $r) {
-            $this->assertArrayNotHasKey('is_error', $r, "Tool {$reads[$i][0]} failed: {$r['content']}");
+        $calls = [
+            ['get_week_results', ['days' => 0, 'exchange' => 'any', 'coin' => '']],
+            ['get_week_results', ['days' => 7, 'exchange' => 'binance', 'coin' => 'LTC']],
+            ['get_week_results', ['days' => 7, 'exchange' => 'mexc', 'coin' => '']],
+            ['get_week_results', ['days' => 7, 'exchange' => 'any', 'coin' => '$$']],
+            ['get_style', ['slug' => 'pixel-arcade']],
+            ['get_style', ['slug' => 'nope']],
+            ['list_videos', ['limit' => 0]],
+            ['create_video', [
+                'title' => 'Arcade recap', 'plan_id' => $plan->id, 'style' => 'pixel-arcade', 'platform' => 'tiktok', 'aspect' => '9:16',
+                'caption_style' => 'pixel', 'music' => 'arcade-upbeat', 'pixel_look' => true,
+                'scenes' => [
+                    $clip(['engine' => 'none', 'caption' => 'Player 1 ready']),
+                    $clip(['label' => 'Pixel cameo', 'prompt' => 'Pixel waves from an arcade cabinet', 'seconds' => 5, 'engine' => 'kling', 'with_pixel' => true, 'caption' => '']),
+                    $card,
+                ],
+            ]],
+            ['create_video', [
+                'title' => 'Bad', 'plan_id' => 0, 'style' => 'nope', 'platform' => 'tiktok', 'aspect' => '9:16',
+                'caption_style' => 'bold', 'music' => 'none', 'pixel_look' => false, 'scenes' => [$clip()],
+            ]],
+        ];
+        $this->claude->replies = [FakeCreativeAgentModel::tools($calls)];
+        $res = $this->turn($this->sessionId(), 'generate', 'Make the arcade recap')->assertOk()->assertJsonPath('status', 'awaiting_approval');
+        $session = CreativeAgentSession::sole();
+        $results = $this->lastResults($session->id);
+        $this->assertCount(count($calls), $results);
+        $content = fn (int $i) => json_decode($results[$i]['content'], true);
+        foreach ([0, 1, 2, 4, 6, 7] as $i) {
+            $this->assertArrayNotHasKey('is_error', $results[$i], "Call {$i} failed: {$results[$i]['content']}");
         }
-        $context = $this->claude->calls[0]['decoded'][0]['content'][0]['text'];
-        $direct = app(CreativeAgentContext::class)->build(CreativeAgentSession::findOrFail($session), 'generate')['text'];
-        $everything = implode("\n", [...array_column($results, 'content'), $context, $direct, $this->claude->calls[1]['messages']]);
 
-        foreach ([
-            'Mara Marketing', 'Owner Admin', 'Masterly Person', 'Plain Customer', 'Secret Master Account', 'master-key',
-            'mara@pixel-alpha.test', 'owner@pixel-alpha.test', 'boss@pixel-alpha.test', 'leak@example.com',
-            $this->collaborator, $this->admin, $this->user, $this->master,
-            '1060.29', '50.49', '10.20', '$',
-        ] as $secret) {
-            $this->assertStringNotContainsString($secret, $everything, "'{$secret}' reached the model.");
+        // get_week_results: "any" / "" = everything; daily figures; per-coin share of capital.
+        $week = $content(0)['performance'];
+        $this->assertSame([7, 6.03, 'any', null], [$week['days'], $week['return_pct'], $week['exchange'], $week['coin']]);
+        $this->assertEquals([
+            ['date' => '2026-11-10', 'pct' => 2.0, 'trades' => 1],
+            ['date' => '2026-11-11', 'pct' => -1.0, 'trades' => 1],
+            ['date' => '2026-11-12', 'pct' => 5.0, 'trades' => 1],
+        ], $week['daily']);
+        $this->assertEquals(['symbol' => 'LTCUSDT', 'share_of_capital_pct' => 7.0], $week['top_coins'][0]);
+        $this->assertArrayNotHasKey('share_pct', $week['top_coins'][0]);
+        // One exchange, one coin ("LTC" is LTCUSDT): only its trades, over the whole capital.
+        $ltc = $content(1)['performance'];
+        // The coin's record walks the deposits plus that coin's own P&L (the
+        // public ?symbols= rule): 10 Nov 20.00 / 1000 = 2%, 12 Nov 50.49 / 1020
+        // = 4.95%; chained 1.02 × 1.0495 = 1.07049 → 7.05 — and the same
+        // figure the public route publishes for that slice.
+        $this->assertSame(['binance', 'LTCUSDT', 2, 7.05], [$ltc['exchange'], $ltc['coin'], $ltc['trading_days'], $ltc['return_pct']]);
+        $this->assertEquals([2.0, 4.95], array_column($ltc['daily'], 'pct'));
+        $published = $this->getJson('/api/public/track-record/binance?symbols=LTCUSDT')->assertOk()->json('series');
+        $this->assertEquals(array_map(fn ($p) => round($p['pct'], 2), $published), array_column($ltc['daily'], 'pct'));
+        $this->assertSame(['2026-11-10', '2026-11-12'], array_column($ltc['daily'], 'date'));
+        $this->assertSame('Read the public results: LTCUSDT on Binance, 7 days', $res->json('messages.2.activity.label'));
+        // No master on MEXC: nothing published there.
+        $this->assertFalse($content(2)['performance']['available']);
+        $this->assertSame([], $content(2)['performance']['daily']);
+        $this->assertTrue($results[3]['is_error']);
+        $this->assertStringContainsString('ticker', $results[3]['content']);
+
+        // get_style: the full style; an unknown slug lists the valid ones.
+        $style = $content(4)['style'];
+        $this->assertSame(['pixel-arcade', 'seedance', 'arcade-upbeat', true], [$style['slug'], $style['default_engine'], $style['music_default'], $style['pixel_look']]);
+        $this->assertStringContainsString('HIGH SCORE', $style['markdown']);
+        $this->assertTrue($results[5]['is_error']);
+        $this->assertStringContainsString('data-recap, pixel-arcade, pixel-storytime, cinematic-broll, fast-cut', $results[5]['content']);
+        $this->assertSame([], $content(6)['videos']);
+
+        // create_video: the video, its scenes in order, ONE job with the session and the video set.
+        $video = CreativeVideo::sole();
+        $made = $content(7);
+        $this->assertSame([$video->id, "/admin/creatives/editor/{$video->id}"], [$made['video_id'], $made['editor_path']]);
+        $this->assertSame([$plan->id, 'tiktok', '9:16', 'pixel'], [$video->plan_id, $video->platform, $video->aspect, $video->timeline['caption_style']]);
+        $this->assertSame('pixel-arcade', CreativeStyle::find($video->style_id)->slug);
+        $this->assertSame(['source' => 'chiptune', 'preset' => 'arcade-upbeat'], array_intersect_key($video->timeline['music'], ['source' => 1, 'preset' => 1]));
+        $this->assertSame(['pixel_size' => 10, 'scanlines' => true], $video->timeline['look']);
+        $scenes = CreativeVideoScene::query()->where('video_id', $video->id)->orderBy('position')->get();
+        $this->assertSame(['clip', 'clip', 'template'], $scenes->pluck('kind')->all());
+        // "none" took the style's default engine (seedance).
+        $this->assertSame(['seedance', 'kling', null], $scenes->pluck('engine')->all());
+        $this->assertSame([false, true, false], $scenes->pluck('with_character')->all());
+        $this->assertSame(['planned', 'planned', 'ready'], $scenes->pluck('status')->all());
+        $this->assertSame(['key' => 'pixel-scoreboard', 'title' => 'HIGH SCORE', 'value' => '+6.03%', 'subtitle' => ''], $scenes[2]->template);
+        $this->assertSame(['Player 1 ready', 'top', 'hook', 0, 6000], [$video->timeline['captions'][0]['text'], $video->timeline['captions'][0]['position'], $video->timeline['captions'][0]['style'], $video->timeline['captions'][0]['start_ms'], $video->timeline['captions'][0]['end_ms']]);
+
+        $job = CreativeAgentJob::sole();
+        $this->assertSame([$session->id, $video->id, $this->collaborator, 'proposed'], [$job->session_id, $job->video_id, $job->owner_uni_id, $job->status]);
+        $this->assertSame(['seedance-text-video', 'grok-image', 'kling-animate'], array_column($job->steps, 'model'));
+        $this->assertSame($made['job_id'], $job->id);
+        // This file's fake prices every Seedance step 0.004 and Kling 0.595: 0.004 + 0.07 + 0.595.
+        $this->assertSame(0.669, $made['usd']);
+        $this->assertCount(0, $this->sent('submit'));
+        // The chips: the video, then the job card.
+        $kinds = array_column($res->json('messages'), 'kind');
+        $this->assertContains('video', $kinds);
+        $videoChip = collect($res->json('messages'))->firstWhere('kind', 'video');
+        $this->assertSame([$video->id, 'Arcade recap'], [$videoChip['video_id'], $videoChip['text']]);
+        $res->assertJsonPath('jobs.0.id', $job->id)->assertJsonPath('jobs.0.video_id', $video->id)->assertJsonPath('jobs.0.editor_path', "/admin/creatives/editor/{$video->id}");
+        $this->assertTrue($results[8]['is_error']);
+        $this->assertStringContainsString('There is no style "nope"', $results[8]['content']);
+        $this->assertSame(1, CreativeVideo::count(), 'A refused create_video leaves no video behind.');
+
+        // The next message: get_video, list_videos and add_scenes (append, then replace).
+        $this->travel(1)->minute();
+        $calls = [
+            ['get_video', ['id' => $video->id]],
+            ['list_videos', ['limit' => 5]],
+            ['add_scenes', ['video_id' => $video->id, 'replace_scene_id' => 0, 'scenes' => [[
+                'kind' => 'template', 'label' => '', 'prompt' => '', 'seconds' => 2, 'engine' => 'none', 'with_pixel' => false, 'caption' => '',
+                'template_key' => 'disclaimer', 'template_title' => '', 'template_value' => '', 'template_subtitle' => 'Past performance does not guarantee future results.',
+            ]]]],
+            ['add_scenes', ['video_id' => $video->id, 'replace_scene_id' => $scenes[1]->id, 'scenes' => [$clip(['label' => 'Coins', 'prompt' => 'Spinning pixel coins', 'seconds' => 4, 'caption' => ''])]]],
+            ['get_video', ['id' => 999]],
+        ];
+        $this->claude->replies = [FakeCreativeAgentModel::tools($calls)];
+        $this->turn($session->id, 'generate', 'Add the disclaimer and swap the Pixel scene')->assertOk()->assertJsonPath('status', 'awaiting_approval');
+        $results = $this->lastResults($session->id);
+        $content = fn (int $i) => json_decode($results[$i]['content'], true);
+        foreach ([0, 1, 2, 3] as $i) {
+            $this->assertArrayNotHasKey('is_error', $results[$i], "Call {$i} failed: {$results[$i]['content']}");
         }
-        // The public figures do.
-        $week = json_decode($results[4]['content'], true);
-        $this->assertTrue($week['performance']['available']);
-        $this->assertSame(6.03, $week['performance']['return_pct']);
-        $this->assertSame(20, $week['brand']['fee_pct']);
-        $this->assertStringContainsString('[email removed]', $everything);
-        $this->assertStringContainsString('[amount removed]', $everything);
+        $got = $content(0)['video'];
+        $this->assertEquals([3, 14.0, 16.0], [count($got['scenes']), $got['seconds_used'], $got['seconds_left']]);
+        $this->assertSame(['planned', 'planned', 'ready'], array_column($got['scenes'], 'status'));
+        $this->assertSame('chiptune: arcade-upbeat', $got['music']);
+        $this->assertSame('Player 1 ready', $got['captions'][0]['text']);
+        $this->assertArrayNotHasKey('created_by_name', $got);
+        $this->assertSame([[$video->id, 'Arcade recap', 3, 1, 'draft']], array_map(fn ($v) => [$v['id'], $v['title'], $v['scenes_total'], $v['scenes_ready'], $v['status']], $content(1)['videos']));
+        $this->assertNull($content(2)['job_id'], 'A template scene needs no job.');
+        $this->assertNotNull($content(3)['job_id']);
+        $scenes = CreativeVideoScene::query()->where('video_id', $video->id)->orderBy('position')->get();
+        $this->assertSame([4, 'seedance', 'Coins', 1], [$scenes[1]->seconds, $scenes[1]->engine, $scenes[1]->label, $scenes[1]->position]);
+        $this->assertSame('disclaimer', $scenes[3]->template['key']);
+        $this->assertTrue($results[4]['is_error']);
+
+        // Ask mode refuses the Generate tools, and list/get still work.
+        $this->claude->replies = [FakeCreativeAgentModel::tools([
+            ['create_video', ['title' => 'x', 'plan_id' => 0, 'style' => '', 'platform' => 'x', 'aspect' => '16:9', 'caption_style' => 'clean', 'music' => 'none', 'pixel_look' => false, 'scenes' => [$clip()]]],
+            ['add_scenes', ['video_id' => $video->id, 'replace_scene_id' => 0, 'scenes' => [$clip()]]],
+            ['list_videos', ['limit' => 0]],
+        ])];
+        $this->turn($session->id, 'ask', 'And in Ask?')->assertOk();
+        $results = $this->lastResults($session->id);
+        $this->assertSame('Ask mode: switch to Generate to do this.', $results[0]['content']);
+        $this->assertSame('Ask mode: switch to Generate to do this.', $results[1]['content']);
+        $this->assertArrayNotHasKey('is_error', $results[2]);
+        $this->assertSame(1, CreativeVideo::count());
+    }
+
+    public function test_ask_choices_shows_buttons_and_ends_the_turn(): void
+    {
+        $session = $this->sessionId();
+        $this->claude->replies = [
+            FakeCreativeAgentModel::tools([['ask_choices', [
+                'question' => 'Which platform is it for?',
+                'options' => [['label' => 'TikTok', 'value' => 'TikTok'], ['label' => 'X', 'value' => 'X (Twitter)']],
+                'allow_other' => false,
+            ]]], 'Happy to.'),
+            FakeCreativeAgentModel::text('TikTok it is. Which shape?'),
+        ];
+
+        $res = $this->turn($session, 'generate', 'Make me a video about this week')->assertOk()->assertJsonPath('status', 'done');
+        $this->assertSame(['user', 'assistant', 'choices'], array_column($res->json('messages'), 'kind'));
+        $this->assertSame([
+            'question' => 'Which platform is it for?',
+            'options' => [['label' => 'TikTok', 'value' => 'TikTok'], ['label' => 'X', 'value' => 'X (Twitter)']],
+            'allow_other' => false,
+        ], $res->json('messages.2.choices'));
+        $this->assertStringContainsString('Stop here', $this->lastResults($session)[0]['content']);
+        $this->assertCount(1, $this->claude->calls);
+        // Nothing is owed until the person picks: a wordless step... would call the model (a tool result is pending),
+        // so the client stops at `done`; the session read shows the buttons.
+        $this->api('GET', '/api/admin/creatives/agent/session?id='.$session)->assertOk()
+            ->assertJsonPath('messages.2.kind', 'choices')
+            ->assertJsonPath('messages.2.choices.question', 'Which platform is it for?');
+
+        // The pick is the next message: one user message carrying the result, the [Context] and the value.
+        $this->turn($session, 'generate', 'TikTok')->assertOk()->assertJsonPath('status', 'done')->assertJsonPath('messages.1.text', 'TikTok it is. Which shape?');
+        $last = $this->claude->calls[1]['decoded'];
+        $this->assertSame(['user', 'assistant', 'user'], array_column($last, 'role'));
+        $this->assertSame(['tool_result', 'text', 'text'], array_column($last[2]['content'], 'type'));
+        $this->assertSame('TikTok', $last[2]['content'][2]['text']);
+
+        // Bad buttons are an error the model can fix, and do not end the turn.
+        $this->claude->replies = [FakeCreativeAgentModel::tools([['ask_choices', ['question' => 'Pick', 'options' => [['label' => 'Only one', 'value' => 'one']], 'allow_other' => true]]])];
+        $this->turn($session, 'ask', 'Again')->assertOk()->assertJsonPath('status', 'continue');
+        $this->assertTrue($this->lastResults($session)[0]['is_error']);
+    }
+
+    // ---- the playbook, the styles and the Context view --------------------------------
+
+    public function test_styles_and_the_playbook_reach_the_context_and_are_sent_once(): void
+    {
+        $session = $this->sessionId();
+        $this->claude->replies = [FakeCreativeAgentModel::text('Got it.')];
+        $this->turn($session, 'ask', 'Hi')->assertOk();
+        $first = $this->claude->calls[0]['decoded'][0]['content'][0]['text'];
+        $this->assertMatchesRegularExpression('/PLAYBOOK \(version [0-9a-f]{10}\)/', $first);
+        $this->assertStringContainsString('## The asking routine', $first);
+        $this->assertLessThan(strpos($first, 'PLAYBOOK ('), strpos($first, 'BRIEF ('), 'The playbook follows the brief.');
+        $state = json_decode(explode("\n", $first)[1], true);
+        $this->assertSame(['data-recap', 'pixel-arcade', 'pixel-storytime', 'cinematic-broll', 'fast-cut'], array_column($state['styles'], 'slug'));
+        $this->assertSame(['slug', 'name', 'summary', 'default_platform', 'default_aspect', 'pixel_default', 'default_engine'], array_keys($state['styles'][0]));
+        $this->assertSame([], $state['videos_in_progress']);
+        $this->assertSame(['brief', 'playbook', 'memory'], array_keys(CreativeAgentSession::find($session)->sent_context));
+
+        // Unchanged: not repeated. A disabled style leaves the list; a new video is "in progress".
+        CreativeStyle::query()->where('slug', 'fast-cut')->update(['enabled' => false]);
+        $this->api('POST', '/api/admin/creatives/videos', ['title' => 'Recap draft', 'platform' => 'tiktok', 'aspect' => '9:16'])->assertCreated();
+        $this->turn($session, 'ask', 'Again')->assertOk();
+        $second = $this->claude->calls[1]['decoded'][2]['content'][0]['text'];
+        $this->assertStringContainsString('PLAYBOOK: unchanged', $second);
+        $this->assertStringNotContainsString('## The asking routine', $second);
+        $state = json_decode(explode("\n", $second)[1], true);
+        $this->assertNotContains('fast-cut', array_column($state['styles'], 'slug'));
+        $this->assertSame('Recap draft', $state['videos_in_progress'][0]['title']);
+        $this->assertSame([0, 0], [$state['videos_in_progress'][0]['scenes_ready'], $state['videos_in_progress'][0]['scenes_total']]);
+
+        // Edited: the new version in full.
+        $this->api('PUT', '/api/admin/creatives/playbook', ['markdown' => "# Playbook\n\nNo more than four scenes."])->assertOk();
+        $this->turn($session, 'ask', 'And now?')->assertOk();
+        $third = $this->claude->calls[2]['decoded'][4]['content'][0]['text'];
+        $this->assertStringContainsString('No more than four scenes.', $third);
+        $this->assertStringContainsString('BRIEF: unchanged', $third);
+    }
+
+    public function test_the_context_view_shows_exactly_what_the_model_is_told_and_writes_nothing(): void
+    {
+        $session = $this->sessionId();
+        $this->claude->replies = [FakeCreativeAgentModel::text('Hi.')];
+        $this->turn($session, 'ask', 'Hi')->assertOk();
+        $sent = CreativeAgentSession::find($session)->sent_context;
+        $sessions = CreativeAgentSession::count();
+
+        $view = $this->api('GET', '/api/admin/creatives/agent/context?session_id='.$session)->assertOk()->assertJsonPath('success', true)->json('context');
+        $this->assertSame(CreativeAgentPrompt::SYSTEM, $view['system']);
+        $this->assertSame($this->claude->calls[0]['system'], $view['system']);
+        $tools = json_decode($this->claude->calls[0]['tools'], true);
+        $this->assertSame(array_column($tools, 'name'), array_column($view['tools'], 'name'));
+        $this->assertSame(array_column($tools, 'description'), array_column($view['tools'], 'description'));
+        $this->assertSame(array_column($tools, 'inputSchema'), array_column($view['tools'], 'input_schema'));
+        // The documents as the model reads them, in full in the block even though this chat already had them.
+        $this->assertStringContainsString('## The asking routine', $view['playbook']['markdown']);
+        $this->assertStringContainsString('## Who we are', $view['brief']['markdown']);
+        $this->assertSame('(No memory notes yet.)', $view['memory']['text']);
+        $this->assertSame($sent['playbook'], $view['playbook']['version']);
+        $this->assertSame($sent['brief'], $view['brief']['version']);
+        $this->assertSame(['slug', 'name', 'summary'], array_keys($view['styles'][0]));
+        $this->assertStringContainsString("PLAYBOOK (version {$sent['playbook']})", $view['context_block']);
+        $this->assertStringContainsString("BRIEF (version {$sent['brief']})", $view['context_block']);
+        $this->assertSame(
+            app(CreativeAgentContext::class)->build(CreativeAgentSession::findOrFail($session), 'ask', full: true)['text'],
+            $view['context_block'],
+        );
+        // Read-only: the chat's sent versions are untouched, no chat was opened.
+        $this->assertSame($sent, CreativeAgentSession::find($session)->sent_context);
+        $this->api('GET', '/api/admin/creatives/agent/context')->assertOk()->assertJsonPath('context.system', CreativeAgentPrompt::SYSTEM);
+        $this->assertSame($sessions, CreativeAgentSession::count());
+        $this->api('GET', '/api/admin/creatives/agent/context?session_id='.$session, [], $this->admin)->assertNotFound();
+        $this->api('GET', '/api/admin/creatives/agent/context', [], $this->user)->assertForbidden();
+    }
+
+    public function test_a_chat_from_before_the_new_tools_is_replaced_by_a_fresh_one_with_a_notice(): void
+    {
+        $old = CreativeAgentSession::create(['uni_id' => $this->collaborator, 'user_name' => 'Mara Marketing', 'last_mode' => 'generate']);
+        $old->forceFill(['tools_version' => 1])->save();
+        $this->assertFalse($old->fresh()->hasCurrentTools());
+
+        $res = $this->api('GET', '/api/admin/creatives/agent/session?id='.$old->id)->assertOk()
+            ->assertJsonPath('notice', 'new_tools')
+            ->assertJsonPath('messages', []);
+        $fresh = (string) $res->json('session.id');
+        $this->assertNotSame($old->id, $fresh);
+        $this->assertSame(CreativeAgentPrompt::TOOLS_VERSION, CreativeAgentSession::find($fresh)->tools_version);
+
+        // Once: the next read answers the fresh chat without a notice.
+        $again = $this->api('GET', '/api/admin/creatives/agent/session')->assertOk()->assertJsonPath('session.id', $fresh)->json();
+        $this->assertArrayNotHasKey('notice', $again);
+        $this->api('GET', '/api/admin/creatives/agent/session?id='.$fresh)->assertOk()->assertJsonMissingPath('notice');
+
+        // The old chat cannot take a turn; "New chat" is stamped with the current version.
+        $this->turn($old->id, 'ask', 'Still there?')->assertNotFound()->assertJsonPath('error_code', 'NOT_FOUND');
+        $this->assertCount(0, $this->claude->calls);
+        $new = (string) $this->api('POST', '/api/admin/creatives/agent/sessions')->assertOk()->json('session.id');
+        $this->assertSame(CreativeAgentPrompt::TOOLS_VERSION, CreativeAgentSession::find($new)->tools_version);
     }
 
     // ---- the real client, on a mocked transport -------------------------------------

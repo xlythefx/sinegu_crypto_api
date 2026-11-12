@@ -2,6 +2,9 @@
 
 namespace App\Services\Creatives;
 
+use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\DB;
+
 /**
  * Reads and checks what Claude answered — in PHP, never trusted to the model.
  *
@@ -273,6 +276,97 @@ final class CreativeAiOutput
     public static function moneyIn(string $text): ?string
     {
         return preg_match(self::MONEY, $text, $m) === 1 ? $m[0] : null;
+    }
+
+    /** How long the customers' names are cached for {@see namesIn()}. */
+    public const NAMES_CACHE_SECONDS = 600;
+
+    public const NAMES_CACHE_KEY = 'creatives.customer-names';
+
+    /**
+     * The first CUSTOMER's name (`user_credentials.name` of `type = 'user'`)
+     * in $text, or null — the second half of the post guard. Since the owner
+     * let the chat agent read everything (2026-11-12), the model may know a
+     * customer's name; a post never may carry one.
+     *
+     * The whole stored name is matched as a phrase, case-insensitive, on word
+     * boundaries; names under 3 characters are skipped. A single first name
+     * is deliberately NOT matched on its own: tokens like "Plain" or "Mark"
+     * are everyday words and would refuse honest captions. The list is
+     * cached for 10 minutes — a refusal, never a leak, is the price of a
+     * name added a minute ago.
+     */
+    public static function namesIn(string $text): ?string
+    {
+        if (trim($text) === '') {
+            return null;
+        }
+        foreach (self::namePatterns() as $pattern) {
+            if (preg_match($pattern, $text, $m) === 1) {
+                return $m[1];
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * What makes posted text private, as one sentence for the model, or
+     * null when it is fine: a money amount first, then a customer's name.
+     *
+     * @param  array<string, string|null>  $texts  field => text
+     */
+    public static function privateIn(array $texts): ?string
+    {
+        foreach ($texts as $field => $text) {
+            if (! is_string($text) || trim($text) === '') {
+                continue;
+            }
+            $money = self::moneyIn($text);
+            if ($money !== null) {
+                return "the {$field} contains a money amount ({$money})";
+            }
+        }
+        foreach ($texts as $field => $text) {
+            if (! is_string($text) || trim($text) === '') {
+                continue;
+            }
+            $name = self::namesIn($text);
+            if ($name !== null) {
+                return "the {$field} names a customer ({$name})";
+            }
+        }
+
+        return null;
+    }
+
+    /** @return list<string> regexes over the customers' names, in chunks */
+    private static function namePatterns(): array
+    {
+        $names = Cache::remember(self::NAMES_CACHE_KEY, self::NAMES_CACHE_SECONDS, function () {
+            $out = [];
+            foreach (DB::table('user_credentials')->where('type', 'user')->whereNotNull('name')->pluck('name') as $name) {
+                $name = trim((string) preg_replace('/\s+/u', ' ', (string) $name));
+                if (mb_strlen($name) >= 3) {
+                    $out[mb_strtolower($name)] = $name;
+                }
+            }
+
+            return array_values($out);
+        });
+
+        $patterns = [];
+        foreach (array_chunk($names, 200) as $chunk) {
+            // Longest first, so "Juan Dela Cruz" wins over a shorter name inside it.
+            usort($chunk, fn ($a, $b) => mb_strlen($b) <=> mb_strlen($a));
+            $alternatives = array_map(
+                fn (string $n) => str_replace(' ', '\s+', preg_quote($n, '/')),
+                $chunk,
+            );
+            $patterns[] = '/(?<![\p{L}\p{N}])('.implode('|', $alternatives).')(?![\p{L}\p{N}])/iu';
+        }
+
+        return $patterns;
     }
 
     private static function hasDisclaimer(string $caption): bool

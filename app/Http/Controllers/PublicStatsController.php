@@ -87,6 +87,37 @@ class PublicStatsController extends Controller
     }
 
     /**
+     * {@see record()} narrowed the way the public routes narrow it: one
+     * exchange's slice (`/track-record/{exchange}`; null = every exchange
+     * pooled) and/or some markets (`?symbols=`, any venue spelling). The
+     * chat agent's get_week_results reads it to quote one exchange or one
+     * coin. Same cache key, same computation, so a figure it quotes is the
+     * figure those routes publish. An exchange we do not support answers the
+     * empty record rather than a pooled one it did not ask for.
+     *
+     * @param  list<string>  $symbols
+     */
+    public function recordFor(?string $exchange, array $symbols = []): array
+    {
+        $keys = [];
+        foreach ($symbols as $symbol) {
+            $key = self::symbolKey((string) $symbol);
+            if ($key !== '' && preg_match('/^[A-Z0-9]{3,20}$/', $key)) {
+                $keys[$key] = true;
+            }
+        }
+        $keys = array_keys($keys);
+        sort($keys);
+        $keys = array_slice($keys, 0, self::MAX_SYMBOLS);
+
+        if ($exchange !== null && ! in_array($exchange, ExchangeSchema::supported(), true)) {
+            return $this->unavailable($exchange, $keys);
+        }
+
+        return $this->cached($exchange, $keys);
+    }
+
+    /**
      * @param  list<string>  $symbols  normalized, sorted, deduplicated
      */
     private function cached(?string $exchange, array $symbols): array
@@ -125,7 +156,7 @@ class PublicStatsController extends Controller
      * `LTC_USDT`. Stripping punctuation and case lets a single filter match
      * the same market wherever the master trades it.
      */
-    private static function symbolKey(string $symbol): string
+    public static function symbolKey(string $symbol): string
     {
         return strtoupper((string) preg_replace('/[^A-Za-z0-9]/', '', $symbol));
     }

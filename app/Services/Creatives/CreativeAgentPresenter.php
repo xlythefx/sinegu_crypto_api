@@ -7,6 +7,7 @@ use App\Models\CreativeAgentMessage;
 use App\Models\CreativeGeneration;
 use App\Models\CreativeMemory;
 use App\Models\CreativeSetting;
+use App\Models\CreativeVideo;
 use Illuminate\Database\Eloquent\Collection as EloquentCollection;
 use Illuminate\Support\Collection;
 
@@ -42,6 +43,9 @@ final class CreativeAgentPresenter
                     'activity' => $item['activity'] ?? null,
                     'job_id' => isset($item['job_id']) ? (int) $item['job_id'] : null,
                     'plan_id' => isset($item['plan_id']) ? (int) $item['plan_id'] : null,
+                    'video_id' => isset($item['video_id']) ? (int) $item['video_id'] : null,
+                    // ask_choices: {question, options: [{label, value}], allow_other}
+                    'choices' => is_array($item['choices'] ?? null) ? $item['choices'] : null,
                     'mode' => $row->mode,
                     'created_at' => $row->created_at?->toIso8601String(),
                 ], fn ($v) => $v !== null);
@@ -73,7 +77,7 @@ final class CreativeAgentPresenter
     public function job(CreativeAgentJob $job, ?Collection $generations = null): array
     {
         $status = $job->isStale() ? CreativeAgentJob::EXPIRED : $job->status;
-        $finished = in_array($status, [CreativeAgentJob::COMPLETED, CreativeAgentJob::FAILED, CreativeAgentJob::CANCELED, CreativeAgentJob::EXPIRED], true);
+        $finished = in_array($status, CreativeAgentJob::FINISHED, true);
 
         $steps = [];
         foreach ((array) $job->steps as $step) {
@@ -113,6 +117,9 @@ final class CreativeAgentPresenter
             'status' => $status,
             'plan_id' => $job->plan_id !== null ? (int) $job->plan_id : null,
             'plan_title' => $job->plan?->title,
+            // The video project the job fills (editor jobs, create_video), and its editor page.
+            'video_id' => $job->video_id !== null ? (int) $job->video_id : null,
+            'editor_path' => $job->video_id !== null ? CreativeVideo::editorPath((int) $job->video_id) : null,
             'estimated_usd' => round((float) $job->estimated_usd, 4),
             'steps' => $steps,
             'approved_by_name' => $job->approved_by_name,
@@ -139,6 +146,16 @@ final class CreativeAgentPresenter
             'markdown' => (string) ($setting->brief_markdown ?? ''),
             'updated_by_name' => $setting->brief_updated_by_name,
             'updated_at' => $setting->brief_updated_at?->toIso8601String(),
+        ];
+    }
+
+    /** The video playbook: the Brief shape. */
+    public function playbook(CreativeSetting $setting): array
+    {
+        return [
+            'markdown' => (string) ($setting->playbook_markdown ?? ''),
+            'updated_by_name' => $setting->playbook_updated_by_name,
+            'updated_at' => $setting->playbook_updated_at?->toIso8601String(),
         ];
     }
 }
