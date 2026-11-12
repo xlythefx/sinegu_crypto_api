@@ -56,23 +56,33 @@ Schedule::command('sanctum:prune-expired --hours=24')->dailyAt('00:50');
 // Saved daily P&L percentages (the Date Range card adds them up). The
 // analytics endpoint saves its own scope on every read, so this only keeps the
 // rows of users who have not opened the page since their last close current.
-Schedule::command('pnl:daily-returns')->everyFifteenMinutes()->withoutOverlapping(15);
+//
+// SPREAD (2026-11-12): every task that runs often has its own minute, so the
+// scheduler boots as few PHP processes at once as it can on this 2-vCPU box
+// (the trading engine shares it, and the ops reporter read the old pile-up at
+// :00 as "CPU 95%"). Only payments:watch-tron runs every minute; the rest
+// alternate even / odd minutes, and the 5- and 15-minute ones sit off :00.
+// Keep a new frequent task off the minutes already taken.
+Schedule::command('pnl:daily-returns')->cron('7-59/15 * * * *')->withoutOverlapping(15);
 
 // A size change saved while the main account held the coin waits for that
 // position to close (App\Services\Assets\PendingSizing). The engine's close and
-// position syncs put it live the moment they land; this catches the rest.
-Schedule::command('assets:apply-pending')->everyMinute()->withoutOverlapping(5);
+// position syncs put it live the moment they land; this catches the rest, so
+// even minutes are plenty (SPREAD above).
+Schedule::command('assets:apply-pending')->everyTwoMinutes()->withoutOverlapping(5);
 
 // "Closed by the bot" vs "closed outside the bot" on every closed trade
 // (App\Services\Positions\CloseSource). An outside close is shown on the admin
 // screens and left out of streak sizing.
-Schedule::command('positions:classify-closes')->everyFiveMinutes()->withoutOverlapping(10);
+Schedule::command('positions:classify-closes')->cron('3-59/5 * * * *')->withoutOverlapping(10);
 
 // Admin → Creatives: Higgsfield pushes nothing, so this poll is how a running
 // image / video generation becomes "done" (and its reservation against the
 // monthly cap is settled), and how a result whose 7 days are over is marked
-// expired. Sends no request at all while nothing is running.
-Schedule::command('creatives:poll')->everyMinute()->withoutOverlapping(5);
+// expired. Sends no request at all while nothing is running. ODD minutes
+// (SPREAD above): an open chat or editor advances its own jobs every few
+// seconds, so this only matters while nobody is watching.
+Schedule::command('creatives:poll')->cron('1-59/2 * * * *')->withoutOverlapping(5);
 
 // Admin → Creatives' AI writer drafts the weekly recap post (an `idea` plan for
 // the coming Monday) from the published track record — Saturdays 00:15 MANILA,
