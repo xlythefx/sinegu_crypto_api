@@ -131,6 +131,46 @@ class AssetController extends Controller
     }
 
     /**
+     * POST /api/admin/assets/position-limit — the asset form's "Binance
+     * position limit": for a PROPOSED base / max size and leverage, every
+     * real-money account's full stack against the most Binance accepts at that
+     * leverage (the -2027 refusal), and the balance at which an account would
+     * pass it. Worked out by the engine (EngineCache::sizeCheck), so it uses
+     * the same sizing the next signal will. Works before the coin is saved.
+     */
+    public function positionLimit(Request $request, EngineCache $engine): JsonResponse
+    {
+        $data = $request->validate([
+            'ticker' => ['required', 'string', 'max:20', 'regex:/^[A-Za-z0-9]+$/'],
+            'base_size' => ['required', 'numeric', 'gt:0', 'max:1000000000'],
+            'max_increments' => ['nullable', 'numeric', 'min:0', 'max:1000000000'],
+            'leverage' => ['nullable', 'integer', 'min:1', 'max:125'],
+        ]);
+
+        $result = $engine->sizeCheck([
+            'exchange' => 'binance',
+            'ticker' => strtoupper($data['ticker']),
+            'base_size' => (float) $data['base_size'],
+            'max_size' => (float) ($data['max_increments'] ?? 0),
+            'leverage' => isset($data['leverage']) ? (int) $data['leverage'] : null,
+        ]);
+
+        if ($result['error'] !== null || ! is_array($result['body'])) {
+            $status = (int) ($result['status'] ?? 503);
+            // A 4xx from the engine is an answer about the request; anything
+            // else is "unavailable" — 503, never 502 (Cloudflare replaces a
+            // 502 with its own page and the message is lost).
+            return response()->json([
+                'success' => false,
+                'error' => is_array($result['body']) ? ($result['body']['error'] ?? 'ENGINE_ERROR') : 'ENGINE_UNAVAILABLE',
+                'message' => $result['error'] ?? 'The trading engine did not answer.',
+            ], $status >= 400 && $status < 500 ? $status : 503);
+        }
+
+        return response()->json($result['body']);
+    }
+
+    /**
      * GET /api/assets — trader-facing catalog (auth, no admin role required).
      *
      * Only enabled assets, and deliberately WITHOUT the sizing columns

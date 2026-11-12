@@ -217,6 +217,42 @@ class EngineCache
     }
 
     /**
+     * Proposed sizing vs the exchange's position limit, worked out by the
+     * engine (it holds the keys Binance's leverageBracket read needs, and owns
+     * the sizing math). Read-only; returns the engine's answer for the asset
+     * form, a failure reported rather than swallowed.
+     *
+     * @param  array{exchange: string, ticker: string, base_size: float, max_size: float, leverage: ?int}  $proposal
+     * @return array{status: ?int, body: mixed, error: ?string}
+     */
+    public function sizeCheck(array $proposal, int $timeout = 15): array
+    {
+        $base = rtrim((string) config('services.engine.targets.local', 'http://127.0.0.1:5010'), '/');
+        $secret = self::adminSecret();
+        if ($secret === '') {
+            return ['status' => null, 'body' => null, 'error' => 'The trading engine is not configured on this server.'];
+        }
+
+        try {
+            $response = Http::withHeaders(['X-Admin-Secret' => $secret])
+                ->timeout($timeout)
+                ->post("{$base}/admin/size-check", $proposal);
+        } catch (\Throwable $e) {
+            Log::warning('Engine size-check failed.', ['exception' => $e->getMessage()]);
+
+            return ['status' => null, 'body' => null, 'error' => 'The trading engine did not answer.'];
+        }
+
+        return [
+            'status' => $response->status(),
+            'body' => $response->json(),
+            'error' => $response->successful()
+                ? null
+                : (string) ($response->json('message') ?? $response->json('error') ?? 'The engine could not check the limit.'),
+        ];
+    }
+
+    /**
      * The venues the engine is trading right now (its `/health` →
      * `exchanges`), remembered for a minute. Null when the engine does not
      * answer — UNKNOWN, which callers must not read as "trades nothing".

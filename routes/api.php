@@ -435,6 +435,7 @@ Route::middleware(['auth:sanctum', 'account.active', 'email.verified'])->group(f
         Route::get('/assets/history', [AssetController::class, 'history']);
         // The form's Binance check: minimum order, mark price, smallest account.
         Route::get('/assets/binance-check', [AssetController::class, 'binanceCheck'])->middleware('throttle:30,1');
+        Route::post('/assets/position-limit', [AssetController::class, 'positionLimit'])->middleware('throttle:30,1');
         Route::post('/assets', [AssetController::class, 'store']);
         Route::put('/assets/{asset}', [AssetController::class, 'update']);
         Route::delete('/assets/{asset}', [AssetController::class, 'destroy']);
