@@ -10,6 +10,7 @@ use App\Models\TradeLog;
 use App\Models\UserCredential;
 use App\Services\Admin\SignalDelivery;
 use App\Services\Assets\StreakSizing;
+use App\Services\Notifications\TradeAlerts;
 use App\Services\Positions\EntryStreak;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -222,6 +223,39 @@ class EngineController extends Controller
             'depth' => $depth,
             'streaks' => (object) $streakSizing->runs($exchange, $data['symbol'], $depth),
         ]);
+    }
+
+    /**
+     * POST /api/engine/{exchange}/alerts/exit-stuck — a CLOSE the exchange
+     * refused outright, or one the retry queue gave up on (the engine's red
+     * "MANUAL ACTION" moment). Emailed at once to TRADE_ALERT_EMAILS
+     * (TradeAlerts::exitStuck); everything else waits for the hourly summary.
+     * Always 200 when valid — the email is best-effort and a refusal here
+     * would only make the engine log noise; Telegram already carries it.
+     */
+    public function exitStuck(string $exchange, Request $request, TradeAlerts $alerts): JsonResponse
+    {
+        if ($guard = $this->guardExchange($exchange)) {
+            return $guard;
+        }
+        $data = $request->validate([
+            'action' => ['required', 'string', 'in:EXIT_LONG,EXIT_SHORT'],
+            'ticker' => ['required', 'string', 'max:20', 'regex:/^[A-Za-z0-9_]+$/'],
+            'why' => ['required', 'string', 'in:rejected,abandoned'],
+            'attempts' => ['nullable', 'integer', 'min:0', 'max:1000'],
+            'total' => ['nullable', 'integer', 'min:0', 'max:100000'],
+            'accounts' => ['required', 'array', 'min:1', 'max:50'],
+            'accounts.*.uni_id' => ['nullable', 'string', 'max:64'],
+            'accounts.*.name' => ['nullable', 'string', 'max:255'],
+            'accounts.*.error' => ['nullable', 'string', 'max:300'],
+        ]);
+
+        $sent = $alerts->exitStuck(
+            $exchange, $data['action'], $data['ticker'], $data['why'], $data['attempts'] ?? null,
+            array_values($data['accounts']), (int) ($data['total'] ?? count($data['accounts'])),
+        );
+
+        return response()->json(['success' => true, 'sent' => $sent]);
     }
 
     /** POST /api/engine/{exchange}/trade-logs — one row per processed signal. */

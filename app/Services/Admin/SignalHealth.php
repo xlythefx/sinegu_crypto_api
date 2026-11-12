@@ -34,6 +34,11 @@ final class SignalHealth
         'key_blocked' => ['API key refused by the exchange', self::PROBLEM, 'Fix in API Keys', '/admin/api-keys'],
         'deposit_unknown' => ['Deposit not synced yet', self::PROBLEM, 'Check in API Keys', '/admin/api-keys'],
         'size_too_small' => ['Size too small to trade', self::PROBLEM, 'Check the asset', '/admin/assets'],
+        // The account's position already reached Binance's limit at the
+        // coin's leverage, so the engine skipped the entry instead of sending
+        // one Binance refuses -2027 (2026-11-12). The size outgrew the limit
+        // for this balance: lower it, or the leverage, in Trading Assets.
+        'limit_reached' => ['Binance position limit reached', self::PROBLEM, 'Check the asset', '/admin/assets'],
         'stack_unknown' => ['Open size could not be read', self::PROBLEM, 'Check open positions', '/admin?tab=positions'],
         'positions_unreadable' => ['Positions could not be read', self::PROBLEM, 'Check the bot engine', '/admin/engine'],
         'not_listed' => ['Coin not listed on the exchange', self::PROBLEM, 'Check the asset', '/admin/assets'],
@@ -99,6 +104,7 @@ final class SignalHealth
                 $text === 'deposit below minimum' => 'deposit_low',
                 $text === 'deposit unknown' => 'deposit_unknown',
                 $text === 'size too small' => 'size_too_small',
+                $text === 'exchange limit reached' => 'limit_reached',
                 $text === 'stack depth unknown' => 'stack_unknown',
                 // "not listed on MEXC Demo" / "… Production" — before the
                 // 'demo' arm below, which would file it as untradeable.

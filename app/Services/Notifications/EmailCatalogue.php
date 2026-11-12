@@ -16,6 +16,8 @@ use App\Mail\PaymentDisputedNotice;
 use App\Mail\PaymentReceived;
 use App\Mail\PaymentReminder;
 use App\Mail\PixelMail;
+use App\Mail\TradeExitStuckNotice;
+use App\Mail\TradeFailureSummary;
 use App\Mail\WeeklySummary;
 use App\Mail\WelcomePending;
 use App\Services\Auth\EmailVerification;
@@ -302,6 +304,57 @@ class EmailCatalogue
                     losses: 3,
                     reason: 'The master lost 3 trades in a row on LTCUSDT.',
                     trippedAt: '9 Oct 2026, 14:05 UTC',
+                ),
+            ],
+            [
+                'slug' => 'trade-failure-summary',
+                'audience' => self::AUDIENCE_TEAM,
+                'title' => 'Hourly summary of trades that need a look',
+                'trigger' => 'At :02 past every hour, for the hour that just ended, ONLY when a signal had a refused or unconfirmed order, an entry shrunk or skipped at Binance\'s position limit, or a rejected signal. A clean hour sends nothing.',
+                'to' => implode(', ', TradeAlerts::recipients()) ?: 'TRADE_ALERT_EMAILS (not set: nothing is sent)',
+                'live' => true,
+                'note' => 'Built from the Signal Log (main feed). A failure a retry fixed is listed in green; blocked keys and similar repeating skips are only counted.',
+                'mail' => new TradeFailureSummary(
+                    window: '12 Nov, 09:00–10:00 UTC (16:00–17:00 Bangkok)',
+                    signals: [
+                        [
+                            'id' => 1, 'at' => '2026-11-12T09:14:03+00:00', 'exchange' => 'binance', 'broker' => 'Binance',
+                            'action' => 'SELL', 'ticker' => 'SANTOSUSDT', 'side' => 'SHORT', 'type' => 'entry',
+                            'items' => [
+                                ['kind' => 'shrunk', 'label' => 'Shrunk to fit Binance’s position limit', 'owner' => 'Sample Customer', 'account' => 'Main', 'is_master' => false, 'exchange' => 'binance', 'uni_id' => null, 'message' => null, 'resolved' => true, 'quantity' => 4250, 'limit' => ['cap_usd' => 10000, 'leverage' => 10, 'requested_qty' => 10000]],
+                                ['kind' => 'failed', 'label' => 'Not enough margin on the account', 'owner' => 'Another Customer', 'account' => 'Futures', 'is_master' => false, 'exchange' => 'binance', 'uni_id' => null, 'message' => '-2019 Margin is insufficient.', 'resolved' => false, 'retryable' => false],
+                            ],
+                        ],
+                        [
+                            'id' => 2, 'at' => '2026-11-12T09:41:55+00:00', 'exchange' => 'binance', 'broker' => 'Binance',
+                            'action' => 'EXIT_LONG', 'ticker' => 'LTCUSDT', 'side' => 'LONG', 'type' => 'exit',
+                            'items' => [
+                                ['kind' => 'failed', 'label' => 'Exchange did not answer', 'owner' => 'Sample Customer', 'account' => 'Main', 'is_master' => false, 'exchange' => 'binance', 'uni_id' => null, 'message' => '408 -1007 Timeout waiting for response from backend server.', 'resolved' => true, 'retryable' => true],
+                            ],
+                        ],
+                    ],
+                    counts: ['failed' => 1, 'resolved' => 1, 'shrunk' => 1, 'limit' => 0, 'rejected' => 0, 'other_problems' => 2],
+                ),
+            ],
+            [
+                'slug' => 'trade-exit-stuck',
+                'audience' => self::AUDIENCE_TEAM,
+                'title' => 'A close failed: positions may still be open',
+                'trigger' => 'At once, when the exchange refuses a CLOSE outright or the bot gives up retrying one — the moment the admin Telegram gets "EXIT FAILED — MANUAL ACTION REQUIRED". Main feed only.',
+                'to' => implode(', ', TradeAlerts::recipients()) ?: 'TRADE_ALERT_EMAILS (not set: nothing is sent)',
+                'live' => true,
+                'note' => 'The one failed-trade email that does not wait for the hourly summary, because a real position may still be open.',
+                'mail' => new TradeExitStuckNotice(
+                    broker: 'Binance',
+                    ticker: 'LTCUSDT',
+                    side: 'LONG',
+                    why: 'abandoned',
+                    attempts: 5,
+                    accounts: [
+                        ['owner' => 'Sample Customer', 'account' => 'Main', 'error' => '408 -1007 Timeout waiting for response from backend server.'],
+                    ],
+                    total: 1,
+                    at: '12 Nov 2026, 09:47 UTC',
                 ),
             ],
         ];

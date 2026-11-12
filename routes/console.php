@@ -37,6 +37,10 @@ Schedule::command('fees:reconcile')->dailyAt('00:30')->withoutOverlapping(30);
 // cannot hold the lock indefinitely.
 Schedule::command('payments:watch-tron')->everyMinute()->withoutOverlapping(5);
 
+// Failed-trade summary for the hour that just ended (TradeAlerts): nothing is
+// sent for a clean hour. A stuck close is emailed at once by the engine's call.
+Schedule::command('trade-alerts:digest')->hourlyAt(2)->withoutOverlapping(10);
+
 // Discord server roles (Member / Trader) follow the account: every approve,
 // suspend, connect and disconnect syncs the user on the spot, so this nightly
 // pass only catches the write that happened while Discord was down and the

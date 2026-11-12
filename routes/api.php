@@ -642,6 +642,8 @@ Route::prefix('engine/{exchange}')
         Route::post('/past-positions/sync', [EngineSyncController::class, 'syncPastPositions']);
         Route::post('/balances', [EngineSyncController::class, 'updateBalances']);
         Route::post('/key-status', [EngineSyncController::class, 'keyStatus']);
+        // A close nobody is coming to fix: emailed now (TradeAlerts).
+        Route::post('/alerts/exit-stuck', [EngineController::class, 'exitStuck']);
         Route::post('/transactions', [EngineSyncController::class, 'insertTransactions']);
         Route::post('/ledger', [EngineSyncController::class, 'ledger']);
         Route::post('/fees', [EngineSyncController::class, 'insertFees']);

@@ -745,6 +745,15 @@ class AdminTradeLogController extends Controller
             // Stack depth after an entry / increments taken off by an exit.
             'increment' => isset($row['increment']) ? (int) $row['increment'] : null,
             'max_increments' => isset($row['max_increments']) ? (int) $row['max_increments'] : null,
+            // Binance's position limit (engine exchange_limit, 2026-11-12): an
+            // entry shrunk to fit it, or skipped because the position was at it.
+            'limit' => is_array($sizing['limit'] ?? null) ? [
+                'shrunk' => ! empty($row['shrunk_by_limit']),
+                'cap_usd' => isset($sizing['limit']['cap_usd']) ? (float) $sizing['limit']['cap_usd'] : null,
+                'leverage' => isset($sizing['limit']['leverage']) ? (int) $sizing['limit']['leverage'] : null,
+                'requested_qty' => isset($sizing['limit']['requested_qty']) ? (float) $sizing['limit']['requested_qty'] : null,
+                'open_usd' => isset($sizing['limit']['open_usd']) ? (float) $sizing['limit']['open_usd'] : null,
+            ] : null,
             'sizing' => $sizing === null ? null : [
                 'balance' => isset($sizing['balance']) ? (float) $sizing['balance'] : null,
                 // Deposit gate. A gate-blocked skip writes only these three

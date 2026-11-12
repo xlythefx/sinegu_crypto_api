@@ -141,6 +141,11 @@ return [
      */
     'admin_address' => env('MAIL_ADMIN_ADDRESS'),
 
+    // Failed-trade emails (App\Services\Notifications\TradeAlerts, 2026-11-12):
+    // a comma-separated list, separate from the team list on purpose: these
+    // go to whoever watches the trading, not to everyone. Empty = off.
+    'trade_alerts' => env('TRADE_ALERT_EMAILS'),
+
     /*
      * The site an email links back into (the dashboard, the approval queue).
      * Deliberately not APP_URL: that is the API's own base, and on WAMP it is
