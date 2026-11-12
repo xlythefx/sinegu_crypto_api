@@ -182,7 +182,8 @@ final class CreativeFacts
                 'pricing' => 'No subscription: Pixel Alpha takes 20% of the profit it makes, and nothing when there is no profit.',
                 'fee_pct' => 20,
                 'site' => 'pixel-alpha.com',
-                'risk' => 'Crypto trading is risky: results vary, losses happen, and past results do not predict future ones.',
+                // Owner, 2026-11-12: marketing stays friendly. The caption's disclaimer line is added automatically.
+                'disclaimer' => 'When a post cites a figure, its caption ends with "Past performance does not guarantee future results." (added automatically). Put no risk warnings in the video or the script.',
             ],
             'character' => [
                 'name' => CreativeAiPrompt::scrub((string) $character->name),
