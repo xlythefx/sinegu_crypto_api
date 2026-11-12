@@ -290,7 +290,7 @@ final class CreativeAgent
         if (! $reply->answered) {
             $this->ai->abandonCall($call, $reply->maybeBilled);
 
-            throw new CreativeException('AI_UNAVAILABLE', CreativeAi::unavailableMessage($reply->failure), 502, [
+            throw new CreativeException('AI_UNAVAILABLE', CreativeAi::unavailableMessage($reply->failure), 503, [
                 'status' => 'error',
                 'messages' => $this->presenter->messages($new),
                 'jobs' => [],

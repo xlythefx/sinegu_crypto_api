@@ -399,13 +399,13 @@ class CreativesTest extends EngineTestCase
     {
         $this->fakeHiggsfield(['estimate' => fn () => Http::response(['detail' => 'upstream'], 503)]);
         $this->api('POST', '/api/admin/creatives/generations', $this->soulBody())
-            ->assertStatus(502)
+            ->assertStatus(503)
             ->assertJsonPath('error_code', 'ESTIMATE_UNAVAILABLE');
 
         // A description with no fallback rate (only the video models have one) is no price either.
         $this->fakeHiggsfield(['estimate' => fn () => Http::response(['type' => 'description', 'pricing_description' => 'depends'])]);
         $this->api('POST', '/api/admin/creatives/generations', $this->soulBody())
-            ->assertStatus(502)
+            ->assertStatus(503)
             ->assertJsonPath('error_code', 'ESTIMATE_UNAVAILABLE');
 
         $this->assertCount(0, $this->sent('submit'));
@@ -695,7 +695,7 @@ class CreativesTest extends EngineTestCase
         $this->fakeHiggsfield(['submit' => fn () => Http::response('<html>Bad gateway</html>', 503)]);
 
         $this->api('POST', '/api/admin/creatives/generations', $this->soulBody())
-            ->assertStatus(502)
+            ->assertStatus(503)
             ->assertJsonPath('error_code', 'SUBMIT_UNCONFIRMED')
             ->assertJsonPath('generation.status', 'failed')
             ->assertJsonPath('generation.charged_usd', 0.298)
@@ -708,7 +708,7 @@ class CreativesTest extends EngineTestCase
         // A 2xx without a request id is no confirmation either.
         $this->fakeHiggsfield(['submit' => fn () => Http::response(['status' => 'queued'])]);
         $this->api('POST', '/api/admin/creatives/generations', $this->soulBody())
-            ->assertStatus(502)->assertJsonPath('error_code', 'SUBMIT_UNCONFIRMED');
+            ->assertStatus(503)->assertJsonPath('error_code', 'SUBMIT_UNCONFIRMED');
         $this->assertSame(0.596, round((float) CreativeGeneration::sum('charged_usd'), 4));
     }
 
@@ -718,7 +718,7 @@ class CreativesTest extends EngineTestCase
         $this->fakeHiggsfield(['put' => fn () => Http::response('', 500)]);
 
         $this->api('POST', '/api/admin/creatives/generations', ['model' => 'grok-image', 'prompt' => 'Pixel waving'])
-            ->assertStatus(502)
+            ->assertStatus(503)
             ->assertJsonPath('error_code', 'HIGGSFIELD_UNAVAILABLE')
             ->assertJsonPath('generation.status', 'failed')
             ->assertJsonPath('generation.charged_usd', 0);

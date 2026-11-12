@@ -81,7 +81,7 @@ class CreativeAssetController extends Controller
 
         $upstream = $gateway->openOutput($output['url']);
         if ($upstream === null || $upstream->serverError()) {
-            return $this->error('HIGGSFIELD_UNAVAILABLE', 'Higgsfield did not answer. Try again in a minute.', 502);
+            return $this->error('HIGGSFIELD_UNAVAILABLE', 'Higgsfield did not answer. Try again in a minute.', 503);
         }
         if (! $upstream->successful()) {
             // Higgsfield deleted it early, or the link stopped working.

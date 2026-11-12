@@ -486,8 +486,13 @@ class CreativesAgentTest extends EngineTestCase
                 'query_data', 'ask_choices', 'get_style', 'create_video', 'add_scenes', 'get_video', 'list_videos'],
             array_column($decoded, 'name'),
         );
+        // Only these four are strict: with all 20 strict, Anthropic refused
+        // every call ("The compiled grammar is too large", live 2026-11-12).
+        // A new strict tool must be re-checked live (creatives:check-agent-tools).
+        $strict = array_values(array_map(fn ($t) => $t['name'], array_filter($decoded, fn ($t) => ($t['strict'] ?? false) === true)));
+        $this->assertSame(['propose_job', 'ask_choices', 'create_video', 'add_scenes'], $strict);
+        $this->assertEqualsCanonicalizing(CreativeAgentPrompt::STRICT_TOOLS, $strict);
         foreach ($decoded as $tool) {
-            $this->assertTrue($tool['strict']);
             $this->assertFalse($tool['inputSchema']['additionalProperties']);
         }
         // Strict schemas allow few optional parameters per request: at ANY
@@ -599,7 +604,7 @@ class CreativesAgentTest extends EngineTestCase
 
         // No answer, nothing billed: the reservation goes, the message stays (a retry needs no words).
         $this->claude->replies = [AgentReply::unanswered('claude-opus-5-5', 'server_error')];
-        $res = $this->turn($session, 'ask', 'Hi')->assertStatus(502)
+        $res = $this->turn($session, 'ask', 'Hi')->assertStatus(503)
             ->assertJsonPath('error_code', 'AI_UNAVAILABLE')
             ->assertJsonPath('status', 'error')
             ->assertJsonPath('messages.0.kind', 'user');
@@ -607,7 +612,7 @@ class CreativesAgentTest extends EngineTestCase
 
         // It may have run: the reservation is kept.
         $this->claude->replies = [AgentReply::unanswered('claude-opus-5-5', 'unreachable', maybeBilled: true)];
-        $this->turn($session, 'ask')->assertStatus(502);
+        $this->turn($session, 'ask')->assertStatus(503);
         $this->assertSame('unconfirmed', CreativeAiCall::sole()->stop_reason);
         $this->assertEquals(0.5, CreativeAiCall::sole()->cost_usd);
 
@@ -1541,7 +1546,9 @@ class CreativesAgentTest extends EngineTestCase
             $this->assertSame(CreativeAgentPrompt::MAX_TOKENS, $body['max_tokens']);
             $this->assertArrayNotHasKey('thinking', $body);
             $this->assertArrayNotHasKey('tool_choice', $body);
-            $this->assertTrue($body['tools'][0]['strict']);
+            // list_plans is plain; propose_job is one of the few strict tools.
+            $this->assertArrayNotHasKey('strict', $body['tools'][0]);
+            $this->assertTrue(collect($body['tools'])->firstWhere('name', 'propose_job')['strict']);
             $this->assertArrayHasKey('input_schema', $body['tools'][0]);
         }
         $this->assertSame(json_encode($r1['tools']), json_encode($r2['tools']));

@@ -29,6 +29,23 @@ final class CreativeAgentPrompt
     /** Bump whenever tools() changes: older chats are closed (preserved thinking). */
     public const TOOLS_VERSION = 2;
 
+    /**
+     * The ONLY tools sent with `strict: true` — the ones that spend money or
+     * draw buttons, where a malformed input is worst. Every other tool is
+     * plain (its schema still lists every property as required, and PHP
+     * validates every input and answers an is_error the model can fix).
+     *
+     * Why so few (seen live 2026-11-12, the day v2 shipped): with all 20
+     * tools strict, Anthropic refused EVERY call with 400 "The compiled grammar
+     * is too large … reduce the number of strict tools" — an internal limit
+     * on the combined grammar, separate from the documented 20 strict tools /
+     * 24 optional params / 16 unions. Measured that day: these four pass;
+     * adding create_plan already fails. The grammar depends on tools() alone,
+     * so a list that passes once passes on every call. Adding a strict tool
+     * means re-checking live: `php artisan creatives:check-agent-tools`.
+     */
+    public const STRICT_TOOLS = ['ask_choices', 'propose_job', 'create_video', 'add_scenes'];
+
     /** Tools that change plans or videos or propose spending: Generate mode only. */
     public const GENERATE_ONLY = ['create_plan', 'update_plan', 'propose_job', 'create_video', 'add_scenes'];
 
@@ -115,15 +132,17 @@ TXT;
     public const SOURCE_TYPES = ['none', 'from_step', 'generation', 'ref'];
 
     /**
-     * The tools array, in the SDK's shape (camelCase `inputSchema`), every
-     * tool `strict`. Built from constants only, in a fixed order, so it is
-     * byte-identical on every call.
+     * The tools array, in the SDK's shape (camelCase `inputSchema`); only
+     * {@see self::STRICT_TOOLS} carry `strict` (the compiled-grammar limit —
+     * read that constant before making another tool strict). Built from
+     * constants only, in a fixed order, so it is byte-identical on every call.
      *
-     * EVERY property is required — an optional one is replaced by a stated
-     * "none" value ("any", "", 0, source type "none"). Strict schemas have a
-     * request-wide budget of optional parameters (24 across all strict tools,
-     * as documented when this was written) that a 13-tool agent would exceed,
-     * and a request over it is refused outright. Numeric and length limits are
+     * EVERY property is required, on every tool, strict or not — an optional
+     * one is replaced by a stated "none" value ("any", "", 0, source type
+     * "none"). Strict schemas have a request-wide budget of optional
+     * parameters (24 across all strict tools, as documented when this was
+     * written), and one shape for all tools keeps a tool movable between
+     * plain and strict without a schema change. Numeric and length limits are
      * in the descriptions (strict schemas do not take them) and checked in
      * PHP; {@see CreativeAgentTools} turns these inputs into the contract's
      * shapes (a plan's fields, the job Step).
@@ -306,11 +325,15 @@ TXT;
     /** @param  array<string, mixed>  $schema */
     private static function tool(string $name, string $description, array $schema): array
     {
-        return [
+        $tool = [
             'name' => $name,
             'description' => $description,
             'inputSchema' => $schema,
-            'strict' => true,
         ];
+        if (in_array($name, self::STRICT_TOOLS, true)) {
+            $tool['strict'] = true;
+        }
+
+        return $tool;
     }
 }

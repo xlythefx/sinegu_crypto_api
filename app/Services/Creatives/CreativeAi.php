@@ -426,7 +426,7 @@ final class CreativeAi
             throw new CreativeException(
                 'AI_UNAVAILABLE',
                 self::unavailableMessage($reply->failure),
-                502,
+                503,
                 ['budget' => $this->budget->summary()],
             );
         }
@@ -450,7 +450,7 @@ final class CreativeAi
 
     private function badOutput(string $message, float $cost): CreativeException
     {
-        return new CreativeException('AI_BAD_OUTPUT', $message, 502, [
+        return new CreativeException('AI_BAD_OUTPUT', $message, 503, [
             'cost_usd' => $cost,
             'budget' => $this->budget->summary(),
         ]);

@@ -347,9 +347,9 @@ class CreativesAiTest extends EngineTestCase
         ];
 
         foreach (range(1, 4) as $i) {
-            $this->draft()->assertStatus(502)->assertJsonPath('error_code', 'AI_BAD_OUTPUT')->assertJsonStructure(['cost_usd', 'budget']);
+            $this->draft()->assertStatus(503)->assertJsonPath('error_code', 'AI_BAD_OUTPUT')->assertJsonStructure(['cost_usd', 'budget']);
         }
-        $this->api('POST', '/api/admin/creatives/ai/ideas')->assertStatus(502)->assertJsonPath('error_code', 'AI_BAD_OUTPUT');
+        $this->api('POST', '/api/admin/creatives/ai/ideas')->assertStatus(503)->assertJsonPath('error_code', 'AI_BAD_OUTPUT');
 
         // 1000 × 4e-6 + 500 × 20e-6 = 0.014 each; the max_tokens one 0.244.
         $this->assertSame(5, CreativeAiCall::count());
@@ -364,11 +364,11 @@ class CreativesAiTest extends EngineTestCase
             WriterReply::unanswered('claude-opus-5-5', 'unreachable', maybeBilled: true),
         ];
 
-        $this->draft()->assertStatus(502)->assertJsonPath('error_code', 'AI_UNAVAILABLE')->assertJsonPath('budget.ai_calls', 0);
+        $this->draft()->assertStatus(503)->assertJsonPath('error_code', 'AI_UNAVAILABLE')->assertJsonPath('budget.ai_calls', 0);
         $this->assertSame(0, CreativeAiCall::count());
 
         // A timed-out request may have run: the reservation stays, conservatively.
-        $this->draft()->assertStatus(502)->assertJsonPath('error_code', 'AI_UNAVAILABLE')->assertJsonPath('budget.ai_usd', 0.5);
+        $this->draft()->assertStatus(503)->assertJsonPath('error_code', 'AI_UNAVAILABLE')->assertJsonPath('budget.ai_usd', 0.5);
         $this->assertSame(CreativeAiCall::UNCONFIRMED, CreativeAiCall::sole()->stop_reason);
     }
 

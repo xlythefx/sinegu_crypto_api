@@ -101,7 +101,7 @@ final class CreativeGenerator
 
                 throw ($uploaded->isRefused()
                     ? new CreativeException('HIGGSFIELD_REJECTED', $uploaded->detail ?? 'Higgsfield refused the reference image upload.', 422)
-                    : new CreativeException('HIGGSFIELD_UNAVAILABLE', 'Higgsfield did not answer while the reference images were being sent. Nothing was started; try again in a minute.', 502)
+                    : new CreativeException('HIGGSFIELD_UNAVAILABLE', 'Higgsfield did not answer while the reference images were being sent. Nothing was started; try again in a minute.', 503)
                 )->with($this->after($generation));
             }
             $imageUrls[] = $uploaded;
@@ -139,7 +139,7 @@ final class CreativeGenerator
         // No answer (or an answer without a request id): the job may exist.
         $this->settle($generation, CreativeGeneration::FAILED, null, GenerationPoller::UNCONFIRMED);
 
-        throw (new CreativeException('SUBMIT_UNCONFIRMED', GenerationPoller::UNCONFIRMED.'.', 502))->with($this->after($generation));
+        throw (new CreativeException('SUBMIT_UNCONFIRMED', GenerationPoller::UNCONFIRMED.'.', 503))->with($this->after($generation));
     }
 
     /** Cancel a request still waiting in Higgsfield's queue (refunded). */
@@ -164,7 +164,7 @@ final class CreativeGenerator
                 ->with(['generation' => app(CreativePresenter::class)->generation($generation->fresh(['plan']))]);
         }
 
-        throw new CreativeException('HIGGSFIELD_UNAVAILABLE', 'Higgsfield did not answer. Try again in a minute.', 502);
+        throw new CreativeException('HIGGSFIELD_UNAVAILABLE', 'Higgsfield did not answer. Try again in a minute.', 503);
     }
 
     // ---- steps -----------------------------------------------------------
@@ -291,7 +291,7 @@ final class CreativeGenerator
             $reply->isRefused() && $reply->detail !== null
                 ? 'Higgsfield could not price this: '.$reply->detail
                 : 'Higgsfield did not give a price for this, so it was not started. Try again in a minute.',
-            502,
+            503,
         );
     }
 
