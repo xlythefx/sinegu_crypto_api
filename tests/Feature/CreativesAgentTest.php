@@ -483,12 +483,16 @@ class CreativesAgentTest extends EngineTestCase
         $decoded = json_decode($tools[0], true);
         $this->assertSame(
             ['list_plans', 'get_plan', 'list_generations', 'get_character', 'get_week_results', 'get_budget', 'list_models', 'remember', 'forget', 'update_memory', 'create_plan', 'update_plan', 'propose_job',
-                'query_data', 'ask_choices', 'get_style', 'create_video', 'add_scenes', 'get_video', 'list_videos'],
+                'query_data', 'ask_choices', 'get_style', 'create_video', 'add_scenes', 'get_video', 'list_videos',
+                'show_storyboard', 'edit_video'],
             array_column($decoded, 'name'),
         );
         // Only these four are strict: with all 20 strict, Anthropic refused
         // every call ("The compiled grammar is too large", live 2026-11-12).
-        // A new strict tool must be re-checked live (creatives:check-agent-tools).
+        // A new strict tool must be re-checked live (creatives:check-agent-tools);
+        // v2.1's show_storyboard and edit_video are plain on purpose.
+        $this->assertSame(['ask_choices', 'propose_job', 'create_video', 'add_scenes'], CreativeAgentPrompt::STRICT_TOOLS);
+        $this->assertSame(3, CreativeAgentPrompt::TOOLS_VERSION);
         $strict = array_values(array_map(fn ($t) => $t['name'], array_filter($decoded, fn ($t) => ($t['strict'] ?? false) === true)));
         $this->assertSame(['propose_job', 'ask_choices', 'create_video', 'add_scenes'], $strict);
         $this->assertEqualsCanonicalizing(CreativeAgentPrompt::STRICT_TOOLS, $strict);
@@ -1544,7 +1548,8 @@ class CreativesAgentTest extends EngineTestCase
             $this->assertSame(['type' => 'ephemeral'], $body['system'][0]['cache_control']);
             $this->assertSame(CreativeAgentPrompt::SYSTEM, $body['system'][0]['text']);
             $this->assertSame(CreativeAgentPrompt::MAX_TOKENS, $body['max_tokens']);
-            $this->assertArrayNotHasKey('thinking', $body);
+            // v2.1: readable thinking summaries (same billing; always on for this model).
+            $this->assertSame(['type' => 'adaptive', 'display' => 'summarized'], $body['thinking']);
             $this->assertArrayNotHasKey('tool_choice', $body);
             // list_plans is plain; propose_job is one of the few strict tools.
             $this->assertArrayNotHasKey('strict', $body['tools'][0]);

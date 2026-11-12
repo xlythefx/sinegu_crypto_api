@@ -37,11 +37,23 @@ class AdminCreativeAgentController extends Controller
         private CreativeAgentContext $context,
     ) {}
 
-    /** GET /api/admin/creatives/agent/session?id= — theirs if live, else their newest live, else a new one. */
+    /**
+     * GET /api/admin/creatives/agent/session?id=&video_id= — theirs if live,
+     * else their newest live, else a new one. With `video_id`: that video's
+     * editor chat (404 when the video does not exist); without it, the
+     * workspace chat (never an editor chat).
+     */
     public function session(Request $request): JsonResponse
     {
-        $data = $request->validate(['id' => ['nullable', 'string', 'max:64']]);
-        $session = $this->agent->resolveSession($this->user($request), $data['id'] ?? null);
+        $data = $request->validate([
+            'id' => ['nullable', 'string', 'max:64'],
+            'video_id' => ['nullable', 'integer', 'min:1'],
+        ]);
+        $session = $this->agent->resolveSession(
+            $this->user($request),
+            $data['id'] ?? null,
+            isset($data['video_id']) ? (int) $data['video_id'] : null,
+        );
 
         return response()->json(['success' => true, ...$this->agent->snapshot($session)]);
     }
@@ -81,14 +93,15 @@ class AdminCreativeAgentController extends Controller
         ]]);
     }
 
-    /** POST /api/admin/creatives/agent/sessions — "New chat". */
+    /** POST /api/admin/creatives/agent/sessions {video_id?} — "New chat" (an editor chat with video_id). */
     public function newSession(Request $request): JsonResponse
     {
-        $session = $this->agent->newSession($this->user($request));
+        $data = $request->validate(['video_id' => ['nullable', 'integer', 'min:1']]);
+        $session = $this->agent->newSession($this->user($request), isset($data['video_id']) ? (int) $data['video_id'] : null);
 
         return response()->json([
             'success' => true,
-            'session' => ['id' => $session->id, 'mode' => $session->last_mode],
+            'session' => CreativeAgent::sessionShape($session),
             'messages' => [],
             'jobs' => [],
             'budget' => $this->budget->summary(),
@@ -101,7 +114,8 @@ class AdminCreativeAgentController extends Controller
         $user = $this->user($request);
         $data = $request->validated();
         $session = $this->agent->ownedSession($user, $data['session_id']);
-        $result = $this->agent->turn($session, $user, $data['mode'], $data['text'] ?? null);
+        $focus = $this->agent->focusSceneIds($session, $data['focus_scene_ids'] ?? []);
+        $result = $this->agent->turn($session, $user, $data['mode'], $data['text'] ?? null, $focus);
 
         return response()->json([
             'success' => true,

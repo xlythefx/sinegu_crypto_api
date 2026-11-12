@@ -10,6 +10,7 @@ use App\Models\CreativeMemory;
 use App\Models\CreativePlan;
 use App\Models\CreativeSetting;
 use App\Models\CreativeVideo;
+use App\Models\CreativeVideoScene;
 
 /**
  * The `[Context]…[/Context]` block at the top of every message the PERSON
@@ -45,10 +46,14 @@ final class CreativeAgentContext
     /** Videos in progress listed (newest first). */
     public const VIDEOS_IN_PROGRESS = 3;
 
+    /** A scene's prompt is cut to this many characters in `editing_video`. */
+    public const SCENE_PROMPT_CHARS = 600;
+
     public function __construct(
         private CreativeBudget $budget,
         private CreativeFacts $facts,
         private CreativeStyles $styles,
+        private CreativeVideoPresenter $videos,
     ) {}
 
     /**
@@ -58,9 +63,14 @@ final class CreativeAgentContext
      * Context view, which shows what a fresh message would carry. Building
      * never writes anything; the turn stores `sent`.
      *
+     * An editor chat (the session has a `video_id`, v2.1) also carries
+     * `editing_video` — the video as it is now — and `focus`, the scenes the
+     * person selected for THIS message (`$focus`, checked by the caller).
+     *
+     * @param  list<int>  $focus
      * @return array{text: string, sent: array{brief: string, playbook: string, memory: string}}
      */
-    public function build(CreativeAgentSession $session, string $mode, bool $full = false): array
+    public function build(CreativeAgentSession $session, string $mode, bool $full = false, array $focus = []): array
     {
         $sent = ! $full && is_array($session->sent_context) ? $session->sent_context : [];
         $budget = $this->budget->summary();
@@ -70,8 +80,8 @@ final class CreativeAgentContext
         $state = [
             'mode' => strtoupper($mode),
             'mode_rules' => $mode === CreativeAgentSession::GENERATE
-                ? 'GENERATE: you may create and update plans and propose jobs. Jobs start only when the person clicks Go.'
-                : 'ASK: read, discuss and save memory only. create_plan, update_plan and propose_job are refused in this mode.',
+                ? 'GENERATE: you may create and update plans and videos and propose jobs. Jobs start only when the person clicks Go.'
+                : 'ASK: read, discuss, show storyboards and save memory only. create_plan, update_plan, propose_job, create_video, add_scenes and edit_video are refused in this mode.',
             'today' => $today->toDateString().' ('.$today->getTimezone()->getName().')',
             'budget_usd' => [
                 'month' => $budget['month'],
@@ -93,6 +103,11 @@ final class CreativeAgentContext
             'styles' => $this->styles->forContext(),
             'videos_in_progress' => $this->videosInProgress(),
         ];
+        if ($session->video_id !== null) {
+            $video = CreativeVideo::find($session->video_id);
+            $state['editing_video'] = $video !== null ? $this->editingVideo($video) : null;
+            $state['focus'] = self::focus($video, $focus);
+        }
 
         [$briefText, $briefVersion] = $this->brief();
         [$playbookText, $playbookVersion] = $this->playbook();
@@ -146,6 +161,81 @@ final class CreativeAgentContext
             'brief' => ['version' => $briefVersion, 'markdown' => $briefText],
             'memory' => ['version' => $memoryVersion, 'text' => $memoryText],
             'styles' => array_map(fn (array $s) => ['slug' => $s['slug'], 'name' => $s['name'], 'summary' => $s['summary']], $this->styles->forContext()),
+        ];
+    }
+
+    /**
+     * The video an editor chat is about, as it is NOW (the editor saves
+     * before a message is sent): its settings and every scene in order. Text
+     * people typed is scrubbed; a prompt is cut to SCENE_PROMPT_CHARS.
+     */
+    private function editingVideo(CreativeVideo $video): array
+    {
+        $shape = $this->videos->video($video);
+        $timeline = (array) $shape['timeline'];
+        $music = is_array($timeline['music'] ?? null) ? $timeline['music'] : null;
+        $captions = is_array($timeline['captions'] ?? null) ? $timeline['captions'] : [];
+        $slots = CreativeVideos::slotsOf($video);
+        $look = is_array($timeline['look'] ?? null) ? $timeline['look'] : [];
+
+        return [
+            'id' => $shape['id'],
+            'title' => CreativeAiPrompt::scrub((string) $shape['title']),
+            'platform' => $shape['platform'],
+            'aspect' => $shape['aspect'],
+            'style' => $shape['style']['slug'] ?? null,
+            'duration_ms' => $shape['duration_ms'],
+            'max_seconds' => $shape['max_seconds'],
+            // A chiptune preset's name, "asset" for an uploaded track, or "none".
+            'music' => $music === null ? 'none' : (($music['source'] ?? null) === 'chiptune' ? (string) ($music['preset'] ?? 'none') : 'asset'),
+            'caption_style' => $timeline['caption_style'] ?? null,
+            'pixel_look' => (int) ($look['pixel_size'] ?? 0) > 0,
+            'scenes' => array_map(function (array $s) use ($captions, $slots) {
+                $prompt = $s['prompt'] !== null ? CreativeAiPrompt::scrub((string) $s['prompt']) : null;
+                if ($prompt !== null && mb_strlen($prompt) > self::SCENE_PROMPT_CHARS) {
+                    $prompt = mb_substr($prompt, 0, self::SCENE_PROMPT_CHARS).'…';
+                }
+                $caption = CreativeVideos::captionOver($captions, $slots, (int) $s['id']);
+
+                return [
+                    'scene_id' => $s['id'],
+                    'n' => $s['position'] + 1,
+                    'kind' => $s['kind'],
+                    'label' => CreativeAiPrompt::scrub((string) $s['label']),
+                    'status' => $s['status'],
+                    'engine' => $s['engine'],
+                    'with_pixel' => $s['with_character'],
+                    'seconds' => $s['seconds'],
+                    'duration_ms' => $s['duration_ms'],
+                    'prompt' => $prompt,
+                    'template' => $s['template'],
+                    'caption' => $caption !== null ? CreativeAiPrompt::scrub($caption) : null,
+                ];
+            }, $shape['scenes']),
+        ];
+    }
+
+    /**
+     * The person's selection for this message: the scene ids and a plain rule.
+     *
+     * @param  list<int>  $ids
+     */
+    private static function focus(?CreativeVideo $video, array $ids): array
+    {
+        $numbers = [];
+        if ($video !== null && $ids !== []) {
+            $positions = CreativeVideoScene::query()->where('video_id', $video->id)->whereIn('id', $ids)->pluck('position', 'id');
+            foreach ($ids as $id) {
+                if (isset($positions[$id])) {
+                    $numbers[] = (int) $positions[$id] + 1;
+                }
+            }
+        }
+        $list = $numbers === [] ? 'none' : implode(', ', $numbers);
+
+        return [
+            'scene_ids' => array_values($ids),
+            'rule' => "The person is talking about THESE scenes (n {$list}); 'this'/'it' means them. Empty = the whole video.",
         ];
     }
 

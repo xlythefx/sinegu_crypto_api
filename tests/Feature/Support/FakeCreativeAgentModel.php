@@ -66,10 +66,10 @@ class FakeCreativeAgentModel implements CreativeAgentModel
         ]);
     }
 
-    /** An end_turn answer: a thinking block, then the text. */
-    public static function text(string $text, int $input = 3000, int $output = 600): AgentReply
+    /** An end_turn answer: a thinking block (with a readable summary when `$thinking` is given), then the text. */
+    public static function text(string $text, int $input = 3000, int $output = 600, string $thinking = ''): AgentReply
     {
-        return self::answer([self::thinking(), ['type' => 'text', 'text' => $text]], 'end_turn', $input, $output);
+        return self::answer([self::thinking($thinking), ['type' => 'text', 'text' => $text]], 'end_turn', $input, $output);
     }
 
     /**
@@ -78,9 +78,9 @@ class FakeCreativeAgentModel implements CreativeAgentModel
      *
      * @param  list<array{0: string, 1: array<string, mixed>}>  $calls
      */
-    public static function tools(array $calls, string $text = '', int $input = 3000, int $output = 600): AgentReply
+    public static function tools(array $calls, string $text = '', int $input = 3000, int $output = 600, string $thinking = ''): AgentReply
     {
-        $blocks = [self::thinking()];
+        $blocks = [self::thinking($thinking)];
         if ($text !== '') {
             $blocks[] = ['type' => 'text', 'text' => $text];
         }
@@ -97,10 +97,15 @@ class FakeCreativeAgentModel implements CreativeAgentModel
         return self::answer($blocks, 'tool_use', $input, $output);
     }
 
-    /** @return array{type: string, thinking: string, signature: string} */
-    public static function thinking(): array
+    /**
+     * A thinking block. `$text` is its summary (`display: summarized`); ""
+     * is what an omitted display returns.
+     *
+     * @return array{type: string, thinking: string, signature: string}
+     */
+    public static function thinking(string $text = ''): array
     {
-        return ['type' => 'thinking', 'thinking' => '', 'signature' => 'EqQBCkYIBhgCKkDsig'.(++self::$ids).'=='];
+        return ['type' => 'thinking', 'thinking' => $text, 'signature' => 'EqQBCkYIBhgCKkDsig'.(++self::$ids).'=='];
     }
 
     /** The tool_result blocks of the last user message of a recorded call. */

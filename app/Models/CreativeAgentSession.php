@@ -17,6 +17,7 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
  * @property string $id uuid
  * @property string $uni_id
  * @property string|null $user_name
+ * @property int|null $video_id the video this chat edits (the editor chat); null = the workspace chat
  * @property string $last_mode ask | generate
  * @property array|null $sent_context {brief, playbook, memory: version} already sent in this chat
  * @property int $tools_version the agent tool list the chat started with (CreativeAgentPrompt::TOOLS_VERSION)
@@ -38,7 +39,7 @@ class CreativeAgentSession extends Model
 
     protected $table = 'creative_agent_sessions';
 
-    protected $fillable = ['uni_id', 'user_name', 'last_mode', 'sent_context', 'tools_version'];
+    protected $fillable = ['uni_id', 'user_name', 'video_id', 'last_mode', 'sent_context', 'tools_version'];
 
     /**
      * Set (not stored) when resolving a chat closed an older one because the
@@ -48,7 +49,7 @@ class CreativeAgentSession extends Model
 
     protected function casts(): array
     {
-        return ['sent_context' => 'array', 'tools_version' => 'integer'];
+        return ['sent_context' => 'array', 'tools_version' => 'integer', 'video_id' => 'integer'];
     }
 
     public function messages(): HasMany

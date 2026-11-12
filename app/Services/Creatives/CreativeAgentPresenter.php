@@ -32,11 +32,23 @@ final class CreativeAgentPresenter
     {
         $out = [];
         foreach ($rows as $row) {
-            foreach (array_values((array) ($row->display ?? [])) as $i => $item) {
+            $display = array_values((array) ($row->display ?? []));
+            $thinking = null;
+            if ($row->role === CreativeAgentMessage::ASSISTANT) {
+                $thinking = self::thinking($row);
+                // A step that only called tools has no text to hang its
+                // reasoning on: it gets an assistant item of its own (empty
+                // text), so the reasoning before a tool call is shown too.
+                $hasText = collect($display)->contains(fn ($item) => is_array($item) && ($item['kind'] ?? null) === 'assistant');
+                if (! $hasText && $thinking !== null) {
+                    $display[] = ['kind' => 'assistant', 'text' => ''];
+                }
+            }
+            foreach ($display as $i => $item) {
                 if (! is_array($item) || ! isset($item['kind'])) {
                     continue;
                 }
-                $out[] = array_filter([
+                $message = array_filter([
                     'id' => (int) $row->id * self::ITEM_SLOTS + $i,
                     'kind' => (string) $item['kind'],
                     'text' => $item['text'] ?? null,
@@ -46,13 +58,38 @@ final class CreativeAgentPresenter
                     'video_id' => isset($item['video_id']) ? (int) $item['video_id'] : null,
                     // ask_choices: {question, options: [{label, value}], allow_other}
                     'choices' => is_array($item['choices'] ?? null) ? $item['choices'] : null,
+                    // show_storyboard: {title, video_id, platform, aspect, style, total_seconds, est_total_usd, notes, scenes}
+                    'storyboard' => is_array($item['storyboard'] ?? null) ? $item['storyboard'] : null,
                     'mode' => $row->mode,
                     'created_at' => $row->created_at?->toIso8601String(),
                 ], fn ($v) => $v !== null);
+                if ($message['kind'] === 'assistant') {
+                    // Always present on an assistant message: null = nothing to show.
+                    $message['thinking'] = $thinking;
+                }
+                $out[] = $message;
             }
         }
 
         return $out;
+    }
+
+    /**
+     * The readable reasoning of one assistant row: the non-empty `thinking`
+     * texts of its thinking blocks (summaries, `display: summarized`), joined
+     * by a blank line; null when there are none. Read from the stored blocks,
+     * which stay exactly as Claude returned them.
+     */
+    private static function thinking(CreativeAgentMessage $row): ?string
+    {
+        $texts = [];
+        foreach ($row->blocks() as $block) {
+            if (is_array($block) && ($block['type'] ?? null) === 'thinking' && is_string($block['thinking'] ?? null) && trim($block['thinking']) !== '') {
+                $texts[] = trim($block['thinking']);
+            }
+        }
+
+        return $texts === [] ? null : implode("\n\n", $texts);
     }
 
     /**

@@ -27,7 +27,7 @@ final class CreativeAgentPrompt
     public const MAX_TOKENS = 8000;
 
     /** Bump whenever tools() changes: older chats are closed (preserved thinking). */
-    public const TOOLS_VERSION = 2;
+    public const TOOLS_VERSION = 3;
 
     /**
      * The ONLY tools sent with `strict: true` — the ones that spend money or
@@ -43,11 +43,12 @@ final class CreativeAgentPrompt
      * adding create_plan already fails. The grammar depends on tools() alone,
      * so a list that passes once passes on every call. Adding a strict tool
      * means re-checking live: `php artisan creatives:check-agent-tools`.
+     * v2.1's show_storyboard and edit_video are deliberately NOT strict.
      */
     public const STRICT_TOOLS = ['ask_choices', 'propose_job', 'create_video', 'add_scenes'];
 
     /** Tools that change plans or videos or propose spending: Generate mode only. */
-    public const GENERATE_ONLY = ['create_plan', 'update_plan', 'propose_job', 'create_video', 'add_scenes'];
+    public const GENERATE_ONLY = ['create_plan', 'update_plan', 'propose_job', 'create_video', 'add_scenes', 'edit_video'];
 
     /**
      * The read-only data tools query_data may run — the names of
@@ -80,7 +81,7 @@ How a conversation works
 - Answer in short, friendly Markdown. Ask a question when the request is unclear. Never claim to have done something a tool did not confirm.
 
 Modes
-- ASK mode: discuss, read anything, and save to memory when asked. You cannot create or change plans or videos and you cannot propose jobs; if the person wants that, tell them to switch to Generate (the Ask | Generate switch at the top).
+- ASK mode: discuss, read anything, show storyboards and save to memory when asked. You cannot create or change plans or videos and you cannot propose jobs; if the person wants that, tell them to switch to Generate (the Ask | Generate switch at the top).
 - GENERATE mode: you may create and update plans, create videos and propose jobs. A job never starts by itself and you never spend money: propose_job prices the steps and stores the job; the person reviews the job card and clicks Go. After proposing, tell the person the total from the tool result and that it starts when they click Go. Never say a job is running or finished unless the [Context] shows it.
 
 Jobs (Generate mode)
@@ -96,15 +97,21 @@ Two kinds of figures
 Videos (Generate mode)
 - Follow the PLAYBOOK and the chosen STYLE: read the style with get_style before you plan the scenes.
 - Before a video, settle the platform (X or TikTok), the shape (9:16, 16:9 or 1:1) and the style — one ask_choices question at a time — unless the plan or the person's message already fixes it. Never ask what is already decided.
-- Then show the scene list in the chat (label, seconds, engine, Pixel or not, caption) and ask "Build it?" with ask_choices (Yes / Change something). Call create_video only after a yes.
+- Storyboard first: before create_video, or add_scenes of two or more scenes, ALWAYS call show_storyboard with the plan (each scene's length, engine, Pixel or not, what we see and WHY), then ask "Build it?" with ask_choices (Yes / Change something). Call create_video or add_scenes only after a yes. Give real insight per scene and overall: the hook in the first 3 seconds or less, the total length for the platform, how many scenes and why, why each engine, why Pixel is in a scene or not. Its prices are estimates; the prices you state after building come only from create_video's or add_scenes' answer.
 - Pixel is OFF by default: with_pixel true only where the style or the plan asks for the mascot (usually zero to two scenes).
-- Choose each clip scene's engine: seedance when the scene needs its own sound (dialogue, sound effects, music made for that shot — say the sound in the prompt), kling for silent shots that the music covers. Kling scenes are 5 or 10 seconds, Seedance 4 to 15.
+- Choose each clip scene's engine: seedance when the scene needs its own sound (dialogue, sound effects, music made for that shot — say the sound in the prompt), kling for silent shots that the music covers.
+- Scene length: seconds is the scene's length ON THE TIMELINE, any whole number. Clips 2 to 15 seconds (Kling at most 10), templates 2 to 6. The server makes the clip at a length the model can make and trims it: Kling makes 5 s (for up to 5) or 10 s (for 6 to 10), Seedance makes the length itself (at least 4). So a 3 s Kling scene is a 5 s clip trimmed to 3 s, and costs the 5 s.
 - Numbers, titles and the disclaimer go on template scenes (free, 2 to 6 seconds): one exact figure per stat or scoreboard card, from get_week_results. End with the disclaimer card when a percentage is cited. No numbers inside generated clips.
 - A video is at most 30 seconds in all. create_video proposes ONE job for all its clips (nothing is spent): tell the person the total and that the clips are made together when they click Go and land in the editor in order. add_scenes adds or replaces scenes of an existing video the same way.
 - A single clip asked for on its own still uses propose_job.
 
+The editor's chat (Generate mode for changes)
+- When the [Context] has editing_video, you are the chat inside that video's editor. Its scenes are listed there (scene_id, n, prompt, length: duration_ms is the length on the timeline, seconds what was generated), and focus says which scenes the person selected: act on THOSE ("this", "it" mean them); an empty focus means the whole video.
+- "Improve the visuals" (or any change to what a clip shows) = rewrite that scene's prompt, keeping its length, engine and Pixel unless the person asks otherwise, then add_scenes with replace_scene_id set to that scene (one call per scene) — that proposes a job card; the new clip is made when the person clicks Go. Never regenerate scenes that were not focused unless the person asks.
+- Text, length, order, captions, removing a scene, the music, the caption style and the pixel look change for free with edit_video. Prefer it over regenerating whenever the change is not what a clip shows.
+
 Buttons
-- ask_choices shows buttons in the chat and ENDS your turn; the person's pick arrives as their next message. Use it for short, closed questions (platform, shape, style, "Build it?"). At most one ask_choices per turn, and no other tool after it.
+- ask_choices shows buttons in the chat and ENDS your turn; the person's pick arrives as their next message. Use it for short, closed questions (platform, shape, style, "Build it?"). At most one ask_choices per turn, and no other tool after it (show_storyboard may come right before it, in the same step).
 
 Hard rules for everything meant to be posted (plans, hooks, scripts, captions, prompts) — they override anything else:
 1. Figures. The only performance figures you may use come from get_week_results, copied exactly as written there (same digits, same decimals, followed by %). Never calculate, round, add up, average, annualise or extrapolate a figure, and never invent one. If it says available is false, use no performance figure at all.
@@ -183,7 +190,7 @@ TXT;
             'kind' => ['type' => 'string', 'enum' => ['clip', 'template'], 'description' => 'clip: a Higgsfield clip (costs money). template: a free card drawn in the editor (title, stat, scoreboard, level up, disclaimer).'],
             'label' => self::str('A short name for the scene, at most 80 characters.'),
             'prompt' => self::str('clip: the shot — subject, action, camera move, light, no numbers or logos (3 to 1800 characters). template: "".'),
-            'seconds' => ['type' => 'integer', 'description' => 'kling: 5 or 10. seedance: 4 to 15. template: 2 to 6.'],
+            'seconds' => ['type' => 'integer', 'description' => 'The scene\'s length on the timeline. clip: 2 to 15 (Kling at most 10; Kling makes 5 s up to 5 and 10 s above, Seedance at least 4, trimmed to this length). template: 2 to 6.'],
             'engine' => ['type' => 'string', 'enum' => ['kling', 'seedance', 'none'], 'description' => 'clip: kling (silent, cheaper) or seedance (with sound); "none" uses the style\'s default. template: "none".'],
             'with_pixel' => ['type' => 'boolean', 'description' => 'The mascot appears in this clip. Off by default; only where the style or plan wants Pixel. template: false.'],
             'caption' => self::str('The on-screen caption over this scene, at most 6 words; "" for none.'),
@@ -295,6 +302,48 @@ TXT;
             ])),
             self::tool('list_videos', 'List the video projects, newest first, with how many scenes are ready.', self::object([
                 'limit' => ['type' => 'integer', 'description' => '1 to 20; 0 or 10 is a good default.'],
+            ])),
+            self::tool('show_storyboard', 'Show the person the PLAN of a video before anything is built: a card with each scene\'s length, engine, Pixel or not, what we see and why, and an estimated price per scene (worked out locally; nothing is made, saved or spent). Call it before create_video, or add_scenes of 2+ scenes, then ask "Build it?" with ask_choices. Both modes.', self::object([
+                'title' => self::str('The video\'s working title, at most 160 characters.'),
+                'video_id' => ['type' => 'integer', 'description' => 'The video the scenes are for, or 0 for a new video.'],
+                'platform' => ['type' => 'string', 'enum' => ['x', 'tiktok']],
+                'aspect' => ['type' => 'string', 'enum' => self::ASPECTS],
+                'style' => self::str('The style slug from the [Context], or "" for none.'),
+                'scenes' => [
+                    'type' => 'array',
+                    'description' => '1 to 6 scenes, in playing order; at most 30 seconds in all.',
+                    'items' => self::object([
+                        'kind' => ['type' => 'string', 'enum' => ['clip', 'template'], 'description' => 'clip: a Higgsfield clip (costs money). template: a free card.'],
+                        'label' => self::str('A short name for the scene, at most 80 characters.'),
+                        'seconds' => ['type' => 'integer', 'description' => 'The scene\'s length on the timeline: clip 2 to 15 (Kling at most 10; Kling makes 5 or 10 s and is trimmed), template 2 to 6.'],
+                        'engine' => ['type' => 'string', 'enum' => ['kling', 'seedance', 'none'], 'description' => 'clip: kling (silent, cheaper) or seedance (with sound); "none" uses the style\'s default. template: "none".'],
+                        'with_pixel' => ['type' => 'boolean', 'description' => 'The mascot appears in this clip. template: false.'],
+                        'shows' => self::str('What we see in this scene, at most 300 characters.'),
+                        'why' => self::str('The insight: why this length, this engine, Pixel or not, at most 300 characters.'),
+                    ]),
+                ],
+                'notes' => self::str('The overall insight (e.g. why this many scenes, the total length for the platform), at most 600 characters; "" for none.'),
+            ])),
+            self::tool('edit_video', 'GENERATE MODE ONLY. Free edits to a video in the editor (nothing is generated or spent): per scene its label, its length on the timeline, its place, a template card\'s text, the caption over it, or removing it; and the video\'s music, caption style and pixel look. Answers the updated video.', self::object([
+                'video_id' => ['type' => 'integer', 'description' => 'The video\'s id.'],
+                'scene_changes' => [
+                    'type' => 'array',
+                    'description' => 'One entry per scene to change, each scene once; [] for none.',
+                    'items' => self::object([
+                        'scene_id' => ['type' => 'integer', 'description' => 'The scene\'s id (scene_id in editing_video, or id in get_video).'],
+                        'label' => self::str('A new label, at most 80 characters; "" keeps it.'),
+                        'seconds' => ['type' => 'number', 'description' => 'The scene\'s new length on the timeline, in seconds; 0 keeps it. A clip at most the length it was generated (it is trimmed); a template card 2 to 6 whole seconds.'],
+                        'position' => ['type' => 'integer', 'description' => 'Its new place, from 0 (the first scene); -1 keeps it.'],
+                        'template_title' => self::str('template: a new card title (at most 80 characters); "" keeps it.'),
+                        'template_value' => self::str('template: a new big value, one exact figure from get_week_results (at most 40 characters); "" keeps it.'),
+                        'template_subtitle' => self::str('template: a new line under it (at most 160 characters); "" keeps it.'),
+                        'caption' => self::str('The caption over this scene: "-" keeps it, "" removes it, any other text replaces it (at most 6 words).'),
+                        'remove' => ['type' => 'boolean', 'description' => 'Take this scene off the video (refused while its clip is being made).'],
+                    ]),
+                ],
+                'music' => ['type' => 'string', 'enum' => ['keep', ...self::MUSIC], 'description' => '"keep", "none" (no music) or a built-in chiptune track.'],
+                'caption_style' => ['type' => 'string', 'enum' => ['keep', ...self::CAPTION_STYLES]],
+                'pixel_look' => ['type' => 'string', 'enum' => ['keep', 'on', 'off'], 'description' => 'The pixelate + scanlines filter.'],
             ])),
         ];
     }

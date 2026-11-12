@@ -15,9 +15,13 @@ namespace App\Services\Creatives;
  *    signatures included) rather than re-serialised from SDK objects. The
  *    stored blocks are sent back as decoded objects, which the SDK passes to
  *    the wire unchanged — the history is replayed byte for byte.
- *  - `outputConfig.effort` (medium by default); no `thinking` (always on for
- *    this model; effort is the control); no `toolChoice` (auto — forced tool
- *    use is a 400 on this model); no prefill; no temperature.
+ *  - `outputConfig.effort` (medium by default); `thinking` adaptive with
+ *    `display: summarized` (Creatives v2.1, 2026-11-12: thinking is always on
+ *    for this model and effort is the control; `display` only decides whether
+ *    the blocks carry readable summaries, which the chat shows as "How it's
+ *    thinking" — same billing). The blocks are still stored and replayed
+ *    exactly. No `toolChoice` (auto — forced tool use is a 400 on this
+ *    model); no prefill; no temperature.
  *  - `tools`: the agent's fixed list, identical on every call and in both
  *    modes (modes are enforced server-side, never by changing the tools).
  *  - `system`: one static text block marked cacheable (it caches the tools
@@ -71,6 +75,7 @@ class ClaudeAgent implements CreativeAgentModel
                 'model' => $model,
                 'cacheControl' => ['type' => 'ephemeral'],
                 'outputConfig' => ['effort' => $this->claude->effort()],
+                'thinking' => ['type' => 'adaptive', 'display' => 'summarized'],
                 'system' => [
                     ['type' => 'text', 'text' => $system, 'cacheControl' => ['type' => 'ephemeral']],
                 ],

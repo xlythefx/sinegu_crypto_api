@@ -52,8 +52,13 @@ class CreativesCheckAgentTools extends Command
                 'maxTokens' => 1200,
                 'model' => $model,
                 'messages' => [['role' => 'user', 'content' => 'Say OK.']],
+                // The same request shape ClaudeAgent::step sends (only the effort is
+                // lowered to keep the check cheap), so a parameter the API refuses
+                // shows up here and not in the team's chat.
+                'cacheControl' => ['type' => 'ephemeral'],
                 'outputConfig' => ['effort' => 'low'],
-                'system' => [['type' => 'text', 'text' => CreativeAgentPrompt::SYSTEM]],
+                'thinking' => ['type' => 'adaptive', 'display' => 'summarized'],
+                'system' => [['type' => 'text', 'text' => CreativeAgentPrompt::SYSTEM, 'cacheControl' => ['type' => 'ephemeral']]],
                 'tools' => $tools,
             ]);
         } catch (Throwable $e) {

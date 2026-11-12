@@ -524,7 +524,7 @@ class CreativesVideosTest extends EngineTestCase
         // Bad drafts: nothing is kept.
         $count = CreativeVideoScene::count();
         foreach ([
-            ['kind' => 'clip', 'label' => 'x', 'prompt' => 'A rocket', 'seconds' => 7, 'engine' => 'kling', 'with_character' => false, 'caption' => null, 'template' => null],
+            ['kind' => 'clip', 'label' => 'x', 'prompt' => 'A rocket', 'seconds' => 11, 'engine' => 'kling', 'with_character' => false, 'caption' => null, 'template' => null],
             ['kind' => 'clip', 'label' => 'x', 'prompt' => 'A rocket', 'seconds' => 16, 'engine' => 'seedance', 'with_character' => false, 'caption' => null, 'template' => null],
             ['kind' => 'clip', 'label' => 'x', 'prompt' => 'A', 'seconds' => 5, 'engine' => 'kling', 'with_character' => false, 'caption' => null, 'template' => null],
             ['kind' => 'clip', 'label' => 'x', 'prompt' => 'A rocket', 'seconds' => 5, 'engine' => 'sora', 'with_character' => false, 'caption' => null, 'template' => null],

@@ -50,7 +50,9 @@ use Throwable;
  *    ({@see CreativeAiPrompt::scrub()}); the Creatives budget is plain
  *    numbers.
  *  - propose_job, create_video and add_scenes never spend: they price and
- *    store; only Go starts anything.
+ *    store; only Go starts anything. show_storyboard prices LOCALLY (it
+ *    never calls Higgsfield) and stores nothing but its display row;
+ *    edit_video's changes are free (text, lengths, order, captions, music).
  */
 final class CreativeAgentTools
 {
@@ -115,6 +117,8 @@ final class CreativeAgentTools
                 'add_scenes' => $this->addScenes($input, $session),
                 'get_video' => $this->getVideo($input),
                 'list_videos' => $this->listVideos($input),
+                'show_storyboard' => $this->showStoryboard($input),
+                'edit_video' => $this->editVideo($input, $personName),
                 default => self::error($name, "There is no tool called {$name}.", 'Unknown tool'),
             };
         } catch (ValidationException $e) {
@@ -175,6 +179,11 @@ final class CreativeAgentTools
 
             case 'list_videos':
                 $input = self::dropNonPositive($input, ['limit']);
+                break;
+
+            case 'show_storyboard':
+                $input = self::dropNonPositive($input, ['video_id']);
+                $input = self::dropValues($input, ['style'], ['', 'none']);
                 break;
 
             case 'create_video':
@@ -874,6 +883,193 @@ final class CreativeAgentTools
     }
 
     /**
+     * show_storyboard (both modes, no money): the video's plan as a card —
+     * each scene's length on the timeline and the length it is generated,
+     * its engine, Pixel or not, what we see and why — priced LOCALLY with the
+     * steps create_video would propose ({@see CreativeVideos::estimateSceneUsd()};
+     * Higgsfield is never asked). Nothing is saved but the display row.
+     */
+    private function showStoryboard(array $input): array
+    {
+        $title = trim(is_string($input['title'] ?? null) ? $input['title'] : '');
+        if ($title === '' || mb_strlen($title) > 160) {
+            throw ValidationException::withMessages(['title' => 'The storyboard needs a title of at most 160 characters.']);
+        }
+        $videoId = isset($input['video_id']) ? (int) $input['video_id'] : null;
+        if ($videoId !== null && ! CreativeVideo::whereKey($videoId)->exists()) {
+            throw ValidationException::withMessages(['video_id' => "There is no video #{$videoId}; use 0 for a new video."]);
+        }
+        foreach (['platform' => CreativeVideo::PLATFORMS, 'aspect' => CreativeVideo::ASPECTS] as $field => $allowed) {
+            if (! in_array($input[$field] ?? null, $allowed, true)) {
+                throw ValidationException::withMessages([$field => "{$field} is one of: ".implode(', ', $allowed).'.']);
+            }
+        }
+        $style = null;
+        if (isset($input['style'])) {
+            $style = $this->styles->bySlug((string) $input['style']);
+            if ($style === null || ! $style->enabled) {
+                $valid = CreativeStyle::query()->where('enabled', true)->orderBy('sort')->pluck('slug')->all();
+                throw ValidationException::withMessages(['style' => 'There is no style "'.$input['style'].'". The styles are: '.implode(', ', $valid).'.']);
+            }
+        }
+        $notes = trim(is_string($input['notes'] ?? null) ? $input['notes'] : '');
+        if (mb_strlen($notes) > 600) {
+            throw ValidationException::withMessages(['notes' => 'The notes are at most 600 characters.']);
+        }
+
+        $raw = $input['scenes'] ?? null;
+        if (! is_array($raw) || ! array_is_list($raw) || $raw === [] || count($raw) > CreativeVideos::MAX_DRAFTS) {
+            throw ValidationException::withMessages(['scenes' => 'Give 1 to '.CreativeVideos::MAX_DRAFTS.' scenes.']);
+        }
+        $scenes = [];
+        $totalSeconds = 0;
+        $totalUsd = 0.0;
+        foreach ($raw as $i => $scene) {
+            $n = $i + 1;
+            $scene = is_array($scene) ? $scene : [];
+            $kind = $scene['kind'] ?? null;
+            if (! in_array($kind, CreativeVideoScene::KINDS, true)) {
+                throw ValidationException::withMessages(["scenes.{$i}.kind" => "Scene {$n}: kind is clip or template."]);
+            }
+            $label = trim(is_string($scene['label'] ?? null) ? $scene['label'] : '');
+            if (mb_strlen($label) > 80) {
+                throw ValidationException::withMessages(["scenes.{$i}.label" => "Scene {$n}: the label is at most 80 characters."]);
+            }
+            $texts = [];
+            foreach (['shows', 'why'] as $field) {
+                $texts[$field] = trim(is_string($scene[$field] ?? null) ? $scene[$field] : '');
+                if (mb_strlen($texts[$field]) > 300) {
+                    throw ValidationException::withMessages(["scenes.{$i}.{$field}" => "Scene {$n}: {$field} is at most 300 characters."]);
+                }
+            }
+            $seconds = filter_var($scene['seconds'] ?? null, FILTER_VALIDATE_INT);
+            $seconds = $seconds === false ? 0 : (int) $seconds;
+
+            $engine = null;
+            $pixel = false;
+            if ($kind === CreativeVideoScene::CLIP) {
+                $engine = $scene['engine'] ?? null;
+                if ($engine === null || $engine === '' || $engine === 'none') {
+                    $engine = $style?->default_engine ?? CreativeVideoScene::KLING;
+                }
+                if (! in_array($engine, CreativeVideoScene::ENGINES, true)) {
+                    throw ValidationException::withMessages(["scenes.{$i}.engine" => "Scene {$n}: the engine is kling or seedance."]);
+                }
+                $pixel = (bool) ($scene['with_pixel'] ?? false);
+            }
+            CreativeVideos::assertSeconds($engine ?? 'template', $seconds, "scenes.{$i}.seconds", $n);
+            $generated = $engine !== null ? CreativeVideos::generatedSeconds($engine, $seconds) : $seconds;
+            $usd = $this->videos->estimateSceneUsd($kind, $engine, $pixel, $generated);
+
+            $totalSeconds += $seconds;
+            $totalUsd += $usd;
+            $scenes[] = [
+                'n' => $n,
+                'kind' => $kind,
+                'label' => $label !== '' ? $label : 'Scene '.$n,
+                'seconds' => $seconds,
+                'generated_seconds' => $generated,
+                'engine' => $engine ?? 'none',
+                'engine_label' => $engine !== null ? CreativeVideos::ENGINE_LABELS[$engine] : null,
+                'with_pixel' => $pixel,
+                'shows' => $texts['shows'],
+                'why' => $texts['why'],
+                'est_usd' => $usd,
+            ];
+        }
+        if ($totalSeconds > CreativeVideos::STORYBOARD_MAX_SECONDS) {
+            throw ValidationException::withMessages(['scenes' => "These scenes add up to {$totalSeconds} seconds; a video is at most ".CreativeVideos::STORYBOARD_MAX_SECONDS.' seconds. Shorten or drop a scene.']);
+        }
+
+        $storyboard = [
+            'title' => $title,
+            'video_id' => $videoId,
+            'platform' => $input['platform'],
+            'aspect' => $input['aspect'],
+            'style' => $style?->slug,
+            'total_seconds' => $totalSeconds,
+            'est_total_usd' => round($totalUsd, 4),
+            'notes' => $notes,
+            'scenes' => $scenes,
+        ];
+
+        return [
+            'content' => self::json([
+                'storyboard' => $storyboard,
+                'instruction' => 'The storyboard is on the person\'s screen; nothing was made, saved or spent. Now ask "Build it?" with ask_choices (Yes / Change something). These prices are estimates: once built, state the prices create_video or add_scenes answer exactly.',
+            ]),
+            'is_error' => false,
+            // The card IS this call's line on the page.
+            'display' => [['kind' => 'storyboard', 'storyboard' => $storyboard]],
+            'job' => null,
+        ];
+    }
+
+    /**
+     * edit_video (Generate mode, free): the person's video changed by chat —
+     * labels, lengths (trims), order, card text, captions, removals, music,
+     * caption style, pixel look — through {@see CreativeVideos::edit()} (the
+     * editor's own checks, TOO_LONG included; all or nothing, except a
+     * removal refused because its clip is being made). Every new text a post
+     * shows passes the privacy wall first.
+     */
+    private function editVideo(array $input, ?string $personName): array
+    {
+        $video = CreativeVideo::find((int) ($input['video_id'] ?? 0));
+        if ($video === null) {
+            return self::error('edit_video', 'There is no video #'.(int) ($input['video_id'] ?? 0).'.', 'Could not edit the video');
+        }
+        $changes = $input['scene_changes'] ?? [];
+        if (! is_array($changes) || ! array_is_list($changes)) {
+            throw ValidationException::withMessages(['scene_changes' => 'scene_changes is a list of {scene_id, …}; [] for none.']);
+        }
+
+        $texts = [];
+        foreach ($changes as $i => $change) {
+            if (! is_array($change)) {
+                continue;
+            }
+            $n = $i + 1;
+            foreach (['label' => 'label', 'template_title' => 'card title', 'template_value' => 'card value', 'template_subtitle' => 'card subtitle'] as $field => $what) {
+                if (is_string($change[$field] ?? null) && trim($change[$field]) !== '') {
+                    $texts["change {$n} {$what}"] = $change[$field];
+                }
+            }
+            if (is_string($change['caption'] ?? null) && ! in_array(trim($change['caption']), ['-', ''], true)) {
+                $texts["change {$n} caption"] = $change['caption'];
+            }
+        }
+        $this->guardPost($texts);
+
+        $made = $this->videos->edit($video, $changes, [
+            'music' => is_string($input['music'] ?? null) ? $input['music'] : 'keep',
+            'caption_style' => is_string($input['caption_style'] ?? null) ? $input['caption_style'] : 'keep',
+            'pixel_look' => is_string($input['pixel_look'] ?? null) ? $input['pixel_look'] : 'keep',
+        ], $personName);
+
+        if ($made['changed'] === 0) {
+            return self::error('edit_video', 'Nothing was changed: '.implode(' ', array_map(fn ($r) => "Scene {$r['scene_id']}: {$r['reason']}", $made['refused'])), 'Could not edit the video');
+        }
+
+        $answer = ['video' => $this->videoForModel($made['video']->fresh())];
+        if ($made['refused'] !== []) {
+            $answer['refused'] = $made['refused'];
+        }
+        $answer['instruction'] = 'Saved in the editor; nothing was generated or spent. Tell the person what changed'.($made['refused'] !== [] ? ', and which removal was refused and why.' : '.');
+
+        return [
+            'content' => self::json($answer),
+            'is_error' => false,
+            'display' => [[
+                'kind' => 'activity',
+                'activity' => ['tool' => 'edit_video', 'label' => 'Edited the video', 'ok' => true],
+                'video_id' => (int) $video->id,
+            ]],
+            'job' => null,
+        ];
+    }
+
+    /**
      * The scenes checked as SceneDrafts, and the post guard over every text a
      * video shows (its title, the prompts, labels, captions and card text).
      *
@@ -1057,6 +1253,8 @@ final class CreativeAgentTools
             'get_style' => 'open the style',
             'get_video' => 'open the video',
             'list_videos' => 'list the videos',
+            'show_storyboard' => 'show the storyboard',
+            'edit_video' => 'edit the video',
             'remember' => 'save to memory',
             'forget' => 'remove from memory',
             'update_memory' => 'update memory',

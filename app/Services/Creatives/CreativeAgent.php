@@ -6,6 +6,8 @@ use App\Models\CreativeAgentJob;
 use App\Models\CreativeAgentMessage;
 use App\Models\CreativeAgentSession;
 use App\Models\CreativeAiCall;
+use App\Models\CreativeVideo;
+use App\Models\CreativeVideoScene;
 use App\Models\UserCredential;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Cache;
@@ -95,16 +97,27 @@ final class CreativeAgent
      * changed cannot continue (its replayed history would meet a different
      * tools array), so a fresh chat opens and is flagged
      * (`replacedForNewTools`) for the snapshot's one-time `new_tools` notice.
+     *
+     * `$videoId` (v2.1): the video EDITOR's chat — the caller's newest live
+     * chat bound to that video, else a new one bound to it (NOT_FOUND when
+     * the video does not exist). Without it, the workspace chat: a chat bound
+     * to a video is never picked as "the newest" there.
      */
-    public function resolveSession(UserCredential $user, ?string $id): CreativeAgentSession
+    public function resolveSession(UserCredential $user, ?string $id, ?int $videoId = null): CreativeAgentSession
     {
+        if ($videoId !== null && ! CreativeVideo::whereKey($videoId)->exists()) {
+            throw CreativeException::notFound('Video not found.');
+        }
+
         $outdated = false;
         if ($id !== null && $id !== '') {
             $named = CreativeAgentSession::find($id);
             if ($named !== null && $named->uni_id !== $user->uni_id) {
                 throw CreativeException::notFound('Chat not found.');
             }
-            if ($named !== null && $named->isLive()) {
+            // An editor chat answers for its own video only.
+            $sameScope = $named !== null && ($videoId === null || $named->video_id === $videoId);
+            if ($named !== null && $sameScope && $named->isLive()) {
                 if ($named->hasCurrentTools()) {
                     return $named;
                 }
@@ -115,6 +128,7 @@ final class CreativeAgent
         $live = CreativeAgentSession::query()
             ->where('uni_id', $user->uni_id)
             ->where('updated_at', '>', now()->subDays(CreativeAgentSession::MAX_AGE_DAYS)->toDateTimeString());
+        $videoId === null ? $live->whereNull('video_id') : $live->where('video_id', $videoId);
         $newest = (clone $live)
             ->where('tools_version', '>=', CreativeAgentPrompt::TOOLS_VERSION)
             ->orderByDesc('updated_at')->orderByDesc('created_at')
@@ -124,20 +138,62 @@ final class CreativeAgent
         }
 
         // Only chats from before the new tools are left (or none at all).
-        $fresh = $this->newSession($user);
+        $fresh = $this->newSession($user, $videoId);
         $fresh->replacedForNewTools = $outdated || (clone $live)->exists();
 
         return $fresh;
     }
 
-    public function newSession(UserCredential $user): CreativeAgentSession
+    /** A new chat; with `$videoId`, that video's editor chat (NOT_FOUND when it does not exist). */
+    public function newSession(UserCredential $user, ?int $videoId = null): CreativeAgentSession
     {
+        if ($videoId !== null && ! CreativeVideo::whereKey($videoId)->exists()) {
+            throw CreativeException::notFound('Video not found.');
+        }
+
         return CreativeAgentSession::create([
             'uni_id' => $user->uni_id,
             'user_name' => $user->name !== null ? mb_substr($user->name, 0, 120) : null,
+            'video_id' => $videoId,
             'last_mode' => CreativeAgentSession::ASK,
             'tools_version' => CreativeAgentPrompt::TOOLS_VERSION,
         ]);
+    }
+
+    /** The `session` object of every chat payload: {id, mode, video_id}. */
+    public static function sessionShape(CreativeAgentSession $session): array
+    {
+        return [
+            'id' => $session->id,
+            'mode' => $session->last_mode,
+            'video_id' => $session->video_id !== null ? (int) $session->video_id : null,
+        ];
+    }
+
+    /**
+     * The scene ids a person's message is about (the editor's selection):
+     * each must be a scene of the chat's video, else 422 — never stored, only
+     * put in that message's [Context].
+     *
+     * @param  list<mixed>  $ids
+     * @return list<int>
+     */
+    public function focusSceneIds(CreativeAgentSession $session, array $ids): array
+    {
+        $ids = array_values(array_unique(array_map('intval', $ids)));
+        if ($ids === []) {
+            return [];
+        }
+        if ($session->video_id === null) {
+            throw ValidationException::withMessages(['focus_scene_ids' => 'Only the video editor\'s chat can focus scenes.']);
+        }
+        $known = CreativeVideoScene::query()->where('video_id', $session->video_id)->whereIn('id', $ids)->pluck('id')->map(fn ($id) => (int) $id)->all();
+        $foreign = array_values(array_diff($ids, $known));
+        if ($foreign !== []) {
+            throw ValidationException::withMessages(['focus_scene_ids' => 'Not a scene of this video: '.implode(', ', $foreign).'.']);
+        }
+
+        return $ids;
     }
 
     /** The caller's OWN live chat, for a turn. */
@@ -167,7 +223,7 @@ final class CreativeAgent
         $this->jobs->refreshSession($session);
 
         $snapshot = [
-            'session' => ['id' => $session->id, 'mode' => $session->last_mode],
+            'session' => self::sessionShape($session),
             'messages' => $this->presenter->messages($session->messages()->get()),
             'jobs' => $this->presenter->jobs($session->jobs()->get()),
             'budget' => $this->budget->summary(),
@@ -186,9 +242,13 @@ final class CreativeAgent
      * controller adds the budget); refusals before or around the model call are
      * CreativeExceptions in the house shape.
      *
+     * `$focus`: the editor's selected scene ids (checked by
+     * {@see focusSceneIds()}), told to the model in this message's [Context].
+     *
+     * @param  list<int>  $focus
      * @return array{status: string, messages: list<array<string, mixed>>, jobs: list<array<string, mixed>>, cost_usd: float}
      */
-    public function turn(CreativeAgentSession $session, UserCredential $user, string $mode, ?string $text): array
+    public function turn(CreativeAgentSession $session, UserCredential $user, string $mode, ?string $text, array $focus = []): array
     {
         if (! $this->model->configured()) {
             throw new CreativeException('AI_NOT_CONFIGURED', 'Claude isn\'t connected on this server yet.', 503);
@@ -200,13 +260,13 @@ final class CreativeAgent
         }
 
         try {
-            return $this->step($session, $user, $mode, $text);
+            return $this->step($session, $user, $mode, $text, $focus);
         } finally {
             $lock->release();
         }
     }
 
-    private function step(CreativeAgentSession $session, UserCredential $user, string $mode, ?string $text): array
+    private function step(CreativeAgentSession $session, UserCredential $user, string $mode, ?string $text, array $focus): array
     {
         $rows = $session->messages()->get();
         $last = $rows->last(fn (CreativeAgentMessage $m) => $m->role !== CreativeAgentMessage::NOTICE);
@@ -244,7 +304,7 @@ final class CreativeAgent
         $personContent = null;
         $context = null;
         if ($text !== null) {
-            $context = $this->context->build($session, $mode);
+            $context = $this->context->build($session, $mode, focus: $focus);
             $personContent = [
                 ['type' => 'text', 'text' => $context['text']],
                 ['type' => 'text', 'text' => CreativeAiPrompt::scrub($text)],
