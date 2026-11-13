@@ -69,7 +69,7 @@ final class GuideTools implements Toolset
                     .'or a liquidation). Recorded, but not a signal.',
                 'kill switch' => 'Per coin: after N losses in a row on the master account, the coin is switched off for everyone '
                     .'until an admin turns it back on.',
-                'streak sizing' => 'Per coin: after N losses (or wins) in a row on an account, its next entry uses a different size.',
+                'streak sizing' => 'Per coin: after N losses (or wins) in a row, the next entry uses a different size. Since 2026-11-13 customers follow the run of the MASTER on the coin, not their own; testers and venues with no real-money master count their own.',
                 'deposit minimum' => 'An account needs at least 1,000 USDT deposited (net of withdrawals) before the bot opens trades.',
                 'API key problems' => 'A key the exchange refuses ("key refused", usually our server IP not allowed or futures '
                     .'permission missing) stops that account trading. After 3 days it is disconnected automatically.',

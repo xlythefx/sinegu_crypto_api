@@ -429,7 +429,8 @@ class AssetController extends Controller
 
     /**
      * GET /api/admin/assets/{asset}/streaks — "right now": how many of the
-     * accounts the engine trades on this asset's venue are on each run.
+     * accounts the engine trades on this asset's venue are on each run — the
+     * run they SIZE on, so customers sit on the master's (`master_run`).
      * `run` is signed (-3 = three losses in a row, +2 = two wins, 0 = no
      * close yet) and capped at depth — the deepest configured step of either
      * kind, 10 with no ladder — so ±depth reads "this many or more". Only
@@ -443,7 +444,7 @@ class AssetController extends Controller
         if ($exchange === null) {
             return response()->json([
                 'success' => true, 'exchange' => null, 'symbol' => $asset->ticker,
-                'depth' => $depth, 'accounts' => 0, 'runs' => [],
+                'depth' => $depth, 'master_run' => null, 'accounts' => 0, 'runs' => [],
             ]);
         }
 
@@ -458,7 +459,8 @@ class AssetController extends Controller
             ->pluck("{$t}.api_key")
             ->all();
 
-        $runs = $this->streakSizing->runs($exchange, $asset->ticker, $depth, $apiKeys);
+        // The run each account SIZES on — customers follow the master's.
+        $runs = $this->streakSizing->followedRuns($exchange, $asset->ticker, $depth, $apiKeys);
         $buckets = [];
         foreach ($apiKeys as $key) {
             $run = $runs[$key] ?? 0;
@@ -471,6 +473,9 @@ class AssetController extends Controller
             'exchange' => $exchange,
             'symbol' => $asset->ticker,
             'depth' => $depth,
+            // The master's run that customers follow; null = no real-money
+            // master on this venue, so every account is on its own run.
+            'master_run' => $this->streakSizing->masterRun($exchange, $asset->ticker, $depth),
             'accounts' => count($apiKeys),
             'runs' => collect($buckets)
                 ->map(fn (int $n, int $run) => ['run' => $run, 'accounts' => $n])

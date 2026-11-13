@@ -406,4 +406,101 @@ class StreakSizingTest extends PaymentTestCase
                 ['run' => 1, 'accounts' => 1],
             ]);
     }
+
+    // ---- customers follow the master (owner + Dima, 2026-11-13) -------------
+
+    /** The 12 Nov SANTOS case: the master won, a customer's worse fill made a fee-sized loss. */
+    public function test_customers_size_on_the_masters_run_not_their_own(): void
+    {
+        $this->makeAccount($this->makeUser(['type' => 'master']), ['api_key' => 'master']);
+        $this->makeAccount($this->makeUser(), ['api_key' => 'customer']);
+        $this->makeAccount($this->makeUser(['type' => 'tester']), ['api_key' => 'tester', 'demo' => 1]);
+
+        $this->close('master', 6.82, 10);
+        $this->close('master', 10.14, 60);
+        $this->close('customer', -0.28, 10);
+        $this->close('customer', 0.49, 60);
+        $this->close('tester', -0.13, 10);
+        $this->close('loose', -1, 10);   // no account row: nobody's customer, keeps its own
+
+        $runs = $this->runs();
+        $this->assertSame(2, $runs['master']);
+        $this->assertSame(2, $runs['customer'], 'a customer follows the master, not its own loss');
+        $this->assertSame(-1, $runs['tester'], 'a tester trades another feed and keeps its own run');
+        $this->assertSame(-1, $runs['loose']);
+    }
+
+    public function test_a_master_losing_run_cuts_every_customer_even_one_that_won(): void
+    {
+        $this->makeAccount($this->makeUser(['type' => 'master']), ['api_key' => 'master']);
+        $this->makeAccount($this->makeUser(), ['api_key' => 'customer']);
+        $this->makeAccount($this->makeUser(), ['api_key' => 'new-customer']);   // no close of its own yet
+
+        foreach (range(1, 3) as $i) {
+            $this->close('master', -5, $i * 10);
+        }
+        $this->close('customer', 2, 10);
+
+        $runs = $this->runs();
+        $this->assertSame(-3, $runs['customer']);
+        $this->assertSame(-3, $runs['new-customer']);
+    }
+
+    public function test_a_master_with_no_close_on_the_coin_puts_customers_on_base_size(): void
+    {
+        $this->makeAccount($this->makeUser(['type' => 'master']), ['api_key' => 'master']);
+        $this->makeAccount($this->makeUser(), ['api_key' => 'customer']);
+        foreach (range(1, 3) as $i) {
+            $this->close('customer', -1, $i * 10);
+        }
+        $this->close('master', -9, 10, ['symbol' => 'BTCUSDT']);   // another coin never counts
+
+        $this->assertArrayNotHasKey('customer', $this->runs());
+    }
+
+    public function test_the_masters_run_skips_outside_closes_sandbox_and_pending_pnl(): void
+    {
+        $this->makeAccount($this->makeUser(['type' => 'master']), ['api_key' => 'master']);
+        $this->makeAccount($this->makeUser(), ['api_key' => 'customer']);
+        $this->close('master', 50, 5, ['close_source' => 'outside']);
+        $this->close('master', 50, 6, ['is_sandbox' => 1]);
+        $this->close('master', null, 7);
+        $this->close('master', -3, 10);
+        $this->close('master', 4, 20);
+
+        $this->assertSame(-1, $this->runs()['customer']);
+    }
+
+    public function test_without_a_real_money_master_on_the_venue_everyone_keeps_their_own_run(): void
+    {
+        // Bybit today: the master's account there is DEMO, so nobody to follow.
+        $this->makeAccount($this->makeUser(['type' => 'master']), ['api_key' => 'master-demo', 'demo' => 1], 'bybit');
+        $this->makeAccount($this->makeUser(), ['api_key' => 'bybit-customer'], 'bybit');
+        $this->close('master-demo', 5, 10, [], 'bybit_pastpositions');
+        $this->close('bybit-customer', -1, 10, [], 'bybit_pastpositions');
+        $this->close('bybit-customer', -1, 20, [], 'bybit_pastpositions');
+
+        // A real master on ANOTHER venue does not reach across.
+        $this->makeAccount($this->makeUser(['type' => 'master']), ['api_key' => 'binance-master']);
+        $this->close('binance-master', 5, 10);
+
+        $this->assertSame(-2, $this->runs(exchange: 'bybit')['bybit-customer']);
+    }
+
+    public function test_right_now_shows_customers_on_the_masters_run(): void
+    {
+        $asset = $this->makeAsset(['streak_sizing_enabled' => true]);
+        $this->step($asset, 'loss', 1, 25);
+        $this->makeAccount($this->makeUser(['type' => 'master']), ['api_key' => 'master']);
+        $this->makeAccount($this->makeUser(), ['api_key' => 'c1']);
+        $this->makeAccount($this->makeUser(), ['api_key' => 'c2']);
+        $this->close('master', 3, 10);
+        $this->close('c1', -1, 10);
+
+        $this->withHeaders($this->adminHeaders())
+            ->getJson("/api/admin/assets/{$asset->asset_id}/streaks")
+            ->assertOk()
+            ->assertJsonPath('master_run', 1)
+            ->assertJsonPath('runs', [['run' => 1, 'accounts' => 3]]);
+    }
 }

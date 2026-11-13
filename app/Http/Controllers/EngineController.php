@@ -198,12 +198,13 @@ class EngineController extends Controller
     }
 
     /**
-     * GET /api/engine/{exchange}/streaks?symbol=&depth= — every account's
-     * current run on one coin, in one read, for the fan-out (the same batching
-     * as positions/check). `streaks` maps api_key → SIGNED run: -3 = three
-     * losses in a row, +2 = two wins, length capped at depth. An account absent
-     * from it has no known close on the coin and trades base size. Always a
-     * JSON object, never [].
+     * GET /api/engine/{exchange}/streaks?symbol=&depth= — the run every account
+     * SIZES on for one coin, in one read, for the fan-out (the same batching
+     * as positions/check). Customers' and the master's entries carry the
+     * master's run (StreakSizing::followedRuns). `streaks` maps api_key →
+     * SIGNED run: -3 = three losses in a row, +2 = two wins, length capped at
+     * depth. An account absent from it is on no run and trades base size.
+     * Always a JSON object, never [].
      */
     public function streaks(string $exchange, Request $request, StreakSizing $streakSizing): JsonResponse
     {
@@ -221,7 +222,12 @@ class EngineController extends Controller
             'success' => true,
             'symbol' => $data['symbol'],
             'depth' => $depth,
-            'streaks' => (object) $streakSizing->runs($exchange, $data['symbol'], $depth),
+            // Customers and the master size on the MASTER's run (2026-11-13,
+            // StreakSizing::followedRuns); testers and other staff on their own.
+            'streaks' => (object) $streakSizing->followedRuns($exchange, $data['symbol'], $depth),
+            // The master's own run, or null with no real-money master here —
+            // informational; the engine reads `streaks` only.
+            'master_run' => $streakSizing->masterRun($exchange, $data['symbol'], $depth),
         ]);
     }
 
