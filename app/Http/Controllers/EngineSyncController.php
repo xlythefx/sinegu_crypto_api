@@ -32,6 +32,15 @@ class EngineSyncController extends Controller
     use GuardsEngineExchange;
 
     /**
+     * The open-position writes run once more when MySQL picks them as a
+     * deadlock victim (Laravel re-runs the whole transaction on 1213/40001
+     * only). The poller and a fill's write-through touch the same rows at
+     * the same second — 13 Nov 2026 03:30 UTC answered the engine a 500 for
+     * one RENDERUSDT fill. Both writes are idempotent, so a re-run is safe.
+     */
+    private const DEADLOCK_ATTEMPTS = 2;
+
+    /**
      * POST /api/engine/{exchange}/positions/sync — full-replace open positions.
      *
      * Payload: {accounts: [{api_key, uni_id, positions: [{symbol, position_side,
@@ -104,15 +113,22 @@ class EngineSyncController extends Controller
                 $rows[] = $row;
             }
 
-            DB::transaction(function () use ($table, $account, $rows, &$deleted, &$inserted) {
-                $deleted += DB::table($table)
+            // Two attempts: a fill's write-through (upsertPosition) can deadlock
+            // with this replace on the same account's rows, and MySQL then rolls
+            // the loser back whole. Re-running the snapshot is harmless. The
+            // counters are only added after the commit, so a retry never counts twice.
+            [$gone, $added] = DB::transaction(function () use ($table, $account, $rows) {
+                $gone = DB::table($table)
                     ->where('api_key', $account['api_key'])
                     ->delete();
                 if ($rows) {
                     DB::table($table)->insert($rows);
-                    $inserted += count($rows);
                 }
-            });
+
+                return [$gone, count($rows)];
+            }, self::DEADLOCK_ATTEMPTS);
+            $deleted += $gone;
+            $inserted += $added;
         }
 
         // A size change waiting for a position that this snapshot shows closed
@@ -194,7 +210,7 @@ class EngineSyncController extends Controller
             ]);
 
             return 'inserted';
-        });
+        }, self::DEADLOCK_ATTEMPTS);
 
         // An exit's write-through: the position this deleted may be the one a
         // waiting size change was waiting for. Never throws.
