@@ -13,6 +13,15 @@ return Application::configure(basePath: dirname(__DIR__))
         health: '/up',
     )
     ->withMiddleware(function (Middleware $middleware): void {
+        // Laravel's default sends a guest to route('login'), which this API
+        // does not have — so a guest without `Accept: application/json` (curl,
+        // a probe, a script) got a 500 "Route [login] not defined" instead of
+        // a 401. No redirect on /api/* means the JSON 401 below; anything else
+        // goes to the SPA's sign-in page.
+        $middleware->redirectGuestsTo(
+            fn (Request $request) => $request->is('api/*') ? null : '/auth',
+        );
+
         $middleware->alias([
             'admin' => \App\Http\Middleware\EnsureAdmin::class,
             'staff' => \App\Http\Middleware\EnsureStaff::class,
