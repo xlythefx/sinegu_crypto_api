@@ -38,6 +38,7 @@ class AdminSignupInfoTest extends EngineTestCase
             'password' => 'correct-horse-battery',
             'password_confirmation' => 'correct-horse-battery',
             'terms' => true,
+            'whatsapp' => '+66812345678',
             // Ticked in a different order than the form shows them.
             'heard_from' => ['other', 'google', 'discord'],
             'heard_from_other' => 'A podcast',
@@ -77,6 +78,7 @@ class AdminSignupInfoTest extends EngineTestCase
             ->assertJsonPath('signup.contacts', [
                 'telegram' => 'Sam_Signup',
                 'discord' => 'sam.signup',
+                'whatsapp' => '+66812345678',
                 'discord_linked' => null,
             ])
             ->assertJsonPath('signup.first.event', 'register')
@@ -140,7 +142,7 @@ class AdminSignupInfoTest extends EngineTestCase
 
     public function test_a_user_from_before_the_feature_reads_as_empty(): void
     {
-        $old = $this->makeUser(['created_at' => '2026-08-01 10:00:00']);
+        $old = $this->makeUser(['created_at' => '2026-08-01 10:00:00'], withContacts: false);
         $admin = $this->makeUser(['type' => 'admin']);
 
         $this->getJson("/api/admin/users/{$old}/signup-info", $this->headers($admin))
@@ -151,7 +153,7 @@ class AdminSignupInfoTest extends EngineTestCase
                     'registered_at' => '2026-08-01T10:00:00.000000Z',
                     'method' => null,
                     'sources' => [],
-                    'contacts' => ['telegram' => null, 'discord' => null, 'discord_linked' => null],
+                    'contacts' => ['telegram' => null, 'discord' => null, 'whatsapp' => null, 'discord_linked' => null],
                     'first' => null,
                 ],
                 'events' => [],

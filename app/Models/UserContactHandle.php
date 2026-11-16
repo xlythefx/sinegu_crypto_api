@@ -5,8 +5,8 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Model;
 
 /**
- * A user's optional Telegram / Discord usernames, typed by them (unverified)
- * and editable in Settings. At most one row per user; no row = both unset.
+ * A user's Telegram / Discord usernames and WhatsApp number, typed by them (unverified)
+ * and editable in Settings. At most one row per user; no row = all unset.
  * Written only through App\Services\Signup\ContactHandles, which normalises
  * the values.
  */
@@ -20,5 +20,5 @@ class UserContactHandle extends Model
 
     protected $keyType = 'string';
 
-    protected $fillable = ['uni_id', 'telegram', 'discord'];
+    protected $fillable = ['uni_id', 'telegram', 'discord', 'whatsapp'];
 }

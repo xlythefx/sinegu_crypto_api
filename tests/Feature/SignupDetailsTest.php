@@ -32,6 +32,8 @@ class SignupDetailsTest extends EngineTestCase
             'password' => 'correct-horse-battery',
             'password_confirmation' => 'correct-horse-battery',
             'terms' => true,
+            'telegram' => 'pixel_trader',
+            'whatsapp' => '+66812345678',
         ], $overrides);
     }
 
@@ -135,13 +137,43 @@ class SignupDetailsTest extends EngineTestCase
         }
     }
 
-    public function test_no_handles_row_without_handles(): void
+    /** Required since 2026-11-16: no account is created without both. */
+    public function test_telegram_and_whatsapp_are_required(): void
     {
-        $this->register(['email' => 'none@test.local'])->assertCreated();
-        $this->register(['email' => 'blank@test.local', 'telegram' => '', 'discord' => null])->assertCreated();
-        $this->register(['email' => 'at-only@test.local', 'telegram' => '@', 'discord' => '  @ '])->assertCreated();
+        $base = $this->payload();
+        unset($base['telegram'], $base['whatsapp']);
+        $this->withServerVariables(['REMOTE_ADDR' => '203.0.113.9']);
 
+        $this->postJson('/api/auth/register', $base)
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors([
+                'telegram' => ContactHandles::TELEGRAM_REQUIRED,
+                'whatsapp' => ContactHandles::WHATSAPP_REQUIRED,
+            ]);
+        $this->register(['email' => 'blank@test.local', 'telegram' => '', 'whatsapp' => '  '])
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors(['telegram', 'whatsapp']);
+        $this->register(['email' => 'at-only@test.local', 'telegram' => '@'])
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors(['telegram' => ContactHandles::TELEGRAM_REQUIRED]);
+        $this->register(['email' => 'local@test.local', 'whatsapp' => '081 234 5678'])
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors(['whatsapp' => ContactHandles::WHATSAPP_MESSAGE]);
+
+        $this->assertSame(0, DB::table('user_credentials')->count());
         $this->assertSame(0, DB::table('user_contact_handles')->count());
+    }
+
+    public function test_the_whatsapp_number_is_stored_in_e164_and_discord_stays_optional(): void
+    {
+        $this->register(['email' => 'wa@test.local', 'whatsapp' => '+63 917 123 4567'])->assertCreated();
+
+        $this->assertDatabaseHas('user_contact_handles', [
+            'uni_id' => $this->uniIdOf('wa@test.local'),
+            'telegram' => 'pixel_trader',
+            'whatsapp' => '+639171234567',
+            'discord' => null,
+        ]);
     }
 
     public function test_one_handle_alone_is_stored(): void

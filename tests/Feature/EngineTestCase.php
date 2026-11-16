@@ -32,7 +32,13 @@ abstract class EngineTestCase extends TestCase
     }
 
     /** Insert a user_credentials row; returns its uni_id. */
-    protected function makeUser(array $overrides = []): string
+    /**
+     * `$withContacts`: the Telegram + WhatsApp every sign-up gives since
+     * 2026-11-16, without which a customer may not connect an exchange
+     * (ContactHandles::connectLocked). On by default, like a real sign-up;
+     * a test about a user who has not given them passes false.
+     */
+    protected function makeUser(array $overrides = [], bool $withContacts = true): string
     {
         $uniId = (string) Str::uuid();
 
@@ -49,6 +55,16 @@ abstract class EngineTestCase extends TestCase
             'created_at' => now(),
             'updated_at' => now(),
         ], $overrides));
+
+        if ($withContacts) {
+            DB::table('user_contact_handles')->insert([
+                'uni_id' => $uniId,
+                'telegram' => 'test_user_tg',
+                'whatsapp' => '+66812345678',
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+        }
 
         return $uniId;
     }

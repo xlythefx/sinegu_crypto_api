@@ -36,6 +36,8 @@ class EmailVerificationTest extends DiscordTestCase
             'password' => 'super-secret-1',
             'password_confirmation' => 'super-secret-1',
             'terms' => true,
+            'telegram' => 'pixel_trader',
+            'whatsapp' => '+66812345678',
         ])->assertCreated();
 
         return [$res->json('user.uni_id'), ['Authorization' => 'Bearer '.$res->json('token')]];
@@ -61,6 +63,8 @@ class EmailVerificationTest extends DiscordTestCase
             'password' => 'super-secret-1',
             'password_confirmation' => 'super-secret-1',
             'terms' => true,
+            'telegram' => 'pixel_trader',
+            'whatsapp' => '+66812345678',
         ])
             ->assertCreated()
             ->assertJsonPath('user.email_verified', false);
@@ -278,7 +282,7 @@ class EmailVerificationTest extends DiscordTestCase
     {
         $signupToken = $this->oauthCallback()->json('signup_token');
 
-        $this->postJson('/api/auth/discord/complete', ['signup_token' => $signupToken, 'terms' => true])
+        $this->postJson('/api/auth/discord/complete', ['signup_token' => $signupToken, 'terms' => true, 'telegram' => 'pixel_trader', 'whatsapp' => '+66812345678'])
             ->assertCreated()
             ->assertJsonPath('user.email_verified', true);
 
@@ -291,7 +295,7 @@ class EmailVerificationTest extends DiscordTestCase
         $this->discord->profile['verified'] = false;
         $signupToken = $this->oauthCallback()->json('signup_token');
 
-        $res = $this->postJson('/api/auth/discord/complete', ['signup_token' => $signupToken, 'terms' => true])
+        $res = $this->postJson('/api/auth/discord/complete', ['signup_token' => $signupToken, 'terms' => true, 'telegram' => 'pixel_trader', 'whatsapp' => '+66812345678'])
             ->assertCreated()
             ->assertJsonPath('user.email_verified', false);
 

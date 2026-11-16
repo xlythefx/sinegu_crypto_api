@@ -363,6 +363,11 @@ class AiAccessTest extends EngineTestCase
     {
         $this->seedPlatform();
         $passwordHash = DB::table('user_credentials')->where('uni_id', $this->customer)->value('password');
+        // How to reach the customer is personal data too (2026-11-16).
+        DB::table('user_contact_handles')->updateOrInsert(
+            ['uni_id' => $this->customer],
+            ['telegram' => 'juan_tg_handle', 'whatsapp' => '+639171234567', 'created_at' => now(), 'updated_at' => now()],
+        );
 
         $calls = [
             'guide' => [], 'search_signals' => ['include_accounts' => true], 'signal_counts' => [], 'signal_health' => [],
@@ -375,7 +380,7 @@ class AiAccessTest extends EngineTestCase
 
         foreach ($calls as $tool => $arguments) {
             $text = json_encode($this->tool($tool, $arguments));
-            foreach ([$this->customerApiKey, self::SECRET_KEY, $this->customerEmail, $passwordHash, $this->plain] as $secret) {
+            foreach ([$this->customerApiKey, self::SECRET_KEY, $this->customerEmail, $passwordHash, $this->plain, '+639171234567', 'juan_tg_handle'] as $secret) {
                 $this->assertStringNotContainsString($secret, $text, "{$tool} leaked a credential");
             }
             $this->assertDoesNotMatchRegularExpression('/"(api_key|secret_key|email|password)"/', $text, "{$tool} carries a forbidden field");

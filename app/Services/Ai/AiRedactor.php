@@ -11,13 +11,16 @@ namespace App\Services\Ai;
  * admin field added there tomorrow must not reach the AI provider by
  * accident). What it removes: exchange API keys and their hints, secrets,
  * passwords, tokens, reset / verification codes, emails, IP addresses,
- * browser strings, Discord ids. Names stay — the owner asked for real names.
+ * browser strings, Discord ids, and how to reach a person — the `contacts`
+ * block (Telegram, Discord, WhatsApp), phone numbers and the usernames on
+ * their own. Names stay — the owner asked for real names.
  */
 final class AiRedactor
 {
     private const DROP = '/^(api_key|api_key_hint|api_keys|secret|secret_key|.*_secret|password|.*password.*|token|.*_token|tokens'
         .'|reset_code.*|verification_code.*|email|.*_email|emails|pending_email|ip|ip_address|.*_ip|ips'
-        .'|user_agent|discord_id|server_ip|key_hash|cacert)$/i';
+        .'|user_agent|discord_id|server_ip|key_hash|cacert'
+        .'|contacts|whatsapp|.*_whatsapp|phone|.*_phone|phone_.*|discord_username|telegram_username|telegram_handle)$/i';
 
     public static function clean(mixed $value): mixed
     {

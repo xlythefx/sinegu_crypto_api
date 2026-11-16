@@ -258,6 +258,8 @@ class DiscordAuthTest extends DiscordTestCase
         $res = $this->postJson('/api/auth/discord/complete', [
             'signup_token' => $signupToken,
             'terms' => true,
+            'telegram' => 'pixel_trader',
+            'whatsapp' => '+66812345678',
             'terms_version' => 'September 1, 2026',
             'referral_code' => 'FRIEND1',
         ])
@@ -291,6 +293,8 @@ class DiscordAuthTest extends DiscordTestCase
         $this->postJson('/api/auth/discord/complete', [
             'signup_token' => $signupToken,
             'terms' => true,
+            'telegram' => 'pixel_trader',
+            'whatsapp' => '+66812345678',
             'name' => 'Sam Trader',
         ])->assertCreated()->assertJsonPath('user.name', 'Sam Trader');
     }
@@ -311,9 +315,9 @@ class DiscordAuthTest extends DiscordTestCase
     {
         $signupToken = $this->oauthCallback()->json('signup_token');
 
-        $this->postJson('/api/auth/discord/complete', ['signup_token' => $signupToken, 'terms' => true])
+        $this->postJson('/api/auth/discord/complete', ['signup_token' => $signupToken, 'terms' => true, 'telegram' => 'pixel_trader', 'whatsapp' => '+66812345678'])
             ->assertCreated();
-        $this->postJson('/api/auth/discord/complete', ['signup_token' => $signupToken, 'terms' => true])
+        $this->postJson('/api/auth/discord/complete', ['signup_token' => $signupToken, 'terms' => true, 'telegram' => 'pixel_trader', 'whatsapp' => '+66812345678'])
             ->assertStatus(410)
             ->assertJsonPath('error_code', 'SIGNUP_EXPIRED');
 
@@ -322,7 +326,7 @@ class DiscordAuthTest extends DiscordTestCase
         $second = $this->oauthCallback()->json('signup_token');
         $this->travel(16)->minutes();
 
-        $this->postJson('/api/auth/discord/complete', ['signup_token' => $second, 'terms' => true])
+        $this->postJson('/api/auth/discord/complete', ['signup_token' => $second, 'terms' => true, 'telegram' => 'pixel_trader', 'whatsapp' => '+66812345678'])
             ->assertStatus(410);
     }
 
@@ -331,7 +335,7 @@ class DiscordAuthTest extends DiscordTestCase
         $signupToken = $this->oauthCallback()->json('signup_token');
         $this->makeUser(['email' => 'trader@example.com']);
 
-        $this->postJson('/api/auth/discord/complete', ['signup_token' => $signupToken, 'terms' => true])
+        $this->postJson('/api/auth/discord/complete', ['signup_token' => $signupToken, 'terms' => true, 'telegram' => 'pixel_trader', 'whatsapp' => '+66812345678'])
             ->assertStatus(409)
             ->assertJsonPath('error_code', 'EMAIL_TAKEN');
     }
@@ -489,7 +493,7 @@ class DiscordAuthTest extends DiscordTestCase
 
         $bodies[] = $this->oauthCallback()->getContent();                       // terms_required
         $signupToken = json_decode(end($bodies), true)['signup_token'];
-        $bodies[] = $this->postJson('/api/auth/discord/complete', ['signup_token' => $signupToken, 'terms' => true])->getContent();
+        $bodies[] = $this->postJson('/api/auth/discord/complete', ['signup_token' => $signupToken, 'terms' => true, 'telegram' => 'pixel_trader', 'whatsapp' => '+66812345678'])->getContent();
 
         $bodies[] = $this->oauthCallback()->getContent();                       // logged_in
         $uniId = UserCredential::where('email', 'trader@example.com')->value('uni_id');
@@ -514,7 +518,7 @@ class DiscordAuthTest extends DiscordTestCase
         $this->discord->refuseCode = false;
 
         // complete(): the row is created and a token issued even though the join fails.
-        $res = $this->postJson('/api/auth/discord/complete', ['signup_token' => $signupToken, 'terms' => true])
+        $res = $this->postJson('/api/auth/discord/complete', ['signup_token' => $signupToken, 'terms' => true, 'telegram' => 'pixel_trader', 'whatsapp' => '+66812345678'])
             ->assertCreated();
         $uniId = $res->json('user.uni_id');
         $this->assertNotEmpty($res->json('token'));

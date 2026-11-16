@@ -768,6 +768,22 @@ class AdminUserController extends Controller
         return $venues;
     }
 
+    /**
+     * Typed at sign-up / in Settings (unverified), and the Discord confirmed
+     * through "Sign in with Discord", which wins on screen. One read.
+     */
+    private function contactsFor(UserCredential $user): array
+    {
+        $row = DB::table('user_contact_handles')->where('uni_id', $user->uni_id)->first(['telegram', 'discord', 'whatsapp']);
+
+        return [
+            'telegram' => $row?->telegram,
+            'discord' => $user->discord_username ?: $row?->discord,
+            'discord_linked' => (bool) $user->discord_username,
+            'whatsapp' => $row?->whatsapp,
+        ];
+    }
+
     /** The profile block shared by show() and update() (accounts excluded). */
     private function userPayload(UserCredential $user): array
     {
@@ -779,14 +795,7 @@ class AdminUserController extends Controller
                 : null,
             'last_activity' => $user->last_activity?->toISOString(),
             'referrals_count' => ReferralTracking::where('referrer_uni_id', $user->uni_id)->count(),
-            // Typed at sign-up / in Settings (unverified), and the Discord
-            // confirmed through "Sign in with Discord", which wins on screen.
-            'contacts' => [
-                'telegram' => DB::table('user_contact_handles')->where('uni_id', $user->uni_id)->value('telegram'),
-                'discord' => $user->discord_username
-                    ?: DB::table('user_contact_handles')->where('uni_id', $user->uni_id)->value('discord'),
-                'discord_linked' => (bool) $user->discord_username,
-            ],
+            'contacts' => $this->contactsFor($user),
         ];
     }
 

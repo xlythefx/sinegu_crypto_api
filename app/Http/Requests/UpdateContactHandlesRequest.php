@@ -6,9 +6,10 @@ use App\Services\Signup\ContactHandles;
 use Illuminate\Foundation\Http\FormRequest;
 
 /**
- * PUT /api/user/contacts — Settings → the Telegram / Discord usernames.
- * Both keys optional: an ABSENT key leaves that handle as it is, null or ''
- * clears it. Normalised first (ContactHandles), so `@name` and t.me links
+ * PUT /api/user/contacts — Settings → Telegram, Discord, WhatsApp. Every key
+ * optional: an ABSENT key leaves that value as it is. null or '' clears
+ * Discord; Telegram and WhatsApp are required, so sending them empty is a
+ * field error (ContactHandles::rules without $signup). Normalised first (ContactHandles), so `@name` and t.me links
  * pass as the bare username and a bad one is a plain field error.
  */
 class UpdateContactHandlesRequest extends FormRequest

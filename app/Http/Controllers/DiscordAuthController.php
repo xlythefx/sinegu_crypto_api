@@ -230,17 +230,18 @@ class DiscordAuthController extends Controller
     /**
      * POST /api/auth/discord/complete
      *   { signup_token, terms, terms_version?, referral_code?, name?,
-     *     heard_from?, heard_from_other?, telegram?, client?, consent? }
+     *     heard_from?, heard_from_other?, telegram, whatsapp, client?, consent? }
      *
      * Mirrors AuthController::register for a user who arrived through Discord:
-     * the Terms are mandatory, invalid referral codes are silently ignored,
-     * and the row starts in the approval queue. The same sign-up details ride
-     * along, minus the Discord handle — this sign-up already knows the linked
-     * Discord account, so a typed one is ignored.
+     * the Terms are mandatory, Telegram + WhatsApp are required (2026-11-16),
+     * invalid referral codes are silently ignored, and the row starts in the
+     * approval queue. The same sign-up details ride along, minus the Discord
+     * handle — this sign-up already knows the linked Discord account, so a
+     * typed one is ignored.
      */
     public function complete(Request $request): JsonResponse
     {
-        ContactHandles::prepare($request, [ContactHandles::TELEGRAM]);
+        ContactHandles::prepare($request, ContactHandles::REQUIRED);
 
         $validated = $request->validate([
             'signup_token' => ['required', 'string', 'max:128'],
@@ -249,7 +250,7 @@ class DiscordAuthController extends Controller
             'referral_code' => ['nullable', 'string', 'max:50'],
             'name' => ['nullable', 'string', 'max:255'],
             ...SignupSources::rules(),
-            ...ContactHandles::rules([ContactHandles::TELEGRAM]),
+            ...ContactHandles::rules(ContactHandles::REQUIRED, signup: true),
         ], [
             'terms.accepted' => 'You must accept the Terms and Conditions to create an account.',
             ...ContactHandles::messages(),
@@ -302,7 +303,7 @@ class DiscordAuthController extends Controller
                 $this->referrals->bind($validated['referral_code'] ?? null, $user->uni_id);
 
                 $this->sources->store($user->uni_id, $validated['heard_from'] ?? [], $validated['heard_from_other'] ?? null);
-                $this->contacts->save($user->uni_id, array_intersect_key($validated, [ContactHandles::TELEGRAM => true]));
+                $this->contacts->save($user->uni_id, array_intersect_key($validated, array_flip(ContactHandles::REQUIRED)));
 
                 return $user;
             });

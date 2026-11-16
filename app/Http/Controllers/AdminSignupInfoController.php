@@ -67,6 +67,7 @@ class AdminSignupInfoController extends Controller
                 'contacts' => [
                     'telegram' => $contacts[ContactHandles::TELEGRAM],
                     'discord' => $contacts[ContactHandles::DISCORD],
+                    'whatsapp' => $contacts[ContactHandles::WHATSAPP],
                     // The Discord account actually LINKED for sign-in — proven
                     // by OAuth, unlike the typed handle beside it.
                     'discord_linked' => $user->hasDiscord() ? $user->discord_username : null,

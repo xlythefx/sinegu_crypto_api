@@ -27,8 +27,9 @@ class AuthController extends Controller
     /**
      * POST /api/auth/register
      *
-     * Sign-up details ride along, all optional: `heard_from` (SignupSources
-     * slugs) + `heard_from_other`, the `telegram` / `discord` handles, and the
+     * Sign-up details ride along: `telegram` + `whatsapp` (REQUIRED since
+     * 2026-11-16, ContactHandles::REQUIRED), and optionally `discord`,
+     * `heard_from` (SignupSources slugs) + `heard_from_other`, and the
      * `client` / `consent` pair AccessLog reads. The first two are written in
      * the registration transaction; the access event after it commits. Client
      * info is never validated here — AccessLog drops what it cannot use, it
@@ -53,7 +54,7 @@ class AuthController extends Controller
             'terms' => ['accepted'],
             'terms_version' => ['nullable', 'string', 'max:32'],
             ...SignupSources::rules(),
-            ...ContactHandles::rules(),
+            ...ContactHandles::rules(signup: true),
         ], [
             'terms.accepted' => 'You must accept the Terms and Conditions to create an account.',
             ...ContactHandles::messages(),

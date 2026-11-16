@@ -25,6 +25,8 @@ class AuthRegistrationTest extends EngineTestCase
             'password' => 'correct-horse-battery',
             'password_confirmation' => 'correct-horse-battery',
             'terms' => true,
+            'telegram' => 'pixel_trader',
+            'whatsapp' => '+66812345678',
             'terms_version' => 'September 1, 2026',
         ], $overrides);
     }

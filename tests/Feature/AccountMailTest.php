@@ -36,6 +36,8 @@ class AccountMailTest extends EngineTestCase
             'password' => 'super-secret-1',
             'password_confirmation' => 'super-secret-1',
             'terms' => true,
+            'telegram' => 'pixel_trader',
+            'whatsapp' => '+66812345678',
         ], $overrides));
     }
 

@@ -8,6 +8,7 @@ use App\Models\Invoice;
 use App\Services\Discord\DiscordRoleSync;
 use App\Services\EngineCache;
 use App\Services\Exchanges\ExchangeSchema;
+use App\Services\Signup\ContactHandles;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
@@ -52,6 +53,7 @@ class ExchangeAccountController extends Controller
     public function __construct(
         private EngineCache $engineCache,
         private DiscordRoleSync $discordRoles,
+        private ContactHandles $contacts,
     ) {}
 
     /**
@@ -110,6 +112,19 @@ class ExchangeAccountController extends Controller
                 'error_code' => 'PENDING_APPROVAL',
                 'message' => 'Your account is pending approval. You can connect an exchange once an admin approves you.',
             ], 403);
+        }
+
+        // Telegram + WhatsApp first (owner, 2026-11-16): the team must be able
+        // to reach whoever puts money under the bot. Customers only, and only
+        // CONNECTING — an account already connected keeps trading while its
+        // owner is asked (dashboard reminder) to fill them in Settings.
+        if ($this->contacts->connectLocked($request->user())) {
+            return response()->json([
+                'success' => false,
+                'error_code' => 'CONTACTS_REQUIRED',
+                'message' => 'Add your Telegram username and WhatsApp number in Settings before connecting an exchange.',
+                'missing' => $this->contacts->missingFor($request->user()->uni_id),
+            ], 422);
         }
 
         // One account per user PER EXCHANGE — soft-deleted (disconnected) rows

@@ -75,6 +75,7 @@ class DiscordSignupDetailsTest extends DiscordTestCase
         $res = $this->postJson('/api/auth/discord/complete', [
             'signup_token' => $signupToken,
             'terms' => true,
+            'whatsapp' => '0066 81 234 5678',
             'heard_from' => ['x', 'discord'],
             'heard_from_other' => 'ignored — other is not ticked',
             'telegram' => 't.me/Pixel_Trader',
@@ -96,6 +97,7 @@ class DiscordSignupDetailsTest extends DiscordTestCase
         $this->assertDatabaseHas('user_contact_handles', [
             'uni_id' => $uniId,
             'telegram' => 'Pixel_Trader',
+            'whatsapp' => '+66812345678',
             'discord' => null,
         ]);
 
@@ -108,15 +110,25 @@ class DiscordSignupDetailsTest extends DiscordTestCase
         $this->assertSame('all', $event->consent);
     }
 
-    public function test_complete_without_details_creates_no_sources_or_handles(): void
+    /** Required on this path too (2026-11-16); the token survives the refusal. */
+    public function test_complete_requires_telegram_and_whatsapp(): void
     {
         $signupToken = $this->oauthCallback()->json('signup_token');
 
         $this->postJson('/api/auth/discord/complete', ['signup_token' => $signupToken, 'terms' => true])
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors([
+                'telegram' => ContactHandles::TELEGRAM_REQUIRED,
+                'whatsapp' => ContactHandles::WHATSAPP_REQUIRED,
+            ]);
+        $this->assertDatabaseMissing('user_credentials', ['email' => 'trader@example.com']);
+
+        // Only the two required ones: a contact row, no sources.
+        $this->postJson('/api/auth/discord/complete', ['signup_token' => $signupToken, 'terms' => true, 'telegram' => 'pixel_trader', 'whatsapp' => '+66812345678'])
             ->assertCreated();
 
         $this->assertSame(0, DB::table('user_signup_sources')->count());
-        $this->assertSame(0, DB::table('user_contact_handles')->count());
+        $this->assertSame(1, DB::table('user_contact_handles')->count());
         $this->assertSame(1, DB::table('user_access_events')->where('event', 'register')->where('method', 'discord')->count());
     }
 
@@ -127,6 +139,7 @@ class DiscordSignupDetailsTest extends DiscordTestCase
         $this->postJson('/api/auth/discord/complete', [
             'signup_token' => $signupToken,
             'terms' => true,
+            'whatsapp' => '+66812345678',
             'telegram' => 'no',
         ])
             ->assertUnprocessable()
@@ -135,6 +148,8 @@ class DiscordSignupDetailsTest extends DiscordTestCase
         $this->postJson('/api/auth/discord/complete', [
             'signup_token' => $signupToken,
             'terms' => true,
+            'telegram' => 'pixel_trader',
+            'whatsapp' => '+66812345678',
             'heard_from' => ['myspace'],
         ])
             ->assertUnprocessable()
@@ -146,6 +161,7 @@ class DiscordSignupDetailsTest extends DiscordTestCase
         $this->postJson('/api/auth/discord/complete', [
             'signup_token' => $signupToken,
             'terms' => true,
+            'whatsapp' => '+66812345678',
             'telegram' => '@fixed_name',
         ])->assertCreated();
 
