@@ -318,10 +318,12 @@ Route::middleware(['auth:sanctum', 'account.active', 'email.verified'])->group(f
 
         // The chat agent (Claude with tools). Client-stepped: one request = at
         // most ONE model call (Cloudflare cuts a request at 100 s). Every call
-        // spends from the same monthly cap. A chat belongs to the person who
-        // started it. The agent never spends on Higgsfield by itself: it
+        // spends from the same monthly cap. Chats are shared by the whole team
+        // (each message names its author). The agent never spends on Higgsfield by itself: it
         // proposes a job and a person clicks Go (approve).
         Route::get('/agent/session', [AdminCreativeAgentController::class, 'session']);
+        // The team's chats (shared since 2026-11-17).
+        Route::get('/agent/sessions', [AdminCreativeAgentController::class, 'sessions']);
         Route::post('/agent/sessions', [AdminCreativeAgentController::class, 'newSession'])->middleware('throttle:20,1');
         Route::post('/agent/turn', [AdminCreativeAgentController::class, 'turn'])->middleware('throttle:40,1');
         Route::post('/agent/jobs/{id}/approve', [AdminCreativeAgentController::class, 'approve'])->whereNumber('id')->middleware('throttle:20,1');
@@ -350,6 +352,8 @@ Route::middleware(['auth:sanctum', 'account.active', 'email.verified'])->group(f
         Route::post('/videos', [AdminCreativeVideoController::class, 'store']);
         // The read refreshes the video's running clips first.
         Route::get('/videos/{id}', [AdminCreativeVideoController::class, 'show'])->whereNumber('id');
+        // Every attempt at its scenes: made / failed and why, how long, cost, who.
+        Route::get('/videos/{id}/history', [AdminCreativeVideoController::class, 'history'])->whereNumber('id');
         Route::put('/videos/{id}', [AdminCreativeVideoController::class, 'update'])->whereNumber('id');
         Route::delete('/videos/{id}', [AdminCreativeVideoController::class, 'destroy'])->whereNumber('id');
         Route::post('/videos/{id}/scenes', [AdminCreativeVideoController::class, 'addScene'])->whereNumber('id');
@@ -372,6 +376,8 @@ Route::middleware(['auth:sanctum', 'account.active', 'email.verified'])->group(f
         Route::get('/ai-access/log', [AdminAiAccessController::class, 'log']);
         Route::post('/ai-access/keys', [AdminAiAccessController::class, 'store'])->middleware('throttle:10,1');
         Route::delete('/ai-access/keys/{id}', [AdminAiAccessController::class, 'destroy'])->whereNumber('id');
+        // May this key make images / clips and Idea plans in Creatives (off by default).
+        Route::put('/ai-access/keys/{id}', [AdminAiAccessController::class, 'update'])->whereNumber('id');
 
         // Admin → Creatives' monthly spending cap: any full admin sets it; the
         // marketing team (collaborators) only sees it (GET is in the

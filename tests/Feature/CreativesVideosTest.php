@@ -12,6 +12,7 @@ use App\Models\CreativeVideo;
 use App\Models\CreativeVideoScene;
 use App\Models\UserCredential;
 use App\Services\Creatives\CreativeAgentJobs;
+use App\Services\Creatives\CreativeTimings;
 use Illuminate\Http\Client\Request as ClientRequest;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Cache;
@@ -204,12 +205,27 @@ class CreativesVideosTest extends EngineTestCase
 
     // ---- who --------------------------------------------------------------------
 
+    public function test_a_video_has_one_editor_chat_for_the_whole_team(): void
+    {
+        $id = $this->makeVideo();
+        $mine = $this->api('GET', "/api/admin/creatives/agent/session?video_id={$id}")->assertOk()->json('session');
+        $theirs = $this->api('GET', "/api/admin/creatives/agent/session?video_id={$id}", [], $this->admin)->assertOk()->json('session');
+        $this->assertSame($mine['id'], $theirs['id']);
+        $this->assertSame('Mara Marketing', $theirs['started_by']);
+        // "New chat" in the editor starts the video's next chat — for everyone.
+        $this->travel(1)->minute();
+        $fresh = (string) $this->api('POST', '/api/admin/creatives/agent/sessions', ['video_id' => $id], $this->admin)->assertOk()->json('session.id');
+        $this->travel(1)->minute();
+        $this->assertSame($fresh, $this->api('GET', "/api/admin/creatives/agent/session?video_id={$id}")->json('session.id'));
+    }
+
     public function test_every_staff_role_manages_videos_and_a_plain_user_is_refused(): void
     {
         foreach ([
             ['GET', '/api/admin/creatives/videos'],
             ['POST', '/api/admin/creatives/videos'],
             ['GET', '/api/admin/creatives/videos/1'],
+            ['GET', '/api/admin/creatives/videos/1/history'],
             ['PUT', '/api/admin/creatives/videos/1'],
             ['DELETE', '/api/admin/creatives/videos/1'],
             ['POST', '/api/admin/creatives/videos/1/scenes'],
@@ -688,20 +704,90 @@ class CreativesVideosTest extends EngineTestCase
             ->assertJsonPath('video.scenes.0.error', 'Render failed');
     }
 
-    public function test_at_most_four_steps_of_a_job_run_at_once(): void
+    public function test_the_history_keeps_every_attempt_and_why_it_failed(): void
     {
+        $this->freezeSecond();
+        $this->makeRef();
         $id = $this->makeVideo();
-        $seedance = $this->threeScenes()[2];
-        $seedance['seconds'] = 5;
-        $jobId = (int) $this->api('POST', "/api/admin/creatives/videos/{$id}/scenes/propose", ['scenes' => array_fill(0, 6, $seedance)])->assertOk()->json('job.id');
-        $this->api('POST', "/api/admin/creatives/agent/jobs/{$jobId}/approve")->assertOk();
-        $this->assertCount(CreativeAgentJobs::MAX_IN_FLIGHT, $this->submitted());
+        $jobId = (int) $this->api('POST', "/api/admin/creatives/videos/{$id}/scenes/propose", ['scenes' => $this->threeScenes()])->assertOk()->json('job.id');
+        $this->api('POST', "/api/admin/creatives/agent/jobs/{$jobId}/approve", [], $this->admin)->assertOk();
 
-        $this->complete('req-2', ['video' => ['url' => 'https://cdn.higgsfield.test/vid/2.mp4']]);
+        // While it runs, each clip scene says where it is (the editor's timer).
+        $scenes = $this->api('GET', "/api/admin/creatives/videos/{$id}")->assertOk()->json('video.scenes');
+        $this->assertSame(['step' => 1, 'steps' => 2, 'step_label' => 'Still image', 'waiting' => false], array_intersect_key(
+            $scenes[0]['progress'], array_flip(['step', 'steps', 'step_label', 'waiting'])));
+        $this->assertNotNull($scenes[0]['progress']['started_at']);
+        $this->assertNull($scenes[0]['progress']['typical_seconds'], 'No finished runs yet: no guess.');
+        $this->assertSame(1, $scenes[2]['progress']['steps']);
+        $this->assertSame('Clip', $scenes[2]['progress']['step_label']);
+
+        // Pixel's still is blocked; the plain still is made.
+        $this->statuses['req-2'] = ['status' => 'nsfw', 'request_id' => 'req-2'];
+        $this->complete('req-1', ['images' => [['url' => 'https://cdn.higgsfield.test/img/still-1.png']]]);
+        $this->travel(2)->minutes();
+        $this->artisan('creatives:poll')->assertSuccessful();
+
+        $history = collect($this->api('GET', "/api/admin/creatives/videos/{$id}/history")->assertOk()->json('history'));
+        $pixel = $history->where('scene_label', 'Pixel waves')->keyBy('role');
+        $this->assertSame('failed', $pixel['Still image']['status']);
+        $this->assertStringContainsString('moderation', (string) $pixel['Still image']['error']);
+        $this->assertSame(0.0, (float) $pixel['Still image']['usd']);
+        $this->assertNotNull($pixel['Still image']['seconds']);
+        $this->assertSame('skipped', $pixel['Animation']['status'], 'Its animation never started.');
+        $screens = $history->where('scene_label', 'Screens at night')->keyBy('role');
+        $this->assertSame('made', $screens['Still image']['status']);
+        $this->assertSame(120, $screens['Still image']['seconds']);
+        $this->assertSame('running', $screens['Animation']['status']);
+        $this->assertNull($screens['Animation']['ended_at']);
+        $this->assertSame('Owner Admin', $screens['Still image']['approved_by']);
+
+        // A retry of the failed scene is a new attempt; the old failure stays listed.
+        $sceneId = (int) collect($this->api('GET', "/api/admin/creatives/videos/{$id}")->json('video.scenes'))->firstWhere('label', 'Pixel waves')['id'];
+        $retry = (int) $this->api('POST', "/api/admin/creatives/videos/{$id}/scenes/propose", [
+            'scenes' => [$this->threeScenes()[1]], 'replace_scene_id' => $sceneId,
+        ])->assertOk()->json('job.id');
+        $this->api('POST', "/api/admin/creatives/agent/jobs/{$retry}/approve", [], $this->admin)->assertOk();
+        $pixel = collect($this->api('GET', "/api/admin/creatives/videos/{$id}/history")->json('history'))->where('scene_label', 'Pixel waves');
+        $this->assertSame(['running', 'waiting', 'failed', 'skipped'], $pixel->pluck('status')->values()->all());
+    }
+
+    public function test_the_typical_time_is_the_median_of_our_own_finished_runs(): void
+    {
+        $make = fn (int $seconds, string $status = 'completed') => CreativeGeneration::query()->forceCreate([
+            'kind' => 'video', 'model' => 'kling-animate', 'endpoint' => 'x', 'prompt' => 'p', 'full_prompt' => 'p', 'params' => [],
+            'used_character' => false, 'status' => $status, 'estimated_usd' => 0.3, 'charged_usd' => 0.3,
+            'created_at' => now()->subSeconds($seconds), 'completed_at' => $status === 'completed' ? now() : null,
+        ]);
+        $make(60);
+        $make(120);
+        $this->assertSame([], app(CreativeTimings::class)->typical(), 'Two runs are not enough.');
+
+        Cache::forget(CreativeTimings::CACHE_KEY);
+        $make(600);
+        $make(30, 'failed');
+        $this->assertSame(['kling-animate' => 120], app(CreativeTimings::class)->typical());
+        $this->assertSame(240, app(CreativeTimings::class)->typicalChain(['kling-animate', 'kling-animate']));
+        $this->assertNull(app(CreativeTimings::class)->typicalChain(['soul-image', 'kling-animate']));
+    }
+
+    public function test_at_most_max_in_flight_steps_of_a_job_run_at_once(): void
+    {
+        $this->assertSame(6, CreativeAgentJobs::MAX_IN_FLIGHT);
+        $id = $this->makeVideo();
+        // Six Kling scenes = twelve steps (a still, then its animation, each).
+        $kling = $this->threeScenes()[0];
+        $jobId = (int) $this->api('POST', "/api/admin/creatives/videos/{$id}/scenes/propose", ['scenes' => array_fill(0, 6, $kling)])->assertOk()->json('job.id');
+        $this->api('POST', "/api/admin/creatives/agent/jobs/{$jobId}/approve")->assertOk();
+        $this->assertCount(6, $this->submitted(), 'All six stills start together.');
+
+        $this->complete('req-1', ['images' => [['url' => 'https://cdn.higgsfield.test/img/1.png']]]);
         $this->travel(1)->minute();
         $this->artisan('creatives:poll')->assertSuccessful();
-        $this->assertCount(5, $this->submitted());
-        $this->assertSame(['running', 'completed', 'running', 'running', 'running', 'waiting'], array_column(CreativeAgentJob::find($jobId)->steps, 'status'));
+        $this->assertCount(7, $this->submitted(), 'One still made: its animation takes the free slot.');
+        $this->assertSame(
+            ['completed', 'running', 'running', 'waiting', 'running', 'waiting', 'running', 'waiting', 'running', 'waiting', 'running', 'waiting'],
+            array_column(CreativeAgentJob::find($jobId)->steps, 'status'),
+        );
     }
 
     public function test_cancelling_or_letting_a_proposal_expire_releases_its_slots(): void

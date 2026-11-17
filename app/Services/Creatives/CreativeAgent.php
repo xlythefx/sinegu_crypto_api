@@ -87,21 +87,91 @@ final class CreativeAgent
         return 'creatives-agent-turn:'.$sessionId;
     }
 
+    /**
+     * How long a shared chat stays held for the person being answered after
+     * a step that said `continue` — the client asks for the next step at
+     * once, so this only matters when their tab closed mid-answer.
+     */
+    public const ANSWERING_SECONDS = 180;
+
+    public static function answeringKey(string $sessionId): string
+    {
+        return 'creatives-agent-answering:'.$sessionId;
+    }
+
+    /** @return array{uni_id: string, name: ?string}|null the person this chat is answering right now */
+    public function answeringFor(CreativeAgentSession $session): ?array
+    {
+        $held = Cache::get(self::answeringKey($session->id));
+
+        return is_array($held) && isset($held['uni_id']) ? $held : null;
+    }
+
+    /**
+     * The team's live chats for the Chats list, newest first: who started
+     * each, who has written in it, the latest person message, and (an editor
+     * chat) its video.
+     *
+     * @return list<array<string, mixed>>
+     */
+    public function teamSessions(?int $videoId = null, int $limit = 30): array
+    {
+        $query = CreativeAgentSession::query()
+            ->where('updated_at', '>', now()->subDays(CreativeAgentSession::MAX_AGE_DAYS)->toDateTimeString())
+            ->where('tools_version', '>=', CreativeAgentPrompt::TOOLS_VERSION)
+            ->orderByDesc('updated_at')->orderByDesc('created_at')
+            ->limit($limit);
+        $videoId === null ? $query->whereNull('video_id') : $query->where('video_id', $videoId);
+        $sessions = $query->get();
+        if ($sessions->isEmpty()) {
+            return [];
+        }
+
+        $people = CreativeAgentMessage::query()
+            ->whereIn('session_id', $sessions->pluck('id'))
+            ->where('role', CreativeAgentMessage::USER)
+            ->orderBy('id')
+            ->get(['id', 'session_id', 'display', 'created_at'])
+            ->groupBy('session_id');
+
+        return $sessions->map(function (CreativeAgentSession $s) use ($people) {
+            $rows = $people->get($s->id, collect());
+            $said = $rows->map(fn (CreativeAgentMessage $m) => collect((array) $m->display)->first(fn ($d) => is_array($d) && ($d['kind'] ?? null) === 'user'))->filter()->values();
+            $last = $said->last();
+
+            return [
+                'id' => $s->id,
+                'video_id' => $s->video_id !== null ? (int) $s->video_id : null,
+                'started_by' => $s->user_name,
+                'people' => $said->map(fn ($d) => $d['author'] ?? null)->push($s->user_name)->filter()->unique()->values()->all(),
+                'messages' => $said->count(),
+                'last_text' => $last !== null ? mb_substr((string) ($last['text'] ?? ''), 0, 140) : null,
+                'last_author' => $last['author'] ?? ($last !== null ? $s->user_name : null),
+                'answering' => $this->answeringFor($s)['name'] ?? null,
+                'created_at' => $s->created_at?->toIso8601String(),
+                'updated_at' => $s->updated_at?->toIso8601String(),
+            ];
+        })->values()->all();
+    }
+
     // ---- sessions -------------------------------------------------------------
 
     /**
-     * The caller's chat: the one named if it is theirs and still live, else
-     * their newest live one, else a new one. Another person's id → NOT_FOUND.
+     * The chat to open: the one named if it is still live (ANY staff
+     * member's — chats are shared since 2026-11-17), else the newest live
+     * one, else a new one.
      *
      * "Live" includes the tool list: a chat started before the agent's tools
      * changed cannot continue (its replayed history would meet a different
      * tools array), so a fresh chat opens and is flagged
      * (`replacedForNewTools`) for the snapshot's one-time `new_tools` notice.
      *
-     * `$videoId` (v2.1): the video EDITOR's chat — the caller's newest live
-     * chat bound to that video, else a new one bound to it (NOT_FOUND when
-     * the video does not exist). Without it, the workspace chat: a chat bound
-     * to a video is never picked as "the newest" there.
+     * `$videoId` (v2.1): the video EDITOR's chat — ONE per video for the whole
+     * team: the newest live chat bound to that video, whoever started it, else
+     * a new one bound to it (NOT_FOUND when the video does not exist). Without
+     * it, the workspace chat: the caller's own newest by default (the Team
+     * chats list opens anyone's), and a chat bound to a video is never picked
+     * as "the newest" there.
      */
     public function resolveSession(UserCredential $user, ?string $id, ?int $videoId = null): CreativeAgentSession
     {
@@ -112,9 +182,6 @@ final class CreativeAgent
         $outdated = false;
         if ($id !== null && $id !== '') {
             $named = CreativeAgentSession::find($id);
-            if ($named !== null && $named->uni_id !== $user->uni_id) {
-                throw CreativeException::notFound('Chat not found.');
-            }
             // An editor chat answers for its own video only.
             $sameScope = $named !== null && ($videoId === null || $named->video_id === $videoId);
             if ($named !== null && $sameScope && $named->isLive()) {
@@ -126,9 +193,8 @@ final class CreativeAgent
         }
 
         $live = CreativeAgentSession::query()
-            ->where('uni_id', $user->uni_id)
             ->where('updated_at', '>', now()->subDays(CreativeAgentSession::MAX_AGE_DAYS)->toDateTimeString());
-        $videoId === null ? $live->whereNull('video_id') : $live->where('video_id', $videoId);
+        $videoId === null ? $live->whereNull('video_id')->where('uni_id', $user->uni_id) : $live->where('video_id', $videoId);
         $newest = (clone $live)
             ->where('tools_version', '>=', CreativeAgentPrompt::TOOLS_VERSION)
             ->orderByDesc('updated_at')->orderByDesc('created_at')
@@ -160,13 +226,15 @@ final class CreativeAgent
         ]);
     }
 
-    /** The `session` object of every chat payload: {id, mode, video_id}. */
+    /** The `session` object of every chat payload: {id, mode, video_id, started_by}. */
     public static function sessionShape(CreativeAgentSession $session): array
     {
         return [
             'id' => $session->id,
             'mode' => $session->last_mode,
             'video_id' => $session->video_id !== null ? (int) $session->video_id : null,
+            // Who started this shared chat (a person message from before authors were recorded is theirs).
+            'started_by' => $session->user_name,
         ];
     }
 
@@ -196,11 +264,11 @@ final class CreativeAgent
         return $ids;
     }
 
-    /** The caller's OWN live chat, for a turn. */
-    public function ownedSession(UserCredential $user, string $id): CreativeAgentSession
+    /** A live chat for a turn — any staff member's (chats are shared). */
+    public function liveSession(string $id): CreativeAgentSession
     {
         $session = CreativeAgentSession::find($id);
-        if ($session === null || $session->uni_id !== $user->uni_id) {
+        if ($session === null) {
             throw CreativeException::notFound('Chat not found.');
         }
         if (! $session->isLive()) {
@@ -227,6 +295,8 @@ final class CreativeAgent
             'messages' => $this->presenter->messages($session->messages()->get()),
             'jobs' => $this->presenter->jobs($session->jobs()->get()),
             'budget' => $this->budget->summary(),
+            // Who the assistant is answering right now in this shared chat (null = nobody).
+            'answering' => $this->answeringFor($session)['name'] ?? null,
         ];
         if ($session->replacedForNewTools) {
             $snapshot['notice'] = 'new_tools';
@@ -254,13 +324,38 @@ final class CreativeAgent
             throw new CreativeException('AI_NOT_CONFIGURED', 'Claude isn\'t connected on this server yet.', 503);
         }
 
+        // A shared chat is answered for ONE person at a time, across all the
+        // steps of their answer — otherwise a teammate's message would land
+        // between the steps and the two conversations would mix.
+        $answering = $this->answeringFor($session);
+        if ($answering !== null && $answering['uni_id'] !== $user->uni_id) {
+            throw new CreativeException(
+                'SESSION_BUSY',
+                'The assistant is still answering '.($answering['name'] ?: 'a teammate').' in this chat. It is yours in a moment.',
+                409,
+                ['answering' => $answering['name']],
+            );
+        }
+
         $lock = Cache::lock(self::lockName($session->id), self::LOCK_SECONDS);
         if (! $lock->get()) {
             throw new CreativeException('SESSION_BUSY', 'This chat is already answering in another window. Wait for it to finish.', 409);
         }
 
         try {
-            return $this->step($session, $user, $mode, $text, $focus);
+            $session->actingUniId = $user->uni_id;
+            $result = $this->step($session, $user, $mode, $text, $focus);
+            $key = self::answeringKey($session->id);
+            $result['status'] === 'continue'
+                ? Cache::put($key, ['uni_id' => $user->uni_id, 'name' => $user->name], self::ANSWERING_SECONDS)
+                : Cache::forget($key);
+
+            return $result;
+        } catch (Throwable $e) {
+            // A failed step ends the answer: the chat is free again.
+            Cache::forget(self::answeringKey($session->id));
+
+            throw $e;
         } finally {
             $lock->release();
         }
@@ -331,7 +426,7 @@ final class CreativeAgent
 
         $new = [];
         if ($personContent !== null) {
-            $new[] = $this->store($session, CreativeAgentMessage::USER, $personContent, [['kind' => 'user', 'text' => $text]], $mode);
+            $new[] = $this->store($session, CreativeAgentMessage::USER, $personContent, [['kind' => 'user', 'text' => $text, 'author' => $user->name !== null ? mb_substr($user->name, 0, 120) : null]], $mode);
             $session->sent_context = $context['sent'];
         }
         $session->last_mode = $mode;

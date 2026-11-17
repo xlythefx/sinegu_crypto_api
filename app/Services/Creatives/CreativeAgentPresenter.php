@@ -52,6 +52,8 @@ final class CreativeAgentPresenter
                     'id' => (int) $row->id * self::ITEM_SLOTS + $i,
                     'kind' => (string) $item['kind'],
                     'text' => $item['text'] ?? null,
+                    // A person message in a shared chat: who wrote it (absent before 2026-11-17).
+                    'author' => $item['author'] ?? null,
                     'activity' => $item['activity'] ?? null,
                     'job_id' => isset($item['job_id']) ? (int) $item['job_id'] : null,
                     'plan_id' => isset($item['plan_id']) ? (int) $item['plan_id'] : null,

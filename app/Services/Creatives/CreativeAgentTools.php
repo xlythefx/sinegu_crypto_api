@@ -597,7 +597,7 @@ final class CreativeAgentTools
             'platform' => $data['platform'] ?? 'tiktok',
             'format' => $data['format'] ?? 'video',
             'ai_drafted_at' => now(),
-            'created_by_uni_id' => $session->uni_id,
+            'created_by_uni_id' => $session->actor(),
             'created_by_name' => $personName,
             'updated_by_name' => $personName,
         ])->save();
@@ -818,7 +818,7 @@ final class CreativeAgentTools
 
     private function createVideo(array $input, CreativeAgentSession $session): array
     {
-        $user = UserCredential::find($session->uni_id) ?? throw new CreativeException('NOT_FOUND', 'The person of this chat no longer exists.', 404);
+        $user = UserCredential::find($session->actor()) ?? throw new CreativeException('NOT_FOUND', 'The person of this chat no longer exists.', 404);
         $title = trim(is_string($input['title'] ?? null) ? $input['title'] : '');
         if ($title === '' || mb_strlen($title) > 160) {
             throw ValidationException::withMessages(['title' => 'The video needs a title of at most 160 characters.']);
@@ -868,7 +868,7 @@ final class CreativeAgentTools
 
     private function addScenes(array $input, CreativeAgentSession $session): array
     {
-        $user = UserCredential::find($session->uni_id) ?? throw new CreativeException('NOT_FOUND', 'The person of this chat no longer exists.', 404);
+        $user = UserCredential::find($session->actor()) ?? throw new CreativeException('NOT_FOUND', 'The person of this chat no longer exists.', 404);
         $video = CreativeVideo::find((int) ($input['video_id'] ?? 0));
         if ($video === null) {
             return self::error('add_scenes', 'There is no video #'.(int) ($input['video_id'] ?? 0).'.', 'Could not add the scenes');

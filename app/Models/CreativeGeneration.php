@@ -64,7 +64,7 @@ class CreativeGeneration extends Model
     protected $fillable = [
         'agent_job_id', 'plan_id', 'character_id', 'kind', 'model', 'endpoint', 'prompt', 'full_prompt', 'params',
         'used_character', 'request_id', 'status', 'error', 'outputs', 'estimated_usd', 'charged_usd',
-        'expires_at', 'completed_at', 'last_checked_at', 'created_by_uni_id', 'created_by_name',
+        'expires_at', 'completed_at', 'last_checked_at', 'created_by_uni_id', 'created_by_name', 'ai_access_key_id',
     ];
 
     protected function casts(): array

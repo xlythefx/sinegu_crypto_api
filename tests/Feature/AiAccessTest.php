@@ -374,6 +374,9 @@ class AiAccessTest extends EngineTestCase
             'open_positions' => [], 'closed_trades' => [], 'asset_performance' => [], 'assets' => [], 'asset_changes' => [],
             'accounts' => ['status' => 'all'], 'users' => [], 'invoices' => ['status' => 'all'], 'platform_summary' => [],
             'business_stats' => [],
+            // Creatives (2026-11-17): read by every key.
+            'creative_plans' => [], 'creative_videos' => [], 'creative_generations' => [], 'creative_budget' => [],
+            'creative_setup' => [], 'creative_models' => [], 'creative_chats' => [],
         ];
         $firstSignal = TradeLog::query()->min('id');
         $calls['get_signal'] = ['id' => $firstSignal];

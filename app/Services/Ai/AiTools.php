@@ -2,8 +2,12 @@
 
 namespace App\Services\Ai;
 
+use App\Models\AiAccessKey;
 use App\Services\Ai\Tools\AssetTools;
+use App\Services\Ai\Tools\CreativeMakeTools;
+use App\Services\Ai\Tools\CreativeTools;
 use App\Services\Ai\Tools\GuideTools;
+use App\Services\Ai\Tools\KeyAwareToolset;
 use App\Services\Ai\Tools\MoneyTools;
 use App\Services\Ai\Tools\PeopleTools;
 use App\Services\Ai\Tools\SignalTools;
@@ -16,9 +20,17 @@ use Throwable;
 /**
  * Every tool the AI connector publishes, and the one way to run one.
  *
- * READ-ONLY by construction: each toolset only reads, and there is no other
- * path from POST /api/mcp into the application. A new tool is a new entry in
- * a toolset's definitions() — never a write.
+ * READ-ONLY by construction, with ONE exception (owner, 2026-11-17): the
+ * Creatives make-tools (CreativeMakeTools — price / start an image or clip,
+ * save an Idea plan), a {@see KeyAwareToolset} listed and run only for a key
+ * a full admin switched on (`can_create`). Every other key neither sees nor
+ * can call them. Any other new tool is a new read in a toolset's
+ * definitions() — never a write.
+ *
+ * The Creatives toolsets are the CONNECTOR's own (CONNECTOR_ONLY): the
+ * Creatives assistant's query_data runs the data tools only
+ * ({@see dataToolNames()}), because its tool list must stay byte-identical
+ * within a chat and it has Creatives tools of its own.
  *
  * Every answer passes through AiRedactor before it leaves, and is capped at
  * MAX_BYTES: an answer too big for the AI's context helps nobody, so it is
@@ -36,17 +48,31 @@ final class AiTools
         AssetTools::class,
         PeopleTools::class,
         MoneyTools::class,
+        CreativeTools::class,
+        CreativeMakeTools::class,
     ];
+
+    /** Listed to the connector, never runnable by the Creatives assistant's query_data. */
+    public const CONNECTOR_ONLY = [CreativeTools::class, CreativeMakeTools::class];
 
     /** @var array<string, Toolset>|null */
     private ?array $owners = null;
 
-    /** @return list<array<string, mixed>> the MCP tools/list entries */
-    public function list(): array
+    /**
+     * The MCP tools/list entries for this key. A key-aware toolset's tools
+     * appear only for a key it allows (no key = none of them).
+     *
+     * @return list<array<string, mixed>>
+     */
+    public function list(?AiAccessKey $key = null): array
     {
         $tools = [];
         foreach ($this->toolsets() as $set) {
+            if ($set instanceof KeyAwareToolset && ! $set->allows($key)) {
+                continue;
+            }
             foreach ($set->definitions() as $name => $def) {
+                $writes = (bool) ($def['writes'] ?? false);
                 $tools[] = [
                     'name' => $name,
                     'title' => $def['title'],
@@ -54,10 +80,10 @@ final class AiTools
                     'inputSchema' => $def['schema'],
                     'annotations' => [
                         'title' => $def['title'],
-                        'readOnlyHint' => true,
+                        'readOnlyHint' => ! $writes,
                         'destructiveHint' => false,
-                        'idempotentHint' => true,
-                        'openWorldHint' => false,
+                        'idempotentHint' => ! $writes,
+                        'openWorldHint' => $writes,
                     ],
                 ];
             }
@@ -66,9 +92,30 @@ final class AiTools
         return $tools;
     }
 
-    public function has(string $name): bool
+    /** A tool this key may call (a hidden make-tool is as unknown as a typo). */
+    public function has(string $name, ?AiAccessKey $key = null): bool
     {
-        return isset($this->owners()[$name]);
+        $set = $this->owners()[$name] ?? null;
+
+        return $set !== null && (! $set instanceof KeyAwareToolset || $set->allows($key));
+    }
+
+    /**
+     * The read-only DATA tools (everything but the connector's Creatives
+     * toolsets): what the Creatives assistant's query_data may run.
+     *
+     * @return list<string>
+     */
+    public function dataToolNames(): array
+    {
+        $names = [];
+        foreach ($this->toolsets() as $set) {
+            if (! in_array($set::class, self::CONNECTOR_ONLY, true)) {
+                array_push($names, ...array_keys($set->definitions()));
+            }
+        }
+
+        return $names;
     }
 
     /**
@@ -78,10 +125,18 @@ final class AiTools
      * @param  array<string, mixed>  $arguments
      * @return array{0: bool, 1: string}
      */
-    public function run(string $name, array $arguments): array
+    public function run(string $name, array $arguments, ?AiAccessKey $key = null): array
     {
+        $set = $this->owners()[$name] ?? null;
+        if ($set === null || ($set instanceof KeyAwareToolset && ! $set->allows($key))) {
+            return [false, "Unknown tool: {$name}"];
+        }
+        if ($set instanceof KeyAwareToolset) {
+            $set->withKey($key);
+        }
+
         try {
-            $answer = AiRedactor::clean($this->owners()[$name]->call($name, $arguments));
+            $answer = AiRedactor::clean($set->call($name, $arguments));
         } catch (ToolError $e) {
             return [false, $e->getMessage()];
         } catch (Throwable $e) {

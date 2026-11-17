@@ -2,6 +2,7 @@
 
 namespace App\Services\Creatives;
 
+use App\Models\CreativeAgentJob;
 use App\Models\CreativeGeneration;
 use App\Models\CreativeVideo;
 use App\Models\CreativeVideoScene;
@@ -19,6 +20,7 @@ final class CreativeVideoPresenter
     public function __construct(
         private CreativePresenter $creatives,
         private CreativeAgentPresenter $agent,
+        private CreativeVideoHistory $history,
     ) {}
 
     public function video(CreativeVideo $video): array
@@ -26,7 +28,15 @@ final class CreativeVideoPresenter
         $video->loadMissing(['plan:id,title', 'style:id,slug,name']);
         $scenes = $video->scenes()->get();
         $generations = $this->generations($scenes);
-        $presented = $scenes->map(fn (CreativeVideoScene $s) => $this->scene($s, $generations->get((int) $s->generation_id)))->values()->all();
+        $jobs = $video->jobs()->get();
+        // A running scene carries its progress (the editor's timer).
+        $byId = $jobs->keyBy('id');
+        $stepGenerations = $this->history->generationsOf($jobs->where('status', CreativeAgentJob::RUNNING));
+        $presented = $scenes->map(fn (CreativeVideoScene $s) => $this->scene(
+            $s,
+            $generations->get((int) $s->generation_id),
+            $this->history->progress($s, $byId, $stepGenerations),
+        ))->values()->all();
 
         return [
             'id' => (int) $video->id,
@@ -52,7 +62,7 @@ final class CreativeVideoPresenter
             'updated_at' => $video->updated_at?->toIso8601String(),
             'duration_ms' => (int) array_sum(array_column($presented, 'duration_ms')),
             'scenes' => $presented,
-            'jobs' => $this->agent->jobs($video->jobs()->get()),
+            'jobs' => $this->agent->jobs($jobs),
         ];
     }
 
@@ -79,7 +89,7 @@ final class CreativeVideoPresenter
         ];
     }
 
-    public function scene(CreativeVideoScene $scene, ?CreativeGeneration $generation): array
+    public function scene(CreativeVideoScene $scene, ?CreativeGeneration $generation, ?array $progress = null): array
     {
         return [
             'id' => (int) $scene->id,
@@ -101,6 +111,8 @@ final class CreativeVideoPresenter
             'duration_ms' => $scene->durationMs(),
             'status' => $this->status($scene, $generation),
             'error' => $scene->error,
+            // {started_at, step, steps, step_label, waiting, typical_seconds} while a job makes it.
+            'progress' => $progress,
         ];
     }
 

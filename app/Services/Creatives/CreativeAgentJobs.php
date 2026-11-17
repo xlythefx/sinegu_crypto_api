@@ -63,8 +63,9 @@ final class CreativeAgentJobs
 {
     public const MAX_STEPS = 12;
 
-    /** Running generations per job at once (raise once Higgsfield's limit is seen live). */
-    public const MAX_IN_FLIGHT = 4;
+    /** Running generations per job at once (4 → 6 on 2026-11-17: a 6-scene video
+     *  ran in three waves; Higgsfield queues what it cannot start at once). */
+    public const MAX_IN_FLIGHT = 6;
 
     /** The session / video read advances a job at most this often. */
     public const ADVANCE_EVERY_SECONDS = 4;
@@ -89,7 +90,7 @@ final class CreativeAgentJobs
      *
      * `$options` comes from trusted server code only, never from the model:
      *  - video_id      the video whose scenes the job makes;
-     *  - owner_uni_id  whose spend later steps are (default: the chat's owner);
+     *  - owner_uni_id  whose spend later steps are (default: the person the chat is answering);
      *  - scenes        true = keep each step's `scene_id` (CreativeVideos sets
      *                  them). A model-written step never carries one.
      *
@@ -126,7 +127,7 @@ final class CreativeAgentJobs
             'session_id' => $session?->id,
             'plan_id' => $planId,
             'video_id' => isset($options['video_id']) ? (int) $options['video_id'] : null,
-            'owner_uni_id' => $options['owner_uni_id'] ?? $session?->uni_id,
+            'owner_uni_id' => $options['owner_uni_id'] ?? $session?->actor(),
             'title' => $title,
             'status' => CreativeAgentJob::PROPOSED,
             'steps' => $steps,
@@ -614,6 +615,10 @@ final class CreativeAgentJobs
         $steps[$i]['full_prompt'] = $generation->full_prompt;
         $steps[$i]['status'] = 'running';
         $steps[$i]['error'] = null;
+        // The editor's history and timers (2026-11-17); older steps have none
+        // and fall back to their generation's own times.
+        $steps[$i]['started_at'] = now()->toIso8601String();
+        $steps[$i]['ended_at'] = null;
         $job->forceFill(['steps' => $steps])->save();
 
         $sceneId = $this->sceneOf($steps, $i);
@@ -631,6 +636,7 @@ final class CreativeAgentJobs
     {
         $steps = $job->steps;
         $steps[$i]['status'] = 'completed';
+        $steps[$i]['ended_at'] = now()->toIso8601String();
         $job->forceFill(['steps' => $steps])->save();
 
         $sceneId = isset($steps[$i]['scene_id']) ? (int) $steps[$i]['scene_id'] : null;
@@ -656,6 +662,8 @@ final class CreativeAgentJobs
         $error = mb_substr($error, 0, 480);
         $steps[$i]['status'] = $status;
         $steps[$i]['error'] = $error;
+        $steps[$i]['started_at'] ??= now()->toIso8601String();
+        $steps[$i]['ended_at'] = now()->toIso8601String();
         if ($generationId !== null) {
             $steps[$i]['generation_id'] = $generationId;
         }
@@ -736,6 +744,12 @@ final class CreativeAgentJobs
         }
 
         return $out;
+    }
+
+    /** The scene a step works for (the editor's history reads it the same way). */
+    public function sceneOfStep(array $steps, int $i): ?int
+    {
+        return $this->sceneOf($steps, $i);
     }
 
     /** The scene a step works for: its own `scene_id`, or that of a step waiting for it (a still's animation). */

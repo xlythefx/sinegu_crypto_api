@@ -140,6 +140,10 @@ final class AiAccessKeys
             'last_used_ip' => $key->last_used_ip,
             'revoked_at' => $key->revoked_at?->toIso8601String(),
             'revoked_by_name' => $key->revoked_by_name,
+            // May make images / clips and Idea plans in Creatives (off until a full admin switches it on).
+            'can_create' => (bool) $key->can_create,
+            'can_create_changed_by_name' => $key->can_create_changed_by_name,
+            'can_create_changed_at' => $key->can_create_changed_at?->toIso8601String(),
         ];
     }
 

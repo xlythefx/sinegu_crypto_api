@@ -68,8 +68,12 @@ final class McpServer
                     // Echo a version we know; otherwise the most widely supported one.
                     'protocolVersion' => in_array($requested, self::PROTOCOL_VERSIONS, true) ? $requested : self::FALLBACK_VERSION,
                     'capabilities' => ['tools' => ['listChanged' => false]],
-                    'serverInfo' => ['name' => 'pixel-alpha', 'title' => 'Pixel Alpha (read-only)', 'version' => self::SERVER_VERSION],
-                    'instructions' => GuideTools::INSTRUCTIONS,
+                    'serverInfo' => [
+                        'name' => 'pixel-alpha',
+                        'title' => $key?->can_create ? 'Pixel Alpha' : 'Pixel Alpha (read-only)',
+                        'version' => self::SERVER_VERSION,
+                    ],
+                    'instructions' => GuideTools::INSTRUCTIONS.($key?->can_create ? GuideTools::CREATE_INSTRUCTIONS : ''),
                 ]);
                 break;
 
@@ -78,19 +82,19 @@ final class McpServer
                 break;
 
             case 'tools/list':
-                $body = $this->result($id, ['tools' => $this->tools->list()]);
+                $body = $this->result($id, ['tools' => $this->tools->list($key)]);
                 break;
 
             case 'tools/call':
                 $tool = is_string($params['name'] ?? null) ? $params['name'] : '';
                 $arguments = is_array($params['arguments'] ?? null) ? $params['arguments'] : [];
-                if (! $this->tools->has($tool)) {
+                if (! $this->tools->has($tool, $key)) {
                     $ok = false;
                     $errorText = "Unknown tool: {$tool}";
                     $body = $this->error($id, -32602, $errorText);
                     break;
                 }
-                [$ok, $text] = $this->tools->run($tool, $arguments);
+                [$ok, $text] = $this->tools->run($tool, $arguments, $key);
                 $errorText = $ok ? null : $text;
                 $body = $this->result($id, [
                     'content' => [['type' => 'text', 'text' => $text]],

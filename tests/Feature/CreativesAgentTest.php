@@ -314,15 +314,20 @@ class CreativesAgentTest extends EngineTestCase
         $this->assertCount(2, $this->claude->calls);
     }
 
-    public function test_a_chat_is_its_owners_and_one_older_than_seven_days_is_replaced(): void
+    public function test_chats_are_shared_and_one_older_than_seven_days_is_replaced(): void
     {
         $first = $this->sessionId();
         $this->assertSame($first, $this->sessionId(), 'The newest live chat is offered again.');
 
-        // Someone else's chat: 404 everywhere.
-        $this->api('GET', '/api/admin/creatives/agent/session?id='.$first, [], $this->admin)->assertNotFound()->assertJsonPath('error_code', 'NOT_FOUND');
-        $this->turn($first, 'ask', 'Hi', $this->admin)->assertNotFound()->assertJsonPath('error_code', 'NOT_FOUND');
-        $this->assertCount(0, $this->claude->calls);
+        // Someone else's chat opens for any staff member (shared since 2026-11-17)…
+        $this->api('GET', '/api/admin/creatives/agent/session?id='.$first, [], $this->admin)->assertOk()->assertJsonPath('session.id', $first);
+        // …but without an id each person lands in their own newest workspace chat.
+        $this->assertNotSame($first, $this->sessionId($this->admin));
+        $this->claude->replies = [FakeCreativeAgentModel::text('Hi, both of you.')];
+        $this->turn($first, 'ask', 'Hi from the admin', $this->admin)->assertOk()
+            ->assertJsonPath('messages.0.kind', 'user')
+            ->assertJsonPath('messages.0.author', 'Owner Admin');
+        $this->claude->calls = [];
 
         $this->travel(1)->minute();
         $second = (string) $this->api('POST', '/api/admin/creatives/agent/sessions')->assertOk()
@@ -342,6 +347,38 @@ class CreativesAgentTest extends EngineTestCase
         $third = (string) $this->api('GET', '/api/admin/creatives/agent/session?id='.$second)->assertOk()->assertJsonPath('messages', [])->json('session.id');
         $this->assertNotContains($third, [$first, $second]);
         $this->turn($second, 'ask', 'Still there?')->assertNotFound();
+    }
+
+    public function test_a_shared_chat_answers_one_person_at_a_time_and_lists_who_wrote(): void
+    {
+        $session = $this->sessionId();
+        // The assistant looks something up first (continue), then answers.
+        $this->claude->replies = [
+            FakeCreativeAgentModel::tools([['get_budget', []]], 'Let me check.'),
+            FakeCreativeAgentModel::text('Plenty left.'),
+        ];
+        $this->turn($session, 'ask', 'How much budget is left?')->assertOk()->assertJsonPath('status', 'continue');
+
+        // A teammate cannot slip a message in between the steps of that answer.
+        $this->turn($session, 'ask', 'Me too', $this->admin)->assertStatus(409)
+            ->assertJsonPath('error_code', 'SESSION_BUSY')
+            ->assertJsonPath('answering', 'Mara Marketing');
+        $this->api('GET', '/api/admin/creatives/agent/session?id='.$session, [], $this->admin)->assertJsonPath('answering', 'Mara Marketing');
+        $this->assertCount(1, $this->claude->calls);
+
+        $this->turn($session, 'ask')->assertOk()->assertJsonPath('status', 'done');
+        $this->claude->replies = [FakeCreativeAgentModel::text('Hello, admin.')];
+        $this->turn($session, 'ask', 'Me too', $this->admin)->assertOk()->assertJsonPath('status', 'done');
+
+        $row = collect($this->api('GET', '/api/admin/creatives/agent/sessions', [], $this->admin)->assertOk()->json('sessions'))
+            ->firstWhere('id', $session);
+        $this->assertSame('Mara Marketing', $row['started_by']);
+        $this->assertEqualsCanonicalizing(['Mara Marketing', 'Owner Admin'], $row['people']);
+        $this->assertSame(2, $row['messages']);
+        $this->assertSame('Me too', $row['last_text']);
+        $this->assertSame('Owner Admin', $row['last_author']);
+        $this->assertNull($row['answering']);
+        $this->api('GET', '/api/admin/creatives/agent/sessions', [], $this->user)->assertForbidden();
     }
 
     // ---- the loop ---------------------------------------------------------------
@@ -925,9 +962,6 @@ class CreativesAgentTest extends EngineTestCase
         [$session, $jobId] = $this->proposeRecipe();
         $approve = fn (?string $as = null) => $this->api('POST', "/api/admin/creatives/agent/jobs/{$jobId}/approve", [], $as);
 
-        // Someone else's chat: not found.
-        $approve($this->admin)->assertNotFound()->assertJsonPath('error_code', 'NOT_FOUND');
-
         // The whole total must fit what is left.
         $spent = (float) $this->api('GET', '/api/admin/creatives/budget')->json('budget.spent_usd');
         $this->setCap(round($spent + 0.66, 2));
@@ -1048,7 +1082,6 @@ class CreativesAgentTest extends EngineTestCase
         [$session, $jobId] = $this->proposeRecipe();
         $cancel = fn (int $id, ?string $as = null) => $this->api('POST', "/api/admin/creatives/agent/jobs/{$id}/cancel", [], $as);
 
-        $cancel($jobId, $this->admin)->assertNotFound();
         // A proposal is simply dropped.
         $cancel($jobId)->assertOk()->assertJsonPath('job.status', 'canceled')->assertJsonPath('job.steps.0.status', 'canceled');
         $this->api('POST', "/api/admin/creatives/agent/jobs/{$jobId}/approve")->assertStatus(409)->assertJsonPath('error_code', 'JOB_NOT_PROPOSED');
@@ -1133,7 +1166,7 @@ class CreativesAgentTest extends EngineTestCase
      */
     public function test_query_data_answers_every_data_tool_with_no_credential_or_email(): void
     {
-        $this->assertSame(CreativeAgentPrompt::QUERY_TOOLS, array_column(app(AiTools::class)->list(), 'name'));
+        $this->assertSame(CreativeAgentPrompt::QUERY_TOOLS, app(AiTools::class)->dataToolNames());
 
         $secretKey = 'SEEKRIT-secret-key-value-123';
         $customer = $this->makeUser(['name' => 'Juan Dela Cruz', 'email' => 'juan@customer.test']);
@@ -1467,7 +1500,8 @@ class CreativesAgentTest extends EngineTestCase
         $this->assertSame($sent, CreativeAgentSession::find($session)->sent_context);
         $this->api('GET', '/api/admin/creatives/agent/context')->assertOk()->assertJsonPath('context.system', CreativeAgentPrompt::SYSTEM);
         $this->assertSame($sessions, CreativeAgentSession::count());
-        $this->api('GET', '/api/admin/creatives/agent/context?session_id='.$session, [], $this->admin)->assertNotFound();
+        // A teammate's chat can be inspected too (chats are shared).
+        $this->api('GET', '/api/admin/creatives/agent/context?session_id='.$session, [], $this->admin)->assertOk();
         $this->api('GET', '/api/admin/creatives/agent/context', [], $this->user)->assertForbidden();
     }
 

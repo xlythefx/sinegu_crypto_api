@@ -8,8 +8,12 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
 /**
- * One chat with the Creatives agent, owned by the person who started it —
- * nobody else can open, continue or approve anything in it. Only the current
+ * One chat with the Creatives agent. SHARED by the whole team (2026-11-17,
+ * the owner: "a shared space for every staff type, but still knows who"):
+ * any staff member may open, continue or approve anything in it; `uni_id` /
+ * `user_name` say who STARTED it, and every person message carries its
+ * author. While the assistant answers someone, the chat is theirs until the
+ * answer ends (CreativeAgent::answeringFor). Only the current
  * conversation matters: a session idle for {@see MAX_AGE_DAYS} days is no
  * longer offered and is pruned (`creatives:agent-prune`), its messages and
  * jobs with it. Decisions live in Memory, the Brief and Plans, not here.
@@ -46,6 +50,18 @@ class CreativeAgentSession extends Model
      * agent's tools changed — the session read then says so, once.
      */
     public bool $replacedForNewTools = false;
+
+    /**
+     * Set (not stored) for a turn: the person being answered. Whatever the
+     * assistant makes in that turn (plans, videos, jobs) is theirs.
+     */
+    public ?string $actingUniId = null;
+
+    /** Who the assistant is acting for right now: the person it is answering, else who started the chat. */
+    public function actor(): string
+    {
+        return $this->actingUniId ?? $this->uni_id;
+    }
 
     protected function casts(): array
     {

@@ -81,8 +81,12 @@ Schedule::command('positions:classify-closes')->cron('3-59/5 * * * *')->withoutO
 // monthly cap is settled), and how a result whose 7 days are over is marked
 // expired. Sends no request at all while nothing is running. ODD minutes
 // (SPREAD above): an open chat or editor advances its own jobs every few
-// seconds, so this only matters while nobody is watching.
-Schedule::command('creatives:poll')->cron('1-59/2 * * * *')->withoutOverlapping(5);
+// seconds, so this only matters while nobody is watching — and for that,
+// one process keeps checking every 30 s for up to 100 s while something is
+// still running (2026-11-17: a 2-minute gap between a scene's still and its
+// animation made unwatched videos slow). In the background, so its sleeps
+// never hold up the other commands due in the same minute.
+Schedule::command('creatives:poll --for=100 --every=30')->cron('1-59/2 * * * *')->withoutOverlapping(5)->runInBackground();
 
 // Admin → Creatives' AI writer drafts the weekly recap post (an `idea` plan for
 // the coming Monday) from the published track record — Saturdays 00:15 MANILA,

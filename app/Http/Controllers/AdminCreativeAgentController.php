@@ -22,10 +22,10 @@ use Illuminate\Http\Request;
  * Cancel on the jobs it proposed.
  *
  * Every staff role may use it, collaborators (the marketing team) included,
- * in both modes. A chat belongs to the person who started it: anyone else's
- * id answers NOT_FOUND, and so does a job in someone else's chat. A job with
- * NO chat (proposed by the video editor) is the team's: any staff member may
- * Go or cancel it.
+ * in both modes. Chats are SHARED (2026-11-17): any staff member may open,
+ * continue, Go or cancel anything in any chat; each person message carries
+ * its author, and while the assistant answers someone the chat is theirs
+ * until the answer ends (SESSION_BUSY names them).
  */
 class AdminCreativeAgentController extends Controller
 {
@@ -71,9 +71,6 @@ class AdminCreativeAgentController extends Controller
         $data = $request->validate(['session_id' => ['nullable', 'string', 'max:64']]);
         $user = $this->user($request);
         $session = isset($data['session_id']) ? CreativeAgentSession::find($data['session_id']) : null;
-        if ($session !== null && $session->uni_id !== $user->uni_id) {
-            throw CreativeException::notFound('Chat not found.');
-        }
         $session ??= new CreativeAgentSession(['uni_id' => $user->uni_id, 'last_mode' => CreativeAgentSession::ASK]);
 
         $parts = $this->context->parts();
@@ -91,6 +88,22 @@ class AdminCreativeAgentController extends Controller
             'styles' => $parts['styles'],
             'context_block' => $this->context->build($session, (string) ($session->last_mode ?? CreativeAgentSession::ASK), full: true)['text'],
         ]]);
+    }
+
+    /**
+     * GET /api/admin/creatives/agent/sessions?video_id= — the team's live
+     * chats, newest first (the Chats list): who started each, who wrote in it,
+     * the latest message. Without video_id the workspace chats; with it, that
+     * video's editor chats.
+     */
+    public function sessions(Request $request): JsonResponse
+    {
+        $data = $request->validate(['video_id' => ['nullable', 'integer', 'min:1']]);
+
+        return response()->json([
+            'success' => true,
+            'sessions' => $this->agent->teamSessions(isset($data['video_id']) ? (int) $data['video_id'] : null),
+        ]);
     }
 
     /** POST /api/admin/creatives/agent/sessions {video_id?} — "New chat" (an editor chat with video_id). */
@@ -113,7 +126,7 @@ class AdminCreativeAgentController extends Controller
     {
         $user = $this->user($request);
         $data = $request->validated();
-        $session = $this->agent->ownedSession($user, $data['session_id']);
+        $session = $this->agent->liveSession($data['session_id']);
         $focus = $this->agent->focusSceneIds($session, $data['focus_scene_ids'] ?? []);
         $result = $this->agent->turn($session, $user, $data['mode'], $data['text'] ?? null, $focus);
 
@@ -156,11 +169,11 @@ class AdminCreativeAgentController extends Controller
         return response()->json(['success' => true, 'job' => $this->presenter->job($job->fresh()), 'budget' => $this->budget->summary()]);
     }
 
-    /** A job in the caller's own chat, or one with no chat (the editor's — the team's). */
+    /** Any job: chats are shared, and a job with no chat is the editor's (the team's). */
     private function job(UserCredential $user, int $id): CreativeAgentJob
     {
         $job = CreativeAgentJob::with('session')->find($id);
-        if ($job === null || ($job->session_id !== null && $job->session?->uni_id !== $user->uni_id)) {
+        if ($job === null) {
             throw CreativeException::notFound('Job not found.');
         }
 

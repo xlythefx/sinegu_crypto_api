@@ -23,6 +23,7 @@ class AiAccessKey extends Model
     protected $fillable = [
         'name', 'prefix', 'key_hash', 'created_by', 'created_by_name',
         'expires_at', 'last_used_at', 'last_used_ip', 'revoked_at', 'revoked_by_name',
+        'can_create', 'can_create_changed_by_name', 'can_create_changed_at',
     ];
 
     /** The hash never leaves the server, not even to an admin. */
@@ -34,6 +35,8 @@ class AiAccessKey extends Model
             'expires_at' => 'datetime',
             'last_used_at' => 'datetime',
             'revoked_at' => 'datetime',
+            'can_create' => 'boolean',
+            'can_create_changed_at' => 'datetime',
         ];
     }
 

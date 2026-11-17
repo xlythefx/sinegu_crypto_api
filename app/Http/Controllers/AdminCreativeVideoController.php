@@ -9,6 +9,7 @@ use App\Services\Creatives\CreativeAgentJobs;
 use App\Services\Creatives\CreativeAgentPresenter;
 use App\Services\Creatives\CreativeBudget;
 use App\Services\Creatives\CreativeException;
+use App\Services\Creatives\CreativeVideoHistory;
 use App\Services\Creatives\CreativeVideoPresenter;
 use App\Services\Creatives\CreativeVideos;
 use Illuminate\Http\JsonResponse;
@@ -67,6 +68,18 @@ class AdminCreativeVideoController extends Controller
         $this->jobs->refreshVideo($video);
 
         return $this->answer($video->fresh());
+    }
+
+    /**
+     * GET /api/admin/creatives/videos/{id}/history — every attempt at this
+     * video's scenes (made, failed and why, how long, cost, who), newest first.
+     */
+    public function history(int $id): JsonResponse
+    {
+        return response()->json([
+            'success' => true,
+            'history' => app(CreativeVideoHistory::class)->forVideo($this->find($id)),
+        ]);
     }
 
     /** PUT /api/admin/creatives/videos/{id} — the client-owned fields only. */

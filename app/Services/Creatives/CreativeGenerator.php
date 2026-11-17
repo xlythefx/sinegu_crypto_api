@@ -52,8 +52,11 @@ final class CreativeGenerator
         return ['usd' => $usd, 'allowed' => $this->budget->allows($usd)];
     }
 
-    /** @param  int|null  $agentJobId  the chat agent's job this generation is a step of */
-    public function create(array $input, ?UserCredential $user, ?int $agentJobId = null): CreativeGeneration
+    /**
+     * @param  int|null  $agentJobId  the chat agent's job this generation is a step of
+     * @param  array{name: string, ai_access_key_id: int}|null  $byAi  started by the AI connector (Grok), not a person
+     */
+    public function create(array $input, ?UserCredential $user, ?int $agentJobId = null, ?array $byAi = null): CreativeGeneration
     {
         $this->assertConfigured();
         $job = $this->prepare($input);
@@ -73,8 +76,9 @@ final class CreativeGenerator
             'status' => CreativeGeneration::SUBMITTING,
             'estimated_usd' => $usd,
             'charged_usd' => $usd,
-            'created_by_uni_id' => $user?->uni_id,
-            'created_by_name' => $user?->name,
+            'created_by_uni_id' => $byAi !== null ? null : $user?->uni_id,
+            'created_by_name' => $byAi['name'] ?? $user?->name,
+            'ai_access_key_id' => $byAi['ai_access_key_id'] ?? null,
         ]));
 
         if ($generation === null) {

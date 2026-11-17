@@ -3,8 +3,10 @@
 namespace App\Http\Controllers;
 
 use App\Models\AiAccessKey;
+use App\Models\CreativeGeneration;
 use App\Services\Ai\AiAccessKeys;
 use App\Services\Ai\AiTools;
+use App\Services\Ai\Tools\CreativeMakeTools;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -41,6 +43,28 @@ class AdminAiAccessController extends Controller
                 'title' => $t['title'],
                 'description' => $t['description'],
             ], $tools->list()),
+            // What a key switched on for Creatives may also do, and its limits.
+            'create' => [
+                'tools' => collect((new CreativeMakeTools)->definitions())
+                    ->map(fn (array $d, string $name) => ['name' => $name, 'title' => $d['title'], 'description' => $d['description']])
+                    ->values(),
+                'max_per_generation_usd' => CreativeMakeTools::MAX_PER_GENERATION_USD,
+                'max_per_key_day_usd' => CreativeMakeTools::MAX_PER_KEY_DAY_USD,
+                'label' => CreativeMakeTools::LABEL,
+                // Per key: what its Grok generations cost today (UTC) and this month.
+                'spent' => CreativeGeneration::query()->toBase()
+                    ->whereNotNull('ai_access_key_id')
+                    ->where('created_at', '>=', now()->utc()->startOfMonth()->toDateTimeString())
+                    ->selectRaw('ai_access_key_id, SUM(charged_usd) AS month_usd, SUM(CASE WHEN created_at >= ? THEN charged_usd ELSE 0 END) AS today_usd, COUNT(*) AS n', [now()->utc()->startOfDay()->toDateTimeString()])
+                    ->groupBy('ai_access_key_id')
+                    ->get()
+                    ->map(fn ($r) => [
+                        'key_id' => (int) $r->ai_access_key_id,
+                        'today_usd' => round((float) $r->today_usd, 4),
+                        'month_usd' => round((float) $r->month_usd, 4),
+                        'generations' => (int) $r->n,
+                    ])->values(),
+            ],
         ]);
     }
 
@@ -88,6 +112,34 @@ class AdminAiAccessController extends Controller
             return response()->json(['success' => false, 'error_code' => 'NOT_FOUND', 'message' => 'Key not found.'], 404);
         }
         $this->keys->revoke($key, $request->user()?->name);
+
+        return response()->json(['success' => true, 'key' => $this->keys->present($key->fresh())]);
+    }
+
+    /**
+     * PUT /api/admin/ai-access/keys/{id} {can_create} — switch on (or off) this
+     * key's right to make images / clips and Idea plans in Creatives. Who and
+     * when is kept on the key. A revoked or expired key cannot be switched on.
+     */
+    public function update(Request $request, int $id): JsonResponse
+    {
+        $data = $request->validate(['can_create' => ['required', 'boolean']]);
+        $key = AiAccessKey::find($id);
+        if (! $key) {
+            return response()->json(['success' => false, 'error_code' => 'NOT_FOUND', 'message' => 'Key not found.'], 404);
+        }
+        if ($data['can_create'] && $key->state() !== 'active') {
+            return response()->json([
+                'success' => false,
+                'error_code' => 'KEY_NOT_ACTIVE',
+                'message' => 'Only an active key can be allowed to create.',
+            ], 422);
+        }
+        $key->forceFill([
+            'can_create' => (bool) $data['can_create'],
+            'can_create_changed_by_name' => $request->user()?->name,
+            'can_create_changed_at' => now(),
+        ])->save();
 
         return response()->json(['success' => true, 'key' => $this->keys->present($key->fresh())]);
     }
