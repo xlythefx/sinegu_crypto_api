@@ -118,6 +118,22 @@ class KillSwitchTest extends PaymentTestCase
         Mail::assertNothingSent();
     }
 
+    public function test_a_loss_made_only_by_the_fee_does_not_count_and_ends_the_run(): void
+    {
+        $asset = $this->ltc();
+
+        // +0.40 on price, minus a ~0.90 round-trip fee = a small loss after fees.
+        $this->sync([[-12, 40], [0.4, 30], [-4, 20], [-7, 10]]);
+
+        $this->assertLessThan(0, (float) DB::table('binance_pastpositions')->where('realized_pnl', '<', 0)
+            ->where('realized_pnl', '>', -1)->value('realized_pnl'), 'the fee-only close is stored as a net loss');
+        $this->assertTrue($asset->fresh()->enabled);
+        Mail::assertNothingSent();
+
+        $this->sync([[-3, 5]]);   // a third loss on price after the fee-only close
+        $this->assertFalse($asset->fresh()->enabled);
+    }
+
     public function test_losses_from_before_the_switch_was_armed_never_count(): void
     {
         $asset = $this->ltc();

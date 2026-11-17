@@ -96,6 +96,14 @@ final class KillSwitch
      * closes after the switch was armed and at most `kill_switch_losses` deep.
      * A close whose P&L is not written yet is skipped, never guessed.
      *
+     * A loss counts only when the trade lost on PRICE — its P&L before fees
+     * (`realized_pnl + exchange_fee`) is below zero (owner + Dima, 2026-11-17).
+     * A close that made money on price and went negative only because of the
+     * exchange fee (SANTOS, 13 Nov: +$1.94 on price, −$0.35 after a $2.29 fee)
+     * is the strategy calling it right, so it ends the run like a win.
+     * A row with no fee recorded is gross already (pre-2026-09-11 or not
+     * estimated yet), so its P&L is used as it stands.
+     *
      * @param  list<string>  $masterKeys
      */
     public function masterLossRun(string $exchange, Asset $asset, array $masterKeys): int
@@ -114,8 +122,9 @@ final class KillSwitch
         }
 
         $losses = 0;
-        foreach ($query->pluck('realized_pnl') as $pnl) {
-            if ((float) $pnl > 0) {
+        foreach ($query->get(['realized_pnl', 'exchange_fee']) as $row) {
+            $beforeFees = (float) $row->realized_pnl + (float) ($row->exchange_fee ?? 0);
+            if ($beforeFees >= 0) {
                 break;
             }
             $losses++;
