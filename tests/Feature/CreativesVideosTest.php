@@ -712,6 +712,9 @@ class CreativesVideosTest extends EngineTestCase
         $jobId = (int) $this->api('POST', "/api/admin/creatives/videos/{$id}/scenes/propose", ['scenes' => $this->threeScenes()])->assertOk()->json('job.id');
         $this->api('POST', "/api/admin/creatives/agent/jobs/{$jobId}/approve", [], $this->admin)->assertOk();
 
+        // The team is told who is generating (never blocked).
+        $this->api('GET', '/api/admin/creatives/videos')->assertJsonPath('videos.0.generating_by', 'Owner Admin');
+
         // While it runs, each clip scene says where it is (the editor's timer).
         $scenes = $this->api('GET', "/api/admin/creatives/videos/{$id}")->assertOk()->json('video.scenes');
         $this->assertSame(['step' => 1, 'steps' => 2, 'step_label' => 'Still image', 'waiting' => false], array_intersect_key(

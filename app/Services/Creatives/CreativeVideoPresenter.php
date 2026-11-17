@@ -83,6 +83,8 @@ final class CreativeVideoPresenter
             'scenes_total' => $scenes->count(),
             'scenes_ready' => $statuses->filter(fn ($s) => $s === CreativeVideoScene::READY)->count(),
             'scenes_generating' => $statuses->filter(fn ($s) => in_array($s, [CreativeVideoScene::PLANNED, CreativeVideoScene::GENERATING], true))->count(),
+            // Who pressed Go on the job making clips right now (the team is told, never blocked).
+            'generating_by' => $video->jobs()->where('status', CreativeAgentJob::RUNNING)->orderByDesc('id')->value('approved_by_name'),
             'duration_ms' => (int) $scenes->sum(fn (CreativeVideoScene $s) => $s->durationMs()),
             'created_by_name' => $video->created_by_name,
             'updated_at' => $video->updated_at?->toIso8601String(),
