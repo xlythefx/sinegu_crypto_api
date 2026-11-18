@@ -86,6 +86,22 @@ class EngineCache
     }
 
     /**
+     * Ask the engine to post a HIGH-RISK alert to the admin Telegram group
+     * (App\Services\Alerts\RiskAlerts — a trade that reached accounts outside
+     * its feed). Private chat only, never the public channel.
+     *
+     * @param  list<string>  $lines
+     */
+    public function riskAlert(string $label, string $title, array $lines): bool
+    {
+        return $this->ping('risk-alert', [
+            'label' => $label,
+            'title' => $title,
+            'lines' => array_values(array_slice($lines, 0, 30)),
+        ]);
+    }
+
+    /**
      * Ask the engine to tell the admin Telegram group that an invoice was paid
      * (App\Services\Billing\PaymentNotifier). Same messenger arrangement as the
      * kill switch: the engine owns the bot token and the admin chat.

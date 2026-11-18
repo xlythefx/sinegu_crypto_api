@@ -2,6 +2,12 @@
 
 namespace App\Http\Controllers;
 
+use App\Services\Exchanges\ExchangeSchema;
+use App\Models\RiskAlert;
+use App\Services\Alerts\RiskAlerts;
+use App\Services\Alerts\FeedAudit;
+use Illuminate\Validation\Rule;
+use App\Services\Engine\WebhookPaths;
 use App\Http\Controllers\Concerns\GuardsEngineExchange;
 use App\Models\Asset;
 use App\Models\ExchangeAccount;
@@ -114,7 +120,7 @@ class EngineController extends Controller
                     // TradingView's signals and a customer never trades a test
                     // signal. The API decides the feed from the owner's role;
                     // the engine never reads a role.
-                    'feed' => $a->owner_type === UserCredential::TESTER ? 'test' : 'main',
+                    'feed' => WebhookPaths::feedForRole($a->owner_type),
                 ];
             })->values(),
         ]);
@@ -239,7 +245,7 @@ class EngineController extends Controller
      * Always 200 when valid — the email is best-effort and a refusal here
      * would only make the engine log noise; Telegram already carries it.
      */
-    public function exitStuck(string $exchange, Request $request, TradeAlerts $alerts): JsonResponse
+    public function exitStuck(string $exchange, Request $request, TradeAlerts $alerts, RiskAlerts $risk): JsonResponse
     {
         if ($guard = $this->guardExchange($exchange)) {
             return $guard;
@@ -261,11 +267,33 @@ class EngineController extends Controller
             array_values($data['accounts']), (int) ($data['total'] ?? count($data['accounts'])),
         );
 
+        // Also on the Overview's high-risk list until someone resolves it. Not
+        // emailed twice: exitStuck() above already mailed the same list.
+        $names = TradeAlerts::names($exchange, array_map(fn ($a) => (string) ($a['uni_id'] ?? ''), $data['accounts']));
+        $side = str_ends_with($data['action'], 'SHORT') ? 'SHORT' : 'LONG';
+        $broker = ExchangeSchema::for($exchange)->brokerLabel;
+        $lines = [$data['why'] === 'abandoned'
+            ? "The bot stopped retrying the close after ".($data['attempts'] ?? 'several').' attempts. These positions may still be open:'
+            : "{$broker} refused the close outright. These positions may still be open:"];
+        foreach ($data['accounts'] as $a) {
+            $n = $names[(string) ($a['uni_id'] ?? '')] ?? ['owner' => null, 'account' => null];
+            $lines[] = '• '.($n['owner'] ?? 'Unknown user').' · '.(($a['name'] ?? null) ?: ($n['account'] ?? '—'))
+                .(! empty($a['error']) ? ' — '.$a['error'] : '');
+        }
+        $risk->raise(
+            RiskAlert::EXIT_STUCK,
+            "{$exchange}:{$data['ticker']}:{$side}",
+            "Close failed: {$data['ticker']} {$side} may still be open on {$broker}",
+            $lines,
+            $exchange,
+            email: false,
+        );
+
         return response()->json(['success' => true, 'sent' => $sent]);
     }
 
     /** POST /api/engine/{exchange}/trade-logs — one row per processed signal. */
-    public function storeTradeLog(string $exchange, Request $request): JsonResponse
+    public function storeTradeLog(string $exchange, Request $request, FeedAudit $feedAudit, RiskAlerts $alerts): JsonResponse
     {
         if ($guard = $this->guardExchange($exchange)) {
             return $guard;
@@ -286,7 +314,7 @@ class EngineController extends Controller
             'details' => ['nullable', 'array'],
             'ts' => ['required', 'date'],
             // Which webhook the signal arrived on (WebhookPaths::FEEDS).
-            'feed' => ['nullable', 'string', 'in:main,test'],
+            'feed' => ['nullable', 'string', Rule::in(WebhookPaths::FEEDS)],
         ]);
 
         // An engine deployed before the test feed existed sends no feed, and
@@ -301,7 +329,42 @@ class EngineController extends Controller
 
         $log = TradeLog::create($data + ['exchange' => $exchange]);
 
+        // High-risk checks on what just happened (best-effort, never a 500):
+        // a fill outside the signal's feed, and a signal refused because the
+        // engine could not load the coin list at all.
+        $feedAudit->check($log);
+        $this->alertIfAssetsUnavailable($log, $alerts);
+
         return response()->json(['success' => true, 'trade_log_id' => $log->id], 201);
+    }
+
+    /**
+     * A rejected signal whose reason is `assets_unavailable`: the engine never
+     * got the coin list, so EVERY entry on that venue is refused until it
+     * does — a high-risk alert, once an hour per venue while it lasts.
+     */
+    private function alertIfAssetsUnavailable(TradeLog $log, RiskAlerts $alerts): void
+    {
+        if ($log->category !== 'rejected' || $log->feed === 'test') {
+            return;
+        }
+        $reasons = collect((array) $log->details)->pluck('reason')->filter()->all();
+        if (! in_array('assets_unavailable', $reasons, true)) {
+            return;
+        }
+        $broker = ExchangeSchema::isSupported((string) $log->exchange)
+            ? ExchangeSchema::for((string) $log->exchange)->brokerLabel : ucfirst((string) $log->exchange);
+        $alerts->raise(
+            RiskAlert::ASSETS_UNAVAILABLE,
+            'venue:'.$log->exchange,
+            "{$log->action} {$log->ticker} on {$broker} was refused: the bot could not load the coin list",
+            [
+                "The bot could not read the Trading Assets list from the API, so it refused this signal rather than trade blind. Every entry on {$broker} is refused the same way until the list loads again.",
+                'Check that the API is up and answering the engine (Admin → Bot Engine). Signal Log row #'.$log->id.'.',
+            ],
+            (string) $log->exchange,
+            $log->id,
+        );
     }
 
     /** GET /api/engine/{exchange}/open-strategies?api_key=&symbol= — entry tags for open positions. */

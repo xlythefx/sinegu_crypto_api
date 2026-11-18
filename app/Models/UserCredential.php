@@ -41,6 +41,32 @@ class UserCredential extends Authenticatable
      */
     public const TESTER = 'tester';
 
+    /**
+     * A SUB-MASTER (2026-11-18, the user's request): a second house account
+     * that trades its OWN signals, beside the master's.
+     *  - **Sub-master feed only.** Its accounts are listed with
+     *    `feed: submaster`, so they trade ONLY the engine's sub-master
+     *    webhooks (WebhookPaths::SUBMASTER, its own secret) and never the
+     *    main TradingView feed; no customer or master ever receives one of
+     *    its signals. Every fill is audited against that rule on ingest
+     *    (App\Services\Alerts\FeedAudit) and a breach is a high-risk alert.
+     *  - **Private.** Its signals are reported to the admin Telegram group
+     *    only, never the public channel or Discord, like the test feed.
+     *  - **Its own run.** Streak sizing reads its own closes
+     *    (StreakSizing::followedRuns gives the master's run to customers and
+     *    the master only), and the master's full stack never holds it back.
+     *  - **Trader dashboard only.** NOT in EnsureAdmin::ROLES or the staff
+     *    group: no admin portal.
+     *  - **Not a customer, never billed** (invoicing, insights and the
+     *    customer lists key on `type = 'user'`); no Discord Trader role.
+     * Changing a user to or from this role is refused while they hold an
+     * open position, for the tester's reason (AdminUserController::update).
+     */
+    public const SUBMASTER = 'submaster';
+
+    /** Roles whose accounts follow a feed of their own, never the main one. */
+    public const PRIVATE_FEED_ROLES = [self::TESTER, self::SUBMASTER];
+
     protected $table = 'user_credentials';
 
     protected $primaryKey = 'uni_id';
@@ -103,6 +129,12 @@ class UserCredential extends Authenticatable
     public function isTester(): bool
     {
         return $this->type === self::TESTER;
+    }
+
+    /** Whether this is a sub-master account — see {@see self::SUBMASTER}. */
+    public function isSubmaster(): bool
+    {
+        return $this->type === self::SUBMASTER;
     }
 
     /** Whether a Discord identity is linked to this account. */

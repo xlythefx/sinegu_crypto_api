@@ -2,6 +2,9 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\UserCredential;
+use App\Models\RiskAlert;
+use App\Services\Alerts\RiskAlerts;
 use App\Http\Controllers\Concerns\GuardsEngineExchange;
 use App\Models\ExchangeAccount;
 use App\Services\Assets\KillSwitch;
@@ -478,7 +481,7 @@ class EngineSyncController extends Controller
      * every five minutes would push the 3-day disconnect deadline forward
      * forever and the account would never age out.
      */
-    public function keyStatus(string $exchange, Request $request, EngineCache $engineCache): JsonResponse
+    public function keyStatus(string $exchange, Request $request, EngineCache $engineCache, RiskAlerts $risk): JsonResponse
     {
         if ($guard = $this->guardExchange($exchange)) {
             return $guard;
@@ -527,6 +530,7 @@ class EngineSyncController extends Controller
         // Transitions only — the pollers re-report the same verdict every tick.
         if ($wasBlocked !== $blocked) {
             $engineCache->refreshAccounts();
+            $this->alertHouseKey($exchange, $account, $blocked, $risk);
         }
 
         return response()->json([
@@ -535,6 +539,41 @@ class EngineSyncController extends Controller
             'status' => $account->key_status,
             'grace_ends_at' => $account->keyGraceEndsAt()?->toIso8601String(),
         ]);
+    }
+
+    /**
+     * The master's or the sub-master's key just turned refused (or good
+     * again). Those accounts ARE the strategy — a blocked house key means the
+     * published track record or the sub-master's trading has stopped — so it
+     * is a high-risk alert; a customer's blocked key is theirs to fix and is
+     * not. A key that works again closes its own alert.
+     */
+    private function alertHouseKey(string $exchange, ExchangeAccount $account, bool $blocked, RiskAlerts $risk): void
+    {
+        $owner = UserCredential::query()->where('uni_id', $account->uni_id)->first(['uni_id', 'name', 'type']);
+        if (! $owner || ! in_array($owner->type, ['master', UserCredential::SUBMASTER], true)) {
+            return;
+        }
+        $key = "{$exchange}:{$account->id}";
+        if (! $blocked) {
+            $risk->recover(RiskAlert::KEY_REFUSED, $key, 'The exchange accepted the key again.');
+
+            return;
+        }
+        $broker = $this->schema($exchange)->brokerLabel;
+        $role = $owner->type === 'master' ? 'master' : 'sub-master';
+        $risk->raise(
+            RiskAlert::KEY_REFUSED,
+            $key,
+            "The {$role} account's {$broker} key was refused ({$owner->name} · {$account->name})",
+            [
+                "{$broker} refused the {$role} account's API key, so the bot opens no new trades on it until it is fixed."
+                    .($account->demo ? ' (This is a demo account.)' : ''),
+                'What the exchange said: '.trim(($account->key_error_code ? $account->key_error_code.' ' : '').($account->key_error_message ?? 'no message')),
+                'Usually the fix is on the exchange: allow our server IP '.config('services.engine.public_ip', 'the server IP').' on the key, and tick the futures-trading permission. Then press Recheck on Admin → API Keys.',
+            ],
+            $exchange,
+        );
     }
 
     /**

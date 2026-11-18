@@ -16,7 +16,8 @@ class TradeLog extends Model
 
     protected $fillable = [
         'exchange',
-        // main (TradingView, everyone) | test (testers only) — WebhookPaths::FEEDS.
+        // main (TradingView, everyone) | test (testers only) | submaster
+        // (sub-masters only) — WebhookPaths::FEEDS.
         'feed',
         'action',
         'ticker',
@@ -30,6 +31,9 @@ class TradeLog extends Model
         'failed',
         'skipped',
         'details',
+        // Accounts that filled although their owner is not on this feed —
+        // written by App\Services\Alerts\FeedAudit, never by the engine.
+        'breach',
         'ts',
         // Delivery timing (App\Services\Admin\SignalDelivery): when TradingView
         // fired the alert, when the engine got it, and how fast it answered.
@@ -44,6 +48,7 @@ class TradeLog extends Model
         return [
             'success' => 'boolean',
             'details' => 'array',
+            'breach' => 'array',
             'ts' => 'datetime',
             // Milliseconds kept: the feed comparison tells two signals apart
             // that reached us within the same second.
@@ -65,4 +70,11 @@ class TradeLog extends Model
     {
         return $query->where('feed', 'main');
     }
+
+    /**
+     * The feeds that trade REAL house or customer money and so belong in the
+     * failure reports (health banner, hourly summary): main and the
+     * sub-master's. Only the test feed is left out.
+     */
+    public const REPORTED_FEEDS = ['main', 'submaster'];
 }

@@ -10,7 +10,7 @@ use Illuminate\Support\Collection;
 
 /**
  * The hourly failed-trade summary's content (2026-11-12): what went wrong on
- * the MAIN feed's signals in one window, read from `trade_logs` only — the
+ * the MAIN and SUB-MASTER feeds' signals in one window, read from `trade_logs` only — the
  * engine's own record — so the email and the Signal Log cannot disagree.
  *
  * Per signal, every account outcome that needs a person:
@@ -40,7 +40,7 @@ class TradeFailureDigest
     public function build(CarbonImmutable $from, CarbonImmutable $to): array
     {
         $signals = TradeLog::query()
-            ->where('feed', 'main')
+            ->whereIn('feed', TradeLog::REPORTED_FEEDS)
             ->where(fn ($q) => $q->whereNull('category')->orWhere('category', '!=', 'retry'))
             ->where('ts', '>=', $from)->where('ts', '<', $to)
             ->orderBy('ts')->orderBy('id')
@@ -52,7 +52,7 @@ class TradeFailureDigest
         }
 
         $retries = TradeLog::query()
-            ->where('feed', 'main')->where('category', 'retry')
+            ->whereIn('feed', TradeLog::REPORTED_FEEDS)->where('category', 'retry')
             ->where('ts', '>=', $from)
             ->where('ts', '<', $to->addMinutes(self::RETRY_FOLD_MINUTES))
             ->get();

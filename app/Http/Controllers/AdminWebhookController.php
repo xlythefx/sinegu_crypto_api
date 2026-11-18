@@ -26,7 +26,7 @@ class AdminWebhookController extends Controller
     /**
      * GET /api/admin/webhooks
      *
-     * `webhooks[]`, main feed first then test, venues in WebhookPaths order:
+     * `webhooks[]`, main feed first then test then submaster, venues in WebhookPaths order:
      *  - `venue_live` — the engine trades this venue (`/health` → `exchanges`);
      *    null when the engine did not answer.
      *  - `enabled` — the engine's own verdict on this path (`/health` →
@@ -46,6 +46,7 @@ class AdminWebhookController extends Controller
             : null;
         $engineHooks = $reachable && is_array($health['webhooks'] ?? null) ? $health['webhooks'] : null;
         $testFeed = $reachable ? data_get($health, 'test_feed.enabled') : null;
+        $subFeed = $reachable ? data_get($health, 'submaster_feed.enabled') : null;
 
         $receivers = $this->receivers();
 
@@ -68,6 +69,7 @@ class AdminWebhookController extends Controller
             'engine' => [
                 'reachable' => $reachable,
                 'test_feed_enabled' => is_bool($testFeed) ? $testFeed : null,
+                'submaster_feed_enabled' => is_bool($subFeed) ? $subFeed : null,
             ],
             'bases' => [
                 'prod' => (string) config('services.engine.public_webhook_base', 'https://pixel-alpha.com'),
@@ -76,6 +78,7 @@ class AdminWebhookController extends Controller
             'secrets' => [
                 'main_set' => (string) config('services.engine.webhook_secrets.binance') !== '',
                 'test_set' => (string) config('services.engine.test_webhook_secret') !== '',
+                'submaster_set' => (string) config('services.engine.submaster_webhook_secret') !== '',
             ],
             'webhooks' => $webhooks,
         ]);
@@ -106,11 +109,11 @@ class AdminWebhookController extends Controller
      * Accounts each path would fan out to, per venue per feed, split live /
      * demo. The SAME filters as EngineController::accounts (enabled, connected
      * — soft-deleted rows excluded by the model — not sandbox, owner not
-     * suspended) and the same feed rule (tester owner → test, anyone else →
-     * main), so the page states exactly what the fan-out hits. A blocked key
+     * suspended) and the same feed rule (WebhookPaths::feedForRole: tester →
+     * test, sub-master → submaster, anyone else → main), so the page states exactly what the fan-out hits. A blocked key
      * is still counted, as the engine still lists it (it skips it on entries).
      *
-     * @return array<string, array{main: array{live: int, demo: int}, test: array{live: int, demo: int}}>
+     * @return array<string, array<string, array{live: int, demo: int}>>
      */
     private function receivers(): array
     {
@@ -129,7 +132,7 @@ class AdminWebhookController extends Controller
                     ->get(["{$t}.demo", 'user_credentials.type as owner_type']);
 
                 foreach ($rows as $row) {
-                    $feed = $row->owner_type === UserCredential::TESTER ? 'test' : 'main';
+                    $feed = WebhookPaths::feedForRole($row->owner_type);
                     $counts[$feed][(int) $row->demo === 1 ? 'demo' : 'live']++;
                 }
             }

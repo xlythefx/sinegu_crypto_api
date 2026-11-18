@@ -16,6 +16,7 @@ use App\Mail\PaymentDisputedNotice;
 use App\Mail\PaymentReceived;
 use App\Mail\PaymentReminder;
 use App\Mail\PixelMail;
+use App\Mail\RiskAlertNotice;
 use App\Mail\TradeExitStuckNotice;
 use App\Mail\TradeFailureSummary;
 use App\Mail\WeeklySummary;
@@ -355,6 +356,27 @@ class EmailCatalogue
                     ],
                     total: 1,
                     at: '12 Nov 2026, 09:47 UTC',
+                ),
+            ],
+            [
+                'slug' => 'risk-alert',
+                'audience' => self::AUDIENCE_TEAM,
+                'title' => 'High-risk alert',
+                'trigger' => 'At once, when: a trade reaches accounts outside its signal feed (e.g. a customer filled from the sub-master feed); a close fails for good; the kill switch trips; the master\'s or sub-master\'s key is refused; the bot engine stops answering; a signal is refused because the coin list could not load. Then at most once an hour while the same problem repeats.',
+                'to' => implode(', ', TradeAlerts::recipients()) ?: 'TRADE_ALERT_EMAILS (not set: nothing is sent)',
+                'live' => true,
+                'note' => 'Also listed in red on Admin → Overview → Needs attention until a full admin marks it resolved. A wrong-feed trade is posted to the admin Telegram group too; the rest are already posted there by the bot. A stuck close keeps its own email (above) and is only listed here.',
+                'mail' => new RiskAlertNotice(
+                    kind: 'feed_breach',
+                    label: 'Trade reached the wrong accounts',
+                    title: 'LONG LTCUSDT on Binance reached 1 account(s) outside the sub-master feed',
+                    lines: [
+                        'A LONG entry on LTCUSDT Binance came in on the sub-master feed, and these accounts were filled although they do not belong to it:',
+                        '• Sample Customer · Main — role user, should only trade the main feed.',
+                        'Check those positions now and close them by hand if they should not be open. Signal Log row #1234 has every account.',
+                    ],
+                    occurrences: 1,
+                    at: '18 Nov 2026, 09:47 UTC',
                 ),
             ],
         ];

@@ -109,6 +109,10 @@ return [
         // can never reach a customer's account, and a fallback would make the
         // two tokens one. Empty = the console cannot send a test signal.
         'test_webhook_secret' => env('ENGINE_TEST_WEBHOOK_SECRET'),
+        // The SUB-MASTER feed's token (WebhookPaths::SUBMASTER — sub-master-
+        // owned accounts only, 2026-11-18). Must equal the engine's
+        // BINANCE_ABCD_SUBMASTER_WEBHOOK_SECRET; no fallback, same reason.
+        'submaster_webhook_secret' => env('ENGINE_SUBMASTER_WEBHOOK_SECRET'),
         'targets' => [
             'local' => env('ENGINE_URL_LOCAL', 'http://127.0.0.1:5010'),
             'prod' => env('ENGINE_URL_PROD', 'http://127.0.0.1:5010'),
@@ -121,6 +125,10 @@ return [
         // a user must allow-list on their API key. Shown verbatim in the
         // "key blocked" modal, so it must be the IP, never a URL.
         'public_ip' => env('ENGINE_PUBLIC_IP', '2.24.139.176'),
+        // `engine:watch` (high-risk alert when the engine stops answering).
+        // On by default in production only, so a laptop without the engine
+        // never raises one.
+        'health_watch' => (bool) env('ENGINE_HEALTH_WATCH', env('APP_ENV') === 'production'),
     ],
 
     // The landing page's quote strip (PublicMarketController). Binance's own

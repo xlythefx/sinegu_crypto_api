@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Services\Engine\WebhookPaths;
 use App\Http\Middleware\EnsureAdmin;
 use App\Http\Middleware\EnsureStaff;
 use App\Models\Invoice;
@@ -37,7 +38,7 @@ use Illuminate\Validation\Rule;
 class AdminUserController extends Controller
 {
     /** Every value `user_credentials.type` may hold — what an admin may assign. */
-    public const ROLES = ['user', ...EnsureAdmin::ROLES, EnsureStaff::COLLABORATOR, UserCredential::TESTER];
+    public const ROLES = ['user', ...EnsureAdmin::ROLES, EnsureStaff::COLLABORATOR, UserCredential::TESTER, UserCredential::SUBMASTER];
 
     /**
      * Keys a read-only collaborator never receives from show() / store() /
@@ -632,12 +633,12 @@ class AdminUserController extends Controller
                 }
             }
 
-            // Into or out of `tester` switches the signal feed the user's
-            // accounts follow (main ↔ test). A position the old feed opened
+            // A role change that moves the user's accounts to another signal
+            // feed (main ↔ test ↔ submaster, WebhookPaths::feedForRole). A position the old feed opened
             // would then wait for an exit the new feed never sends, so the
-            // switch waits until they are flat. Between two non-tester roles
-            // the feed does not move, and nothing here blocks it.
-            if (($validated['type'] === UserCredential::TESTER || $user->type === UserCredential::TESTER)
+            // switch waits until they are flat. Between two roles on the same
+            // feed nothing moves, and nothing here blocks it.
+            if (WebhookPaths::feedForRole($validated['type']) !== WebhookPaths::feedForRole($user->type)
                 && ($venues = $this->openPositionVenues($user)) !== []) {
                 return response()->json([
                     'success' => false,

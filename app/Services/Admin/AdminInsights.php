@@ -131,6 +131,12 @@ class AdminInsights
                         'killed_at' => $this->iso($a->killed_at),
                         'reason' => $a->killed_reason,
                     ])->values(),
+                // High-risk alerts nobody has resolved yet (RiskAlerts): a trade
+                // outside its feed, a stuck close, the kill switch, a house
+                // key refused, the engine down, the coin list unavailable.
+                // Full admins only (names accounts).
+                'risk_alerts' => \App\Models\RiskAlert::open()->orderByDesc('last_seen_at')->limit(20)->get()
+                    ->map(fn ($a) => \App\Services\Alerts\RiskAlerts::present($a))->values(),
                 'signals_today' => [
                     'signals' => $signalsToday->count(),
                     'with_problems' => $signalsToday->where('success', false)->count(),

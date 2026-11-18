@@ -660,8 +660,11 @@ class AdminTradeLogController extends Controller
             'kind' => 'signal',
             'id' => $log->id,
             'exchange' => $log->exchange,
-            // main (TradingView, everyone) | test (testers only).
+            // main (TradingView, everyone) | test (testers only) | submaster.
             'feed' => $log->feed ?? 'main',
+            // Accounts that FILLED although their owner is not on this feed
+            // (FeedAudit) — the high-risk proof; null on a clean row.
+            'breach' => $log->breach ?: null,
             'action' => $log->action,
             // The plain words: which side of the market, and opening or closing.
             'side' => in_array($action, ['SELL', 'EXIT_SHORT'], true) ? 'SHORT' : 'LONG',

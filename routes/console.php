@@ -41,6 +41,11 @@ Schedule::command('payments:watch-tron')->everyMinute()->withoutOverlapping(5);
 // sent for a clean hour. A stuck close is emailed at once by the engine's call.
 Schedule::command('trade-alerts:digest')->hourlyAt(2)->withoutOverlapping(10);
 
+// High-risk alert when the bot engine stops answering (EngineWatch: two misses
+// in a row, emailed; closes itself when it answers). Odd minutes, beside the
+// even-minute jobs.
+Schedule::command('engine:watch')->cron('1-59/2 * * * *')->withoutOverlapping(5);
+
 // Discord server roles (Member / Trader) follow the account: every approve,
 // suspend, connect and disconnect syncs the user on the spot, so this nightly
 // pass only catches the write that happened while Discord was down and the

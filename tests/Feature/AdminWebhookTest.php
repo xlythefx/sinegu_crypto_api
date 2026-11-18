@@ -30,6 +30,7 @@ class AdminWebhookTest extends EngineTestCase
             'services.engine.webhook_secrets.bybit' => self::MAIN_SECRET,
             'services.engine.webhook_secrets.mexc' => self::MAIN_SECRET,
             'services.engine.test_webhook_secret' => self::TEST_SECRET,
+            'services.engine.submaster_webhook_secret' => 'sub-master-secret-xyz789',
             'services.engine.targets.local' => 'http://engine.test:5010',
             'services.engine.public_webhook_base' => 'https://pixel-alpha.com',
         ]);
@@ -51,12 +52,14 @@ class AdminWebhookTest extends EngineTestCase
             'status' => 'ok',
             'exchanges' => ['binance' => ['accounts' => 4], 'mexc' => ['accounts' => 1]],
             'test_feed' => ['enabled' => true],
+            'submaster_feed' => ['enabled' => true],
             'webhooks' => [
                 ['exchange' => 'binance', 'feed' => 'main', 'path' => '/binance_abcd_webhook', 'enabled' => true],
                 ['exchange' => 'mexc', 'feed' => 'main', 'path' => '/mexc_abcd_webhook', 'enabled' => true],
                 ['exchange' => 'bybit', 'feed' => 'main', 'path' => '/bybit_abcd_webhook', 'enabled' => false],
                 ['exchange' => 'binance', 'feed' => 'test', 'path' => '/binance_test_webhook', 'enabled' => true],
                 ['exchange' => 'mexc', 'feed' => 'test', 'path' => '/mexc_test_webhook', 'enabled' => true],
+                ['exchange' => 'binance', 'feed' => 'submaster', 'path' => '/binance_submaster_webhook', 'enabled' => true],
                 // bybit/test deliberately not listed: an engine that does not serve it.
             ],
         ], $overrides);
@@ -74,11 +77,11 @@ class AdminWebhookTest extends EngineTestCase
         $body = $this->getJson('/api/admin/webhooks', $this->as())->assertOk()->json();
 
         $this->assertTrue($body['success']);
-        $this->assertSame(['reachable' => true, 'test_feed_enabled' => true], $body['engine']);
+        $this->assertSame(['reachable' => true, 'test_feed_enabled' => true, 'submaster_feed_enabled' => true], $body['engine']);
         $this->assertSame(['prod' => 'https://pixel-alpha.com', 'local' => 'http://engine.test:5010'], $body['bases']);
-        $this->assertSame(['main_set' => true, 'test_set' => true], $body['secrets']);
+        $this->assertSame(['main_set' => true, 'test_set' => true, 'submaster_set' => true], $body['secrets']);
 
-        // Main feed first, then test; venues in one consistent order.
+        // Main feed first, then test, then sub-master; venues in one consistent order.
         $this->assertSame([
             ['binance', 'main', '/binance_abcd_webhook'],
             ['bybit', 'main', '/bybit_abcd_webhook'],
@@ -86,6 +89,9 @@ class AdminWebhookTest extends EngineTestCase
             ['binance', 'test', '/binance_test_webhook'],
             ['bybit', 'test', '/bybit_test_webhook'],
             ['mexc', 'test', '/mexc_test_webhook'],
+            ['binance', 'submaster', '/binance_submaster_webhook'],
+            ['bybit', 'submaster', '/bybit_submaster_webhook'],
+            ['mexc', 'submaster', '/mexc_submaster_webhook'],
         ], array_map(fn ($w) => [$w['exchange'], $w['feed'], $w['path']], $body['webhooks']));
         $this->assertSame(['exchange', 'feed', 'path', 'venue_live', 'enabled', 'receivers'], array_keys($body['webhooks'][0]));
 
@@ -95,6 +101,7 @@ class AdminWebhookTest extends EngineTestCase
         $this->assertTrue($this->hook($body, 'binance', 'test')['enabled']);
         $this->assertFalse($this->hook($body, 'bybit', 'main')['enabled']);
         $this->assertFalse($this->hook($body, 'bybit', 'test')['enabled']);   // not listed = not served
+        $this->assertTrue($this->hook($body, 'binance', 'submaster')['enabled']);
     }
 
     public function test_receivers_are_what_each_path_would_fan_out_to(): void
@@ -115,6 +122,7 @@ class AdminWebhookTest extends EngineTestCase
         $this->makeAccount($tester);                                        // binance test live
         $this->makeAccount($tester, ['demo' => 1], 'mexc');                 // mexc test demo
         $this->makeAccount($this->makeUser(['type' => 'tester', 'status' => 'suspended']), [], 'mexc'); // excluded
+        $this->makeAccount($this->makeUser(['type' => 'submaster']));     // binance submaster live
 
         $body = $this->getJson('/api/admin/webhooks', $this->as())->assertOk()->json();
 
@@ -123,6 +131,7 @@ class AdminWebhookTest extends EngineTestCase
         $this->assertSame(['live' => 0, 'demo' => 0], $this->hook($body, 'mexc', 'main')['receivers']);
         $this->assertSame(['live' => 0, 'demo' => 1], $this->hook($body, 'mexc', 'test')['receivers']);
         $this->assertSame(['live' => 0, 'demo' => 0], $this->hook($body, 'bybit', 'test')['receivers']);
+        $this->assertSame(['live' => 1, 'demo' => 0], $this->hook($body, 'binance', 'submaster')['receivers']);
     }
 
     public function test_an_engine_that_does_not_answer_reads_as_unknown(): void
@@ -132,7 +141,7 @@ class AdminWebhookTest extends EngineTestCase
 
         $body = $this->getJson('/api/admin/webhooks', $this->as())->assertOk()->json();
 
-        $this->assertSame(['reachable' => false, 'test_feed_enabled' => null], $body['engine']);
+        $this->assertSame(['reachable' => false, 'test_feed_enabled' => null, 'submaster_feed_enabled' => null], $body['engine']);
         foreach ($body['webhooks'] as $w) {
             $this->assertNull($w['venue_live']);
             $this->assertNull($w['enabled']);
@@ -162,7 +171,7 @@ class AdminWebhookTest extends EngineTestCase
 
         $body = $this->getJson('/api/admin/webhooks', $this->as())->assertOk()->json();
 
-        $this->assertSame(['reachable' => true, 'test_feed_enabled' => null], $body['engine']);
+        $this->assertSame(['reachable' => true, 'test_feed_enabled' => null, 'submaster_feed_enabled' => null], $body['engine']);
         $this->assertTrue($this->hook($body, 'binance', 'main')['venue_live']);
         $this->assertFalse($this->hook($body, 'mexc', 'main')['venue_live']);
         $this->assertNull($this->hook($body, 'binance', 'main')['enabled']);
@@ -188,17 +197,17 @@ class AdminWebhookTest extends EngineTestCase
 
         $raw = $this->getJson('/api/admin/webhooks', $this->as())->assertOk()->getContent();
 
-        foreach ([self::MAIN_SECRET, self::TEST_SECRET] as $secret) {
+        foreach ([self::MAIN_SECRET, self::TEST_SECRET, 'sub-master-secret-xyz789'] as $secret) {
             $this->assertStringNotContainsString($secret, $raw);
             // Nor a masked copy's recognisable ends.
             $this->assertStringNotContainsString(substr($secret, 0, 6), $raw);
             $this->assertStringNotContainsString(substr($secret, -4), $raw);
         }
 
-        config(['services.engine.test_webhook_secret' => null, 'services.engine.webhook_secrets.binance' => '']);
+        config(['services.engine.test_webhook_secret' => null, 'services.engine.submaster_webhook_secret' => null, 'services.engine.webhook_secrets.binance' => '']);
         $this->getJson('/api/admin/webhooks', $this->as())
             ->assertOk()
-            ->assertJsonPath('secrets', ['main_set' => false, 'test_set' => false]);
+            ->assertJsonPath('secrets', ['main_set' => false, 'test_set' => false, 'submaster_set' => false]);
     }
 
     public function test_it_is_full_admin_only(): void

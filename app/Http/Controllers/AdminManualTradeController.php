@@ -43,7 +43,7 @@ class AdminManualTradeController extends Controller
         return response()->json([
             'success' => false,
             'error_code' => 'FEED_NOT_SUPPORTED',
-            'message' => 'Unknown signal feed — use main or test.',
+            'message' => 'Unknown signal feed — use main, test or submaster.',
         ], 400);
     }
 
@@ -62,9 +62,11 @@ class AdminManualTradeController extends Controller
      */
     private function webhookSecret(string $exchange, string $feed = 'main'): string
     {
-        return $feed === 'test'
-            ? (string) config('services.engine.test_webhook_secret')
-            : (string) config("services.engine.webhook_secrets.{$exchange}");
+        return match ($feed) {
+            'test' => (string) config('services.engine.test_webhook_secret'),
+            'submaster' => (string) config('services.engine.submaster_webhook_secret'),
+            default => (string) config("services.engine.webhook_secrets.{$exchange}"),
+        };
     }
 
     /**
@@ -115,7 +117,12 @@ class AdminManualTradeController extends Controller
             ->where("{$t}.enabled", 1)
             ->where("{$t}.is_sandbox", 0)
             ->where('user_credentials.status', '!=', 'suspended')
-            ->where('user_credentials.type', $feed === 'test' ? '=' : '!=', UserCredential::TESTER)
+            // Only the accounts this feed's path fans out to (WebhookPaths::feedForRole).
+            ->when(
+                WebhookPaths::roleForFeed($feed),
+                fn ($q, $role) => $q->where('user_credentials.type', $role),
+                fn ($q) => $q->whereNotIn('user_credentials.type', UserCredential::PRIVATE_FEED_ROLES),
+            )
             ->orderBy('user_credentials.name')
             ->get([
                 "{$t}.uni_id",
@@ -187,12 +194,14 @@ class AdminManualTradeController extends Controller
                     'feed' => $feed,
                     'webhook_secret_masked' => $masked,
                     'test_feed_enabled' => null,
+                    'submaster_feed_enabled' => null,
                 ],
             ]);
         }
 
         $health = $response->successful() ? $response->json() : null;
         $testFeed = is_array($health) ? data_get($health, 'test_feed.enabled') : null;
+        $subFeed = is_array($health) ? data_get($health, 'submaster_feed.enabled') : null;
 
         return response()->json([
             'success' => true,
@@ -203,6 +212,7 @@ class AdminManualTradeController extends Controller
                 'feed' => $feed,
                 'webhook_secret_masked' => $masked,
                 'test_feed_enabled' => is_bool($testFeed) ? $testFeed : null,
+                'submaster_feed_enabled' => is_bool($subFeed) ? $subFeed : null,
             ],
         ]);
     }
@@ -242,6 +252,13 @@ class AdminManualTradeController extends Controller
                 'success' => false,
                 'error_code' => 'ENGINE_TEST_WEBHOOK_SECRET_MISSING',
                 'message' => 'ENGINE_TEST_WEBHOOK_SECRET is not configured on the API.',
+            ], 503);
+        }
+        if ($secret === '' && $feed === 'submaster') {
+            return response()->json([
+                'success' => false,
+                'error_code' => 'ENGINE_SUBMASTER_WEBHOOK_SECRET_MISSING',
+                'message' => 'ENGINE_SUBMASTER_WEBHOOK_SECRET is not configured on the API.',
             ], 503);
         }
         if ($secret === '') {

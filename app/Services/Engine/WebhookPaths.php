@@ -2,6 +2,8 @@
 
 namespace App\Services\Engine;
 
+use App\Models\UserCredential;
+
 /**
  * The engine's webhook paths — one per venue PER SIGNAL FEED — in the one
  * place this API spells them.
@@ -16,6 +18,11 @@ namespace App\Services\Engine;
  *    (UserCredential::TESTER), and a tester account never receives a main
  *    signal. The feed is derived from the owner's role by
  *    EngineController::accounts; the engine never reads a role.
+ *  - `submaster` — the SUB-MASTER's own signals (2026-11-18), with its own
+ *    secret (ENGINE_SUBMASTER_WEBHOOK_SECRET here,
+ *    BINANCE_ABCD_SUBMASTER_WEBHOOK_SECRET on the engine). Fanned out to
+ *    sub-master-owned accounts ONLY (UserCredential::SUBMASTER), which never
+ *    receive a main signal either. Private like the test feed.
  *
  * These maps MUST stay in step with trading-flask's `hooks.WEBHOOK_PATHS` /
  * `hooks.TEST_WEBHOOK_PATHS` AND with the deploy script's
@@ -40,8 +47,39 @@ final class WebhookPaths
         'mexc' => '/mexc_test_webhook',
     ];
 
+    /** The sub-master's own feed — sub-master-owned accounts only. */
+    public const SUBMASTER = [
+        'binance' => '/binance_submaster_webhook',
+        'bybit' => '/bybit_submaster_webhook',
+        'mexc' => '/mexc_submaster_webhook',
+    ];
+
     /** Every feed, main first — the order every listing uses. */
-    public const FEEDS = ['main', 'test'];
+    public const FEEDS = ['main', 'test', 'submaster'];
+
+    /**
+     * The feed an account follows, from its OWNER's role — the one rule, read
+     * by the engine's account list, the audit of every fill (FeedAudit), the
+     * manual-trade console, Open positions and the Webhooks page.
+     */
+    public static function feedForRole(?string $ownerType): string
+    {
+        return match ($ownerType) {
+            UserCredential::TESTER => 'test',
+            UserCredential::SUBMASTER => 'submaster',
+            default => 'main',
+        };
+    }
+
+    /** The role a non-main feed belongs to; null for main (everyone else). */
+    public static function roleForFeed(string $feed): ?string
+    {
+        return match ($feed) {
+            'test' => UserCredential::TESTER,
+            'submaster' => UserCredential::SUBMASTER,
+            default => null,
+        };
+    }
 
     /** The path a signal for this venue + feed is posted to, or null when there is none. */
     public static function path(string $exchange, string $feed): ?string
@@ -49,6 +87,7 @@ final class WebhookPaths
         return match ($feed) {
             'main' => self::MAIN[$exchange] ?? null,
             'test' => self::TEST[$exchange] ?? null,
+            'submaster' => self::SUBMASTER[$exchange] ?? null,
             default => null,
         };
     }

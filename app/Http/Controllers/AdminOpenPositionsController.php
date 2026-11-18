@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Services\Engine\WebhookPaths;
 use App\Models\UserCredential;
 use App\Services\EngineCache;
 use App\Services\Exchanges\ExchangeSchema;
@@ -286,7 +287,7 @@ class AdminOpenPositionsController extends Controller
      */
     private static function feedOf(?string $ownerType): string
     {
-        return $ownerType === UserCredential::TESTER ? 'test' : 'main';
+        return WebhookPaths::feedForRole($ownerType);
     }
 
     private function blockedReason(object $p): ?string

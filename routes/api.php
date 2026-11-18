@@ -29,6 +29,7 @@ use App\Http\Controllers\AdminSignupInfoController;
 use App\Http\Controllers\AdminTodoController;
 use App\Http\Controllers\AdminTradeLogController;
 use App\Http\Controllers\AdminTronTransferController;
+use App\Http\Controllers\AdminRiskAlertController;
 use App\Http\Controllers\AdminUserController;
 use App\Http\Controllers\AdminVisitorController;
 use App\Http\Controllers\AdminWebhookController;
@@ -480,6 +481,10 @@ Route::middleware(['auth:sanctum', 'account.active', 'email.verified'])->group(f
             ->whereNumber('id');
         Route::post('/tron-transfers/{id}/ignore', [AdminTronTransferController::class, 'ignore'])
             ->whereNumber('id');
+        // High-risk alerts (RiskAlerts): the Overview's red list, and its
+        // "Mark resolved".
+        Route::get('/risk-alerts', [AdminRiskAlertController::class, 'index']);
+        Route::post('/risk-alerts/{id}/resolve', [AdminRiskAlertController::class, 'resolve'])->whereNumber('id');
         // Close a "two customers claim the same payment" alarm, with a note.
         Route::post('/tron-transfers/claims/{claimId}/resolve', [AdminTronTransferController::class, 'resolveClaim'])
             ->whereNumber('claimId');

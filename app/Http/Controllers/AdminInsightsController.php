@@ -34,6 +34,7 @@ class AdminInsightsController extends Controller
         'attention' => [
             'blocked_keys', 'blocked_keys_count', 'overdue_invoices', 'unpaid_invoices',
             'unmatched_transfers', 'disputed_payments', 'paused_for_payment', 'recent_payments',
+            'risk_alerts',
         ],
         'headline' => ['collected_this_month'],
     ];

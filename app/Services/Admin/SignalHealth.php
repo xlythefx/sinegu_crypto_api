@@ -160,7 +160,7 @@ final class SignalHealth
     }
 
     /**
-     * The health banner: the last `$hours` of MAIN-feed signals, plus every
+     * The health banner: the last `$hours` of MAIN- and SUB-MASTER-feed signals (TradeLog::REPORTED_FEEDS — real money), plus every
      * problem in them grouped by cause.
      *
      * Test-feed signals (testers only, WebhookPaths::TEST) are left out
@@ -171,7 +171,7 @@ final class SignalHealth
     public function health(int $hours = 24): array
     {
         $since = now()->subHours($hours);
-        $logs = TradeLog::where('feed', 'main')
+        $logs = TradeLog::whereIn('feed', TradeLog::REPORTED_FEEDS)
             ->where('ts', '>=', $since)->orderByDesc('ts')->limit(self::SCAN_LIMIT)->get();
 
         $issues = $this->issues($logs);
@@ -215,7 +215,7 @@ final class SignalHealth
             'master_missed' => $masterMissed,
             // Read outside the window: a quiet day must still say when the last
             // signal arrived, or "no signals" cannot be told from "engine down".
-            'last_signal_at' => optional(TradeLog::where('feed', 'main')->orderByDesc('ts')->first()?->ts)->toIso8601String(),
+            'last_signal_at' => optional(TradeLog::whereIn('feed', TradeLog::REPORTED_FEEDS)->orderByDesc('ts')->first()?->ts)->toIso8601String(),
             'issues' => array_slice($issues, 0, 5),
             'issues_total' => count($issues),
         ];

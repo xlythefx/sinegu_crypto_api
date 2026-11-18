@@ -2,6 +2,8 @@
 
 namespace App\Services\Assets;
 
+use App\Models\RiskAlert;
+use App\Services\Alerts\RiskAlerts;
 use App\Http\Controllers\AdminInsightsController;
 use App\Mail\AssetKillSwitchNotice;
 use App\Models\Asset;
@@ -168,6 +170,18 @@ final class KillSwitch
         $this->engine->refreshAssets();
         $this->engine->killSwitchTripped($exchange, $asset->ticker, $losses, $reason);
         $this->emailTeam($asset, $losses, $reason, $now->format('j M Y, H:i').' UTC');
+        // And the high-risk list (TRADE_ALERT_EMAILS + the Overview). The
+        // engine already posted it to Telegram.
+        app(RiskAlerts::class)->raise(
+            RiskAlert::KILL_SWITCH,
+            "asset:{$asset->asset_id}",
+            "Kill switch switched {$asset->ticker} off on ".($asset->broker ?: $exchange),
+            [
+                $reason,
+                'No account opens new trades on this coin until it is turned back on in Trading Assets. Closes still go through.',
+            ],
+            $exchange,
+        );
 
         return true;
     }
