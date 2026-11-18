@@ -170,6 +170,11 @@ class SubmasterRoleTest extends EngineTestCase
         $row = collect($this->actor($admin)->getJson('/api/admin/trade-logs?feed=submaster')->assertOk()->json('logs'))
             ->firstWhere('id', $id);
         $this->assertSame($customer, $row['breach'][0]['uni_id']);
+
+        // …and the Signal Log's health banner is never green over it.
+        $this->actor($admin)->getJson('/api/admin/trade-logs/health')->assertOk()
+            ->assertJsonPath('health.status', 'attention')
+            ->assertJsonPath('health.breaches', 1);
     }
 
     public function test_a_sub_master_filled_from_the_main_feed_is_a_breach(): void

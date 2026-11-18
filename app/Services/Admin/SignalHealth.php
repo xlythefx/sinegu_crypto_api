@@ -198,7 +198,12 @@ final class SignalHealth
         }
 
         $problems = array_sum(array_column($issues, 'count'));
+        // Signals that filled accounts OUTSIDE their feed (FeedAudit) — on any
+        // feed, the test feed included: a customer filled by a test signal is
+        // the worst thing this banner can be green over.
+        $breaches = TradeLog::where('ts', '>=', $since)->whereNotNull('breach')->count();
         $status = match (true) {
+            $breaches > 0 => 'attention',
             $logs->isEmpty() => 'quiet',
             $problems > 0 || $masterMissed > 0 => 'attention',
             $normal > 0 => 'normal',
@@ -213,6 +218,7 @@ final class SignalHealth
             'normal_skips' => $normal,
             'problems' => $problems,
             'master_missed' => $masterMissed,
+            'breaches' => $breaches,
             // Read outside the window: a quiet day must still say when the last
             // signal arrived, or "no signals" cannot be told from "engine down".
             'last_signal_at' => optional(TradeLog::whereIn('feed', TradeLog::REPORTED_FEEDS)->orderByDesc('ts')->first()?->ts)->toIso8601String(),
