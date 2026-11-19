@@ -713,9 +713,17 @@ class AdminInsights
             $testers = $testers->where('exchange', $exchange);
         }
 
-        return $this->pastRows($accounts)
+        $rows = $this->pastRows($accounts)
             ->concat($this->pastRows($testers, Carbon::parse(self::TEST_FEED_SINCE, 'UTC')))
-            ->filter(fn ($p) => trim((string) $p->strategy) !== '')
+            ->filter(fn ($p) => trim((string) $p->strategy) !== '');
+
+        // Whose trade it was: the owner's name and role, so the strategy page
+        // can name each row and narrow to the master alone (2026-11-19). Read
+        // from user_credentials, never the account's free-text name.
+        $owners = UserCredential::whereIn('uni_id', $rows->pluck('uni_id')->unique()->values())
+            ->get(['uni_id', 'name', 'type'])->keyBy('uni_id');
+
+        return $rows
             ->sortBy('closed_at')
             ->map(fn ($p) => [
                 'strategy' => $p->strategy,
@@ -725,6 +733,8 @@ class AdminInsights
                 'closed_at' => $p->closed_at,
                 'exchange' => $p->exchange,
                 'uni_id' => $p->uni_id,
+                'owner_name' => $owners[$p->uni_id]->name ?? null,
+                'owner_role' => $owners[$p->uni_id]->type ?? null,
                 'increments' => (int) ($p->increments_closed ?? 1),
             ])
             ->values();

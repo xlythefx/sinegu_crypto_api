@@ -354,7 +354,15 @@ class AdminInsightsTest extends EngineTestCase
         $this->assertCount(1, $customerTrades);
         $this->assertSame('mexc', $customerTrades[0]['exchange']);
 
-        $this->assertCount(2, $this->getJson('/api/admin/strategies', $h)->json('trades'));
+        $all = $this->getJson('/api/admin/strategies', $h)->json('trades');
+        $this->assertCount(2, $all);
+
+        // Each row names its owner and role, so the page can show whose trade
+        // it was and narrow to the master (2026-11-19).
+        $byRole = collect($all)->keyBy('owner_role');
+        $this->assertSame(30.0, (float) $byRole['master']['realized_pnl']);
+        $this->assertSame(UserCredential::find($master)->name, $byRole['master']['owner_name']);
+        $this->assertSame(UserCredential::find($customer)->name, $byRole['user']['owner_name']);
 
         $compare = $this->getJson('/api/admin/insights/strategies', $h)->assertOk()->json('compare.ABCD-v1');
         $this->assertSame(1, $compare['master']['trades']);
