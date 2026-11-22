@@ -8,6 +8,7 @@ use Illuminate\Database\Eloquent\Model;
 class DevBotAction extends Model
 {
     public const ADD_ASSET = 'add_asset';
+    public const DEPLOY = 'deploy';
 
     public const OPEN = 'open';
     public const APPLIED = 'applied';

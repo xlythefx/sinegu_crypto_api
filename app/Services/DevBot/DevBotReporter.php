@@ -70,6 +70,72 @@ class DevBotReporter
         }
     }
 
+    /**
+     * A server error (any exception Laravel reports — a crash in a request,
+     * a command, a scheduled job). Once an hour per place it was thrown.
+     */
+    public function exception(Throwable $e): void
+    {
+        if (! $this->telegram->configured()) {
+            return;
+        }
+        try {
+            $file = str_replace([base_path().DIRECTORY_SEPARATOR, '\\'], ['', '/'], $e->getFile());
+            $sig = substr(md5(get_class($e).'|'.$file.'|'.$e->getLine()), 0, 16);
+            if (! Cache::add("devbot:exc:told:{$sig}", 1, now()->addMinutes(self::DEDUPE_MINUTES))) {
+                return;
+            }
+            $where = app()->runningInConsole()
+                ? 'command: '.implode(' ', array_slice((array) ($_SERVER['argv'] ?? []), 1, 3))
+                : (request() ? request()->method().' /'.ltrim(request()->path(), '/') : 'unknown');
+            $message = $this->scrub(mb_substr($e->getMessage(), 0, 400));
+            Cache::put("devbot:exc:{$sig}", [
+                'class' => get_class($e), 'message' => $message, 'at' => "{$file}:{$e->getLine()}", 'where' => $where,
+            ], now()->addDays(7));
+            $this->telegram->send(implode("\n", [
+                '💥 <b>Server error</b> · '.e(class_basename($e)),
+                '<code>'.e($message !== '' ? $message : '(no message)').'</code>',
+                'at '.e("{$file}:{$e->getLine()}"),
+                e($where),
+                "\nThe same error is muted for an hour.",
+            ]), [[['text' => '🤖 Investigate on my PC', 'callback_data' => "dx:{$sig}"]]]);
+        } catch (Throwable) {
+            // Reporting an error must never cause one.
+        }
+    }
+
+    /** A scheduled job that ended with a failure code. Once an hour per job. */
+    public function scheduledFailure(string $command, int $exitCode): void
+    {
+        if (! $this->telegram->configured()) {
+            return;
+        }
+        try {
+            $name = preg_match("/artisan'?\s+(.+)$/", $command, $m) ? trim($m[1], " '") : $command;
+            if (! Cache::add('devbot:sched:told:'.md5($name), 1, now()->addMinutes(self::DEDUPE_MINUTES))) {
+                return;
+            }
+            $this->telegram->send(implode("\n", [
+                '⏰ <b>Scheduled job failed</b>',
+                '<code>'.e(mb_substr($name, 0, 200)).'</code> ended with code '.$exitCode,
+                "\nIf it threw an error, that arrives as its own message. Muted for an hour.",
+            ]));
+        } catch (Throwable) {
+        }
+    }
+
+    private function scrub(string $text): string
+    {
+        foreach (['services.dev_bot.token', 'services.dev_bot.agent_key', 'services.engine.secret', 'services.anthropic.key'] as $k) {
+            $v = (string) config($k, '');
+            if (strlen($v) >= 8) {
+                $text = str_replace($v, '***', $text);
+            }
+        }
+
+        return $text;
+    }
+
     private function reportTradeLog(TradeLog $log): void
     {
         $groups = [];

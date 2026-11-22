@@ -36,6 +36,19 @@ class AppServiceProvider extends ServiceProvider
     public function boot(): void
     {
         $this->configureRateLimiting();
+
+        // A scheduled job that ends with a failure code is told to the
+        // developer error bot (a thrown error is told by the exception hook).
+        \Illuminate\Support\Facades\Event::listen(
+            \Illuminate\Console\Events\ScheduledTaskFinished::class,
+            function (\Illuminate\Console\Events\ScheduledTaskFinished $event): void {
+                $code = $event->task->exitCode;
+                if ($code !== null && (int) $code !== 0) {
+                    app(\App\Services\DevBot\DevBotReporter::class)
+                        ->scheduledFailure((string) ($event->task->description ?: $event->task->command), (int) $code);
+                }
+            },
+        );
     }
 
     /**

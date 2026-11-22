@@ -75,6 +75,32 @@ class DevBotAgentController extends Controller
         return response()->json(['ok' => true]);
     }
 
+    /**
+     * POST /api/devbot/agent/merged — one of the agent's pull requests was
+     * merged on GitHub; the bot offers the deploy (DevBotJobs::pullRequestMerged).
+     * The URL must be that repo's own pull request, so the message can only
+     * ever link to GitHub.
+     */
+    public function merged(Request $request): JsonResponse
+    {
+        if (! $this->authorised($request)) {
+            return response()->json(['error' => 'FORBIDDEN'], 403);
+        }
+        $data = $request->validate([
+            'repo' => ['required', 'in:web,api'],
+            'number' => ['required', 'integer', 'min:1'],
+            'url' => ['required', 'string', 'max:300', 'regex:#^https://github\.com/xlythefx/sinegu_crypto(_api)?/pull/\d+$#'],
+            'title' => ['required', 'string', 'max:300'],
+            'branch' => ['nullable', 'string', 'max:100'],
+            'files' => ['present', 'array', 'max:500'],
+            'files.*' => ['string', 'max:300'],
+            'job_id' => ['nullable', 'integer'],
+        ]);
+        $action = $this->jobs->pullRequestMerged($data);
+
+        return response()->json(['ok' => true, 'targets' => $action->payload['targets'] ?? []]);
+    }
+
     /** GET /api/devbot/agent/private-strings → what must never be pushed to GitHub. */
     public function privateStrings(Request $request): JsonResponse
     {

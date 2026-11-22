@@ -83,6 +83,15 @@ class DevBotTelegram
         ]);
     }
 
+    /** The "/" menu in the chat. @return array{ok: bool, description: ?string} */
+    public function setCommands(): array
+    {
+        return $this->raw('setMyCommands', ['commands' => [
+            ['command' => 'status', 'description' => 'Are all services up?'],
+            ['command' => 'help', 'description' => 'What this bot does'],
+        ]]);
+    }
+
     /** @return array{ok: bool, description: ?string} */
     public function deleteWebhook(): array
     {

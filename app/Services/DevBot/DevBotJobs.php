@@ -2,6 +2,7 @@
 
 namespace App\Services\DevBot;
 
+use App\Models\DevBotAction;
 use App\Models\DevBotJob;
 use App\Models\TradeLog;
 use App\Services\Exchanges\ExchangeSchema;
@@ -70,6 +71,11 @@ class DevBotJobs
     public function claim(): ?DevBotJob
     {
         Cache::put(self::SEEN_KEY, now()->timestamp, now()->addDay());
+        // This call comes through php-fpm, not cron: the one place that can
+        // notice the scheduler itself has stopped. Once a minute at most.
+        if (Cache::add('devbot:scheduler-check', 1, 60)) {
+            app(DevBotWatch::class)->run(['scheduler']);
+        }
 
         $job = DB::transaction(function () {
             $job = DevBotJob::where('status', DevBotJob::QUEUED)->orderBy('id')->lockForUpdate()->first();
@@ -118,6 +124,130 @@ class DevBotJobs
             $lines[] = "\nNothing is merged or deployed until you approve the pull request on GitHub.";
         }
         $this->telegram->send(implode("\n", $lines));
+    }
+
+    /** What a merged change sends live, by repo + changed paths. */
+    public const TARGET_LABELS = [
+        'website' => 'the website', 'api' => 'the API', 'engine' => 'the trading engine (restarts it)',
+        'telegram' => 'the Telegram ops reporter',
+    ];
+
+    /**
+     * Which deploy steps a merged pull request needs. Tests and docs alone
+     * need none; dev-agent/ lives on the PC and is never deployed.
+     *
+     * @param  list<string>  $files
+     * @return list<string>  keys of TARGET_LABELS
+     */
+    public static function deployTargets(string $repo, array $files): array
+    {
+        if ($repo === 'both') {
+            return ['website', 'api']; // a typed "deploy": the current main of both
+        }
+        $t = [];
+        foreach ($files as $f) {
+            $f = ltrim(str_replace('\\', '/', (string) $f), '/');
+            if (preg_match('#(^|/)(tests?)/|\.md$#i', $f)) {
+                continue;
+            }
+            if ($repo === 'api') {
+                $t['api'] = true;
+            } elseif (str_starts_with($f, 'trading-flask/')) {
+                $t['engine'] = true;
+            } elseif (str_starts_with($f, 'pixel-telegram/')) {
+                $t['telegram'] = true;
+            } elseif (preg_match('#^(src/|public/|index\.html$|package(-lock)?\.json$|vite\.config\.|tsconfig)#', $f)) {
+                $t['website'] = true;
+            }
+        }
+
+        return array_values(array_intersect(array_keys(self::TARGET_LABELS), array_keys($t)));
+    }
+
+    /**
+     * The PC agent saw one of its pull requests merged on GitHub: offer the
+     * deploy. Two taps (Deploy → Yes) because it changes the live site.
+     *
+     * @param  array{repo: string, number: int, url: string, title: string, branch?: string, files: list<string>, job_id?: ?int}  $pr
+     */
+    public function pullRequestMerged(array $pr): DevBotAction
+    {
+        $targets = self::deployTargets($pr['repo'], $pr['files']);
+        $action = DevBotAction::create([
+            'kind' => DevBotAction::DEPLOY,
+            'status' => $targets === [] ? DevBotAction::SKIPPED : DevBotAction::OPEN,
+            'exchange' => 'github',
+            'ticker' => mb_substr('PR #'.$pr['number'], 0, 20),
+            'payload' => $pr + ['targets' => $targets],
+            'result_text' => $targets === [] ? 'Nothing to deploy (tests or docs only).' : null,
+        ]);
+        $head = $pr['repo'] === 'both'
+            ? '🚀 <b>Deploy the current main</b> (asked by typing “deploy”)'
+            : '🔀 <b>Merged</b>: '.e($pr['title'])."\n".'<a href="'.e($pr['url']).'">'.e(($pr['repo'] === 'api' ? 'API' : 'website repo').' PR #'.$pr['number']).'</a>';
+        $html = $targets === []
+            ? $head."\n\nNothing to deploy: it only changes tests or docs."
+            : $head."\n\nGoing live would update ".e(self::targetList($targets)).'. Deploy now?';
+        $action->payload = $action->payload + ['message_html' => $html];
+        $action->save();
+
+        $messageId = $this->telegram->send($html, $targets === [] ? null : [[
+            ['text' => '🚀 Deploy', 'callback_data' => "dd:{$action->id}:ask"],
+            ['text' => 'Not now', 'callback_data' => "dd:{$action->id}:no"],
+        ]]);
+        $action->forceFill(['message_id' => $messageId])->save();
+
+        return $action;
+    }
+
+    /**
+     * A tap on the deploy buttons: ask → confirm, go → a deploy job for the
+     * PC (it holds the deploy script and its credentials), no → closed.
+     *
+     * @return array{toast: string, html: ?string, keyboard: ?array, message_id?: ?int}
+     */
+    public function deployTap(int $actionId, string $step, string $who): array
+    {
+        $messageId = DevBotAction::whereKey($actionId)->value('message_id');
+
+        return ['message_id' => $messageId] + DB::transaction(function () use ($actionId, $step, $who) {
+            $a = DevBotAction::whereKey($actionId)->where('kind', DevBotAction::DEPLOY)->lockForUpdate()->first();
+            if ($a === null || $a->status !== DevBotAction::OPEN) {
+                return ['toast' => 'Already handled'.($a?->result_text ? ': '.$a->result_text : '.'), 'html' => null, 'keyboard' => null];
+            }
+            $base = (string) ($a->payload['message_html'] ?? '');
+            $targets = (array) ($a->payload['targets'] ?? []);
+            if ($step === 'ask') {
+                return ['toast' => 'Confirm to deploy', 'keyboard' => [[
+                    ['text' => '✅ Yes, deploy now', 'callback_data' => "dd:{$a->id}:go"],
+                    ['text' => 'Cancel', 'callback_data' => "dd:{$a->id}:no"],
+                ]], 'html' => $base."\n\n⚠️ <b>This updates the live site at pixel-alpha.com</b> (".e(self::targetList($targets))
+                    .'). Your PC takes a backup first, then deploys and checks the result.'];
+            }
+            if ($step === 'no') {
+                $a->forceFill(['status' => DevBotAction::SKIPPED, 'result_text' => "Not deployed ({$who}).",
+                    'resolved_by' => $who, 'resolved_at' => now()])->save();
+
+                return ['toast' => 'Not deployed', 'html' => $base."\n\n⏸ Not deployed. Merge something else later, or type “deploy” to me.", 'keyboard' => null];
+            }
+            $job = DevBotJob::create([
+                'status' => DevBotJob::QUEUED, 'source' => 'deploy',
+                'prompt' => 'Deploy '.self::targetList($targets).' after '.$a->ticker.' was merged.',
+                'context' => ['kind' => 'deploy', 'targets' => $targets, 'repo' => $a->payload['repo'] ?? null,
+                    'pr' => ['number' => $a->payload['number'] ?? null, 'url' => $a->payload['url'] ?? null, 'title' => $a->payload['title'] ?? null]],
+            ]);
+            $a->forceFill(['status' => DevBotAction::APPLIED, 'chosen' => ['job_id' => $job->id],
+                'result_text' => "Deploy queued as job #{$job->id} by {$who}.", 'resolved_by' => $who, 'resolved_at' => now()])->save();
+
+            return ['toast' => "Deploy queued (job #{$job->id})", 'keyboard' => null,
+                'html' => $base."\n\n🚀 Deploy queued as job #{$job->id} by ".e($who).'.'.($this->agentOnline() ? '' : ' Your PC agent is offline: it starts when the agent runs.')];
+        });
+    }
+
+    public static function targetList(array $targets): string
+    {
+        $labels = array_map(fn ($t) => self::TARGET_LABELS[$t] ?? $t, $targets);
+
+        return count($labels) > 1 ? implode(', ', array_slice($labels, 0, -1)).' and '.end($labels) : (string) ($labels[0] ?? 'nothing');
     }
 
     public function agentOnline(): bool

@@ -4,6 +4,7 @@ namespace Tests\Feature;
 
 use App\Models\Asset;
 use App\Models\DevBotAction;
+// (DevBotJob, DevBotWatch, SystemStatus are referenced fully qualified below.)
 use App\Models\RiskAlert;
 use App\Services\Alerts\RiskAlerts;
 use App\Services\DevBot\CoinSuggestion;
@@ -32,6 +33,7 @@ class DevBotTest extends EngineTestCase
             'services.market.base_url' => 'https://fapi.test',
             'services.engine.admin_secret' => 'engine-admin-test',
             'services.engine.targets.local' => 'http://engine.test',
+            'services.dev_bot.check_disk' => false, // the test machine's own disk is not the server's
         ]);
         $this->fakeAll();
     }
@@ -288,7 +290,160 @@ class DevBotTest extends EngineTestCase
     {
         $this->postJson('/api/devbot/telegram', ['message' => ['chat' => ['id' => (int) self::OWNER], 'text' => '/start']],
             ['X-Telegram-Bot-Api-Secret-Token' => self::SECRET])->assertOk();
-        $this->assertStringContainsString('Connected', $this->sent('sendMessage')[0]['text']);
+        $this->assertStringContainsString('Pixel Alpha error bot', $this->sent('sendMessage')[0]['text']);
+    }
+
+    // ---- status, watchdog, server errors ----------------------------------------
+
+    private function fakeEngineHealth(array $health): void
+    {
+        Http::swap(new \Illuminate\Http\Client\Factory);
+        Http::fake([
+            'tg.test/bottest-token/sendMessage' => Http::response(['ok' => true, 'result' => ['message_id' => 77]]),
+            'tg.test/*' => Http::response(['ok' => true, 'result' => true]),
+            'engine.test/health' => Http::response($health),
+            'engine.test/*' => Http::response(['ok' => true]),
+        ]);
+    }
+
+    private function healthyEngine(): array
+    {
+        return ['status' => 'ok', 'exchanges' => ['binance' => [], 'mexc' => [], 'bybit' => []],
+            'pollers' => ['balances', 'positions', 'transfers', 'past-positions', 'mexc-history', 'bybit-history'],
+            'retry_queue_depth' => 0, 'rate_limited_until' => null,
+            'monthly_invoices' => ['enabled' => true, 'next' => '2026-12-01T16:00:00+07:00']];
+    }
+
+    public function test_status_reports_every_service_from_the_server(): void
+    {
+        $this->fakeEngineHealth($this->healthyEngine());
+        \Illuminate\Support\Facades\Cache::put(\App\Services\DevBot\SystemStatus::HEARTBEAT_KEY, now()->timestamp, 600);
+        \App\Services\Payments\TronGateway::markScanned(app(\App\Services\Payments\PaymentEnvironment::class)->tronNetworkFor(false));
+
+        $this->say('/status');
+        $text = $this->sent('sendMessage')[0]['text'];
+        $this->assertStringContainsString('All services up', $text);
+        $this->assertStringContainsString('6/6 data pollers', $text);
+        $this->assertStringContainsString('Crypto payment listener', $text);
+        $this->assertStringContainsString('last scan', $text);
+        $this->assertStringContainsString('next monthly run 1 Dec', $text);
+        $this->assertStringContainsString('Scheduled jobs</b> — running', $text);
+    }
+
+    public function test_a_status_question_is_answered_now_with_the_agent_one_tap_away(): void
+    {
+        $this->fakeEngineHealth($this->healthyEngine());
+        $this->say('is the crypto listener up?');
+
+        $sent = $this->sent('sendMessage')[0];
+        $this->assertStringContainsString('Crypto payment listener', $sent['text']);
+        $this->assertSame(0, \App\Models\DevBotJob::count());
+        $button = $sent['reply_markup']['inline_keyboard'][0][0];
+        $this->assertSame('🤖 Ask my PC agent instead', $button['text']);
+
+        $this->tap($button['callback_data'])->assertOk();
+        $this->assertSame('is the crypto listener up?', \App\Models\DevBotJob::sole()->prompt);
+    }
+
+    public function test_the_watchdog_tells_a_stopped_service_once_and_its_recovery_once(): void
+    {
+        $this->fakeEngineHealth($this->healthyEngine());
+        \Illuminate\Support\Facades\Cache::put(\App\Services\DevBot\SystemStatus::HEARTBEAT_KEY, now()->timestamp, 600);
+        $watch = app(\App\Services\DevBot\DevBotWatch::class);
+
+        $watch->run(); // the crypto listener has never scanned: a problem on first sight
+        $watch->run(); // still down: nothing new
+        $down = collect($this->sent('sendMessage'))->pluck('text')->filter(fn ($t) => str_contains($t, 'Crypto payment listener'));
+        $this->assertCount(1, $down);
+        $this->assertStringContainsString('has a problem', $down->first());
+
+        \App\Services\Payments\TronGateway::markScanned(app(\App\Services\Payments\PaymentEnvironment::class)->tronNetworkFor(false));
+        $watch->run();
+        $this->assertStringContainsString('recovered', collect($this->sent('sendMessage'))->last()['text']);
+        $this->assertCount(2, $this->sent('sendMessage')); // healthy checks never spoke
+    }
+
+    public function test_a_server_error_is_dmd_once_an_hour_and_can_be_investigated(): void
+    {
+        $handler = app(\Illuminate\Contracts\Debug\ExceptionHandler::class);
+        foreach ([1, 2] as $_) { // the same place twice: told once
+            $handler->report(new \RuntimeException('Division by zero in the fee maths'));
+        }
+
+        $sends = $this->sent('sendMessage');
+        $this->assertCount(1, $sends);
+        $this->assertStringContainsString('Server error', $sends[0]['text']);
+        $this->assertStringContainsString('Division by zero', $sends[0]['text']);
+        $this->assertStringContainsString('tests/Feature/DevBotTest.php', $sends[0]['text']);
+
+        $this->tap($sends[0]['reply_markup']['inline_keyboard'][0][0]['callback_data'])->assertOk();
+        $job = \App\Models\DevBotJob::sole();
+        $this->assertSame('exception', $job->context['kind']);
+        $this->assertStringContainsString('Division by zero', $job->prompt);
+    }
+
+    public function test_a_failed_scheduled_job_is_named(): void
+    {
+        app(\App\Services\DevBot\DevBotReporter::class)->scheduledFailure("'/usr/bin/php8.3' 'artisan' payments:watch-tron", 1);
+        $this->assertStringContainsString('payments:watch-tron</code> ended with code 1', $this->sent('sendMessage')[0]['text']);
+    }
+
+    // ---- deploy after a merge ----------------------------------------------------
+
+    public function test_a_merged_pull_request_offers_a_deploy_that_needs_a_second_tap(): void
+    {
+        config(['services.dev_bot.agent_key' => self::AGENT_KEY]);
+        $this->agent('POST', '/merged', [
+            'repo' => 'web', 'number' => 12, 'url' => 'https://github.com/xlythefx/sinegu_crypto/pull/12',
+            'title' => 'Fix the skip reason label', 'branch' => 'devbot/job-3', 'job_id' => 3,
+            'files' => ['src/lib/insightLabels.ts', 'trading-flask/binance_abcd/notify.py', 'CLAUDE.md', 'trading-flask/tests/test_x.py'],
+        ])->assertOk()->assertJsonPath('targets', ['website', 'engine']);
+
+        $sent = $this->sent('sendMessage')[0];
+        $this->assertStringContainsString('the website and the trading engine', $sent['text']);
+        $action = DevBotAction::where('kind', DevBotAction::DEPLOY)->sole();
+        $this->assertSame("dd:{$action->id}:ask", $sent['reply_markup']['inline_keyboard'][0][0]['callback_data']);
+
+        $this->tap("dd:{$action->id}:ask")->assertOk();
+        $this->assertSame(0, \App\Models\DevBotJob::count()); // asking is not deploying
+        $confirm = $this->sent('editMessageText')[0];
+        $this->assertStringContainsString('This updates the live site', $confirm['text']);
+
+        $this->tap("dd:{$action->id}:go")->assertOk();
+        $this->tap("dd:{$action->id}:go")->assertOk(); // a second confirm deploys nothing more
+        $job = \App\Models\DevBotJob::sole();
+        $this->assertSame('deploy', $job->source);
+        $this->assertSame(['kind' => 'deploy', 'targets' => ['website', 'engine'], 'repo' => 'web',
+            'pr' => ['number' => 12, 'url' => 'https://github.com/xlythefx/sinegu_crypto/pull/12', 'title' => 'Fix the skip reason label']], $job->context);
+    }
+
+    public function test_docs_only_merges_offer_nothing_and_foreign_links_are_refused(): void
+    {
+        config(['services.dev_bot.agent_key' => self::AGENT_KEY]);
+        $this->agent('POST', '/merged', ['repo' => 'api', 'number' => 4, 'url' => 'https://github.com/xlythefx/sinegu_crypto_api/pull/4',
+            'title' => 'Docs', 'files' => ['README.md', 'tests/Feature/XTest.php']])->assertOk()->assertJsonPath('targets', []);
+        $this->assertArrayNotHasKey('reply_markup', $this->sent('sendMessage')[0]->data());
+
+        $this->agent('POST', '/merged', ['repo' => 'web', 'number' => 5, 'url' => 'https://evil.test/pull/5',
+            'title' => 'x', 'files' => ['src/a.ts']])->assertStatus(422);
+    }
+
+    public function test_typing_deploy_offers_the_current_main_with_the_same_confirm_step(): void
+    {
+        $this->say('deploy');
+        $sent = $this->sent('sendMessage')[0];
+        $this->assertStringContainsString('Deploy the current main', $sent['text']);
+        $this->assertStringContainsString('the website and the API', $sent['text']);
+        $this->assertSame('🚀 Deploy', $sent['reply_markup']['inline_keyboard'][0][0]['text']);
+    }
+
+    public function test_deploy_targets_come_from_the_changed_paths(): void
+    {
+        $t = fn (string $repo, array $f) => \App\Services\DevBot\DevBotJobs::deployTargets($repo, $f);
+        $this->assertSame(['api'], $t('api', ['app/Services/X.php']));
+        $this->assertSame([], $t('api', ['tests/Feature/XTest.php', 'CLAUDE.md']));
+        $this->assertSame(['website', 'telegram'], $t('web', ['pixel-telegram/pixel_telegram/x.py', 'package.json']));
+        $this->assertSame([], $t('web', ['dev-agent/agent.py', 'docs/x.md']));
     }
 
     // ---- the PC agent's jobs ---------------------------------------------------

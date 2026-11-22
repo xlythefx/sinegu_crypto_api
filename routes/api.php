@@ -706,4 +706,5 @@ Route::prefix('devbot/agent')->middleware('throttle:60,1')->group(function () {
     Route::post('/jobs/{id}/progress', [\App\Http\Controllers\DevBotAgentController::class, 'progress'])->whereNumber('id');
     Route::post('/jobs/{id}/finish', [\App\Http\Controllers\DevBotAgentController::class, 'finish'])->whereNumber('id');
     Route::get('/private-strings', [\App\Http\Controllers\DevBotAgentController::class, 'privateStrings']);
+    Route::post('/merged', [\App\Http\Controllers\DevBotAgentController::class, 'merged']);
 });

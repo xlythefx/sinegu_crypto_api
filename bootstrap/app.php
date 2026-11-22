@@ -41,4 +41,12 @@ return Application::configure(basePath: dirname(__DIR__))
         $exceptions->shouldRenderJsonWhen(
             fn (Request $request) => $request->is('api/*'),
         );
+        // Every reported server error also goes to the developer error bot
+        // (Christian's DM, once an hour per place). Logging is unchanged.
+        $exceptions->reportable(function (\Throwable $e): void {
+            try {
+                app(\App\Services\DevBot\DevBotReporter::class)->exception($e);
+            } catch (\Throwable) {
+            }
+        });
     })->create();

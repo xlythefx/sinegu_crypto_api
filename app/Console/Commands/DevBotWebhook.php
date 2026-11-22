@@ -56,6 +56,8 @@ class DevBotWebhook extends Command
         $url = (string) ($this->option('url') ?: rtrim((string) config('services.dev_bot.site_url', 'https://pixel-alpha.com'), '/').'/api/devbot/telegram');
         $answer = $telegram->setWebhook($url, $secret);
         $this->line($answer['ok'] ? "Webhook set: {$url}" : 'Telegram refused: '.($answer['description'] ?? '?'));
+        $menu = $telegram->setCommands();
+        $this->line($menu['ok'] ? 'Command menu set: /status, /help' : 'Command menu refused: '.($menu['description'] ?? '?'));
 
         return $answer['ok'] ? self::SUCCESS : self::FAILURE;
     }

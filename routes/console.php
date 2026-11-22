@@ -46,6 +46,18 @@ Schedule::command('trade-alerts:digest')->hourlyAt(2)->withoutOverlapping(10);
 // even-minute jobs.
 Schedule::command('engine:watch')->cron('1-59/2 * * * *')->withoutOverlapping(5);
 
+// The scheduler's own heartbeat (2026-11-22): the error bot's /status reads
+// it, and the PC agent's polls (php-fpm, not cron) notice when it goes quiet —
+// the one failure a scheduled check could never report about itself.
+Schedule::call(fn () => \Illuminate\Support\Facades\Cache::put(
+    \App\Services\DevBot\SystemStatus::HEARTBEAT_KEY, now()->timestamp, now()->addDay(),
+))->everyMinute()->name('scheduler-heartbeat');
+
+// The error bot's watchdog: a DM when a service check goes down or recovers
+// (crypto listener, background jobs, disk, engine pollers, invoicing switch).
+// :04, :09, … — beside the :03 / :08 classify-closes run.
+Schedule::command('devbot:watch')->cron('4-59/5 * * * *')->withoutOverlapping(5);
+
 // Discord server roles (Member / Trader) follow the account: every approve,
 // suspend, connect and disconnect syncs the user on the spot, so this nightly
 // pass only catches the write that happened while Discord was down and the
