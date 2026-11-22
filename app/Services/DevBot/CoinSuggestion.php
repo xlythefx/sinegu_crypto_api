@@ -42,8 +42,9 @@ class CoinSuggestion
      *   max_leverage?: ?int, leverage_known?: bool, step?: string, options?: list<array{cost: int, qty: float, notional: float}>,
      *   accounts?: array{count: int, biggest_multiple: ?float, biggest_is_master: bool}}
      */
-    public function build(string $ticker): array
+    public function build(string $ticker, ?int $alertLeverage = null): array
     {
+        $wanted = $alertLeverage !== null && $alertLeverage > 0 ? $alertLeverage : self::DEFAULT_LEVERAGE;
         $symbol = strtoupper(trim($ticker));
         $check = $this->rules->check($symbol);
         $binance = $check['binance'] ?? null;
@@ -63,15 +64,9 @@ class CoinSuggestion
 
         // One engine call: Binance's leverage limit for the coin, and every
         // real-money account's entry multiple (base 1 → entry_qty = multiple).
-        $engine = $this->engine->sizeCheck([
-            'exchange' => 'binance', 'ticker' => $symbol, 'base_size' => 1.0,
-            'max_size' => (float) self::ENTRIES, 'leverage' => self::DEFAULT_LEVERAGE,
-        ]);
-        $body = is_array($engine['body'] ?? null) && $engine['error'] === null ? $engine['body'] : [];
+        $body = $this->engineCheck($symbol, $wanted);
         $maxLeverage = isset($body['max_leverage']) ? (int) $body['max_leverage'] : null;
-        $leverage = $maxLeverage !== null && $maxLeverage > 0
-            ? min(self::DEFAULT_LEVERAGE, $maxLeverage)
-            : self::DEFAULT_LEVERAGE;
+        $leverage = $maxLeverage !== null && $maxLeverage > 0 ? min($wanted, $maxLeverage) : $wanted;
 
         $options = self::options($price, (string) ($binance['step_size'] ?? ''),
             (float) ($binance['min_qty'] ?? 0), (float) ($binance['min_notional'] ?? 0), $leverage);
@@ -85,12 +80,32 @@ class CoinSuggestion
             'ticker' => $symbol,
             'price' => $price,
             'leverage' => $leverage,
+            'alert_leverage' => $wanted,
             'max_leverage' => $maxLeverage,
             'leverage_known' => $maxLeverage !== null,
             'step' => (string) ($binance['step_size'] ?? ''),
             'options' => $options,
             'accounts' => self::accountSummary(is_array($body['accounts'] ?? null) ? $body['accounts'] : []),
         ];
+    }
+
+    /** Binance's highest leverage for the coin (engine size check), or null when unknown. */
+    public function maxLeverage(string $ticker): ?int
+    {
+        $body = $this->engineCheck(strtoupper(trim($ticker)), self::DEFAULT_LEVERAGE);
+
+        return isset($body['max_leverage']) && (int) $body['max_leverage'] > 0 ? (int) $body['max_leverage'] : null;
+    }
+
+    /** One engine call: the leverage limit and every real-money account's entry multiple (base 1). */
+    private function engineCheck(string $symbol, int $leverage): array
+    {
+        $engine = $this->engine->sizeCheck([
+            'exchange' => 'binance', 'ticker' => $symbol, 'base_size' => 1.0,
+            'max_size' => (float) self::ENTRIES, 'leverage' => $leverage,
+        ]);
+
+        return is_array($engine['body'] ?? null) && $engine['error'] === null ? $engine['body'] : [];
     }
 
     /**

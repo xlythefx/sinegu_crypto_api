@@ -154,6 +154,47 @@ class DevBotTest extends EngineTestCase
         $this->assertSame('da:'.$action->id.':1', $keyboard[1][0]['callback_data']);
     }
 
+    public function test_an_alert_above_binances_max_is_called_out_with_the_json_fix(): void
+    {
+        $this->signal(); // the alert sends 25×, ASR allows 10×
+        $text = $this->sent('sendMessage')[0]['text'];
+        $this->assertStringContainsString('Your alert sends 25×, but Binance allows at most 10× on ASR', $text);
+        $this->assertStringContainsString('"leverage": 10', $text);
+    }
+
+    public function test_an_alert_within_the_max_keeps_its_own_leverage_and_says_nothing(): void
+    {
+        $this->signal(['leverage' => 5]);
+        $text = $this->sent('sendMessage')[0]['text'];
+        $this->assertStringContainsString('Leverage 5×', $text);
+        $this->assertStringNotContainsString('Your alert sends', $text);
+        $this->assertSame(5, DevBotAction::sole()->payload['leverage']);
+    }
+
+    public function test_a_refused_leverage_names_binances_max_and_where_to_change_it(): void
+    {
+        $failed = fn (string $ticker) => ['category' => 'signal', 'success' => false, 'ticker' => $ticker, 'failed' => 1, 'details' => [[
+            'account' => 'dima-submaster', 'status' => 'failed', 'leverage' => 25,
+            'leverage_refused' => '-4028 Leverage 25 is not valid',
+            'error' => 'Order failed: -2027 — 25x leverage refused (-4028 Leverage 25 is not valid)',
+        ]]];
+
+        // No leverage on the coin: the 25× is the alert's.
+        Asset::create(['ticker' => 'ASRUSDT', 'type' => 'Cryptocurrency', 'broker' => 'Binance', 'side' => 'LONG',
+            'base_size' => 16, 'max_increments' => 48, 'enabled' => true]);
+        $this->signal($failed('ASRUSDT'));
+        $text = $this->sent('sendMessage')[0]['text'];
+        $this->assertStringContainsString('25× leverage refused', $text);
+        $this->assertStringContainsString('Binance allows at most 10× on ASR', $text);
+        $this->assertStringContainsString('"leverage": 10', $text);
+
+        // The coin's own leverage is what was asked: point at Trading Assets.
+        Asset::create(['ticker' => 'DEXEUSDT', 'type' => 'Cryptocurrency', 'broker' => 'Binance', 'side' => 'SHORT',
+            'base_size' => 10, 'max_increments' => 30, 'leverage' => 25, 'enabled' => true]);
+        $this->signal($failed('DEXEUSDT'));
+        $this->assertStringContainsString("coin's own leverage in Trading Assets", $this->sent('sendMessage')[1]['text']);
+    }
+
     public function test_a_sell_suggests_a_short_and_an_exit_gets_no_buttons(): void
     {
         $this->signal(['action' => 'SELL']);

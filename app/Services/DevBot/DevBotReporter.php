@@ -81,7 +81,10 @@ class DevBotReporter
             if ($c === null || $c['severity'] !== SignalHealth::PROBLEM || in_array($c['key'], self::SKIP_KEYS, true)) {
                 continue;
             }
-            $groups[$c['key']] ??= ['label' => $c['label'], 'accounts' => [], 'text' => null];
+            $groups[$c['key']] ??= ['label' => $c['label'], 'accounts' => [], 'text' => null, 'leverage_refused' => null];
+            if (! empty($detail['leverage_refused'])) {
+                $groups[$c['key']]['leverage_refused'] ??= (int) ($detail['leverage'] ?? $log->leverage ?? 0);
+            }
             $name = $detail['account'] ?? $detail['name'] ?? null;
             if ($name !== null && $name !== '') {
                 $groups[$c['key']]['accounts'][] = (string) $name;
@@ -104,6 +107,7 @@ class DevBotReporter
                 $this->signalLine($log),
                 $accounts === [] ? null : 'Accounts: '.e(implode(', ', array_slice($accounts, 0, 8))).(count($accounts) > 8 ? ' +'.(count($accounts) - 8) : ''),
                 $group['text'] ? '<code>'.e(mb_substr($group['text'], 0, 300)).'</code>' : null,
+                $group['leverage_refused'] !== null ? $this->leverageHint($log, (int) $group['leverage_refused']) : null,
                 "\nSignal Log row #{$log->id} · repeats are muted for an hour",
                 $this->link('/admin/trade-logs?view=issues', 'Open the Signal Log'),
             ])));
@@ -138,7 +142,7 @@ class DevBotReporter
             return true;
         }
 
-        $s = $this->coins->build($ticker);
+        $s = $this->coins->build($ticker, $log->leverage !== null ? (int) $log->leverage : null);
         if (! $s['ok']) {
             if (Cache::add("devbot:told:binance:{$ticker}:suggest_failed", 1, now()->addMinutes(self::DEDUPE_MINUTES))) {
                 $this->telegram->send(implode("\n", [
@@ -178,14 +182,43 @@ class DevBotReporter
         return true;
     }
 
+    /**
+     * Binance refused the leverage an entry asked for: say the coin's real
+     * maximum and where the asked-for number came from — the coin's own
+     * leverage on Trading Assets (which wins), or the alert's JSON.
+     */
+    private function leverageHint(TradeLog $log, int $asked): string
+    {
+        $ticker = strtoupper((string) $log->ticker);
+        $coin = preg_replace('/USDT$|USDC$/', '', $ticker) ?: $ticker;
+        $max = $log->exchange === 'binance' ? $this->coins->maxLeverage($ticker) : null;
+        $limit = $max !== null ? "Binance allows at most {$max}× on {$coin}." : "Binance's limit for {$coin} could not be read.";
+        $target = $max ?? 'a lower number';
+        $broker = ExchangeSchema::isSupported((string) $log->exchange) ? ExchangeSchema::for((string) $log->exchange)->brokerLabel : null;
+        $own = $broker ? Asset::where('broker', $broker)->where('ticker', $ticker)->value('leverage') : null;
+
+        $fix = $own !== null
+            ? "The {$asked}× comes from the coin's own leverage in Trading Assets — set it to {$target} there."
+            : 'The '.$asked.'× comes from the alert — change <code>"leverage": '.$asked.'</code> to <code>"leverage": '.$target.'</code> in its JSON, or set the coin’s leverage in Trading Assets (that wins over the alert).';
+
+        return "⚠️ <b>{$asked}× leverage refused.</b> ".e($limit).' '.$fix;
+    }
+
     /** The suggestion's text — kept on the row so the answer can be appended to it. */
     public static function coinMessage(TradeLog $log, array $s, string $side, string $signalLine): string
     {
         $leverage = (int) $s['leverage'];
         $max = $s['max_leverage'] ?? null;
+        $alert = (int) ($s['alert_leverage'] ?? $leverage);
         $leverageLine = $s['leverage_known'] ?? false
             ? "Leverage {$leverage}× (Binance allows up to {$max}× on this coin)"
             : "Leverage {$leverage}× — ⚠️ Binance's limit for this coin could not be read, check it before choosing";
+        $coin = preg_replace('/USDT$|USDC$/', '', (string) $s['ticker']) ?: (string) $s['ticker'];
+        $alertLine = $max !== null && $alert > $max
+            ? "\n⚠️ <b>Your alert sends {$alert}×, but Binance allows at most {$max}× on {$coin}.</b> "
+                ."The coin is saved at {$max}× (the coin's own leverage wins over the alert), so it will still trade. "
+                .'To make the alert match, change <code>"leverage": '.$alert.'</code> to <code>"leverage": '.$max.'</code> in its JSON.'
+            : null;
         $accounts = $s['accounts'] ?? [];
         $who = ($accounts['count'] ?? 0) > 0
             ? 'Shared by every Binance account: '.$accounts['count'].($accounts['count'] === 1 ? ' real-money account trades' : ' real-money accounts trade').' this coin setting'
@@ -202,6 +235,7 @@ class DevBotReporter
             "Side {$side} (from the signal) · max size = ".CoinSuggestion::ENTRIES.' entries',
             'Each button = margin per entry for a $1,000 account. Tap one to add the coin now.',
             $who,
+            $alertLine,
         ], fn ($l) => $l !== null));
     }
 
