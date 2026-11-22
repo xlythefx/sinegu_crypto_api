@@ -382,6 +382,25 @@ class DevBotTest extends EngineTestCase
         $this->assertStringContainsString('Division by zero', $job->prompt);
     }
 
+    public function test_an_engine_error_is_dmd_once_an_hour_and_can_be_switched_off(): void
+    {
+        $alert = ['context' => "poller 'past-positions' failing", 'detail' => 'ReadTimeout: fapi.binance.com'];
+        $this->postJson('/api/engine/binance/dev-alert', $alert, $this->engineHeaders())->assertOk();
+        $this->postJson('/api/engine/binance/dev-alert', $alert, $this->engineHeaders())->assertOk();
+        $this->postJson('/api/engine/binance/dev-alert', $alert)->assertUnauthorized(); // no engine secret
+
+        $sends = $this->sent('sendMessage');
+        $this->assertCount(1, $sends);
+        $this->assertStringContainsString('Engine error', $sends[0]['text']);
+        $this->assertStringContainsString('past-positions', $sends[0]['text']);
+        $this->tap($sends[0]['reply_markup']['inline_keyboard'][0][0]['callback_data'])->assertOk();
+        $this->assertStringContainsString('ReadTimeout', \App\Models\DevBotJob::sole()->prompt);
+
+        \App\Models\DevBotSetting::current()->forceFill(['disabled_kinds' => ['engine']])->save();
+        $this->postJson('/api/engine/binance/dev-alert', ['context' => 'Binance rate limit / ban', 'detail' => 'x'], $this->engineHeaders())->assertOk();
+        $this->assertCount(2, $this->sent('sendMessage')); // only the job's "queued" line was added
+    }
+
     public function test_a_failed_scheduled_job_is_named(): void
     {
         app(\App\Services\DevBot\DevBotReporter::class)->scheduledFailure("'/usr/bin/php8.3' 'artisan' payments:watch-tron", 1);

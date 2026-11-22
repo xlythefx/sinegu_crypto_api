@@ -105,6 +105,36 @@ class DevBotReporter
         }
     }
 
+    /**
+     * One of the engine's own hard errors (its notify_error): a poller
+     * crashing, a rate limit or ban, billing / recaps switched off. Once an
+     * hour per context; Investigate hands it to the PC agent.
+     */
+    public function engineAlert(string $exchange, string $context, string $detail): void
+    {
+        if (! $this->telegram->configured() || ! DevBotSetting::allows('engine')) {
+            return;
+        }
+        try {
+            $sig = substr(md5('engine|'.$context), 0, 16);
+            if (! Cache::add("devbot:exc:told:{$sig}", 1, now()->addMinutes(self::DEDUPE_MINUTES))) {
+                return;
+            }
+            $detail = $this->scrub(mb_substr($detail, 0, 600));
+            // Same shape as a server error, so the same Investigate button works.
+            Cache::put("devbot:exc:{$sig}", [
+                'class' => 'Trading engine', 'message' => "{$context}: {$detail}", 'at' => 'trading-flask (binance_abcd)', 'where' => "engine, {$exchange}",
+            ], now()->addDays(7));
+            $this->telegram->send(implode("\n", array_filter([
+                '⚙️ <b>Engine error</b> · '.e($context),
+                $detail !== '' ? '<code>'.e($detail).'</code>' : null,
+                "\nAlso in the admin group. The same error is muted for an hour.",
+            ])), [[['text' => '🤖 Investigate on my PC', 'callback_data' => "dx:{$sig}"]]]);
+        } catch (Throwable) {
+            // Reporting an error must never cause one.
+        }
+    }
+
     /** A scheduled job that ended with a failure code. Once an hour per job. */
     public function scheduledFailure(string $command, int $exitCode): void
     {

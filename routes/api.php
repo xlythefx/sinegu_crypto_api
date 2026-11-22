@@ -652,6 +652,8 @@ Route::prefix('engine/{exchange}')
         Route::get('/assets', [EngineController::class, 'assets']);
         Route::get('/streaks', [EngineController::class, 'streaks']);
         Route::post('/trade-logs', [EngineController::class, 'storeTradeLog']);
+        // The engine's own hard errors (notify_error), for the developer error bot.
+        Route::post('/dev-alert', [EngineController::class, 'devAlert']);
         Route::get('/open-strategies', [EngineController::class, 'openStrategies']);
         Route::post('/open-strategies', [EngineController::class, 'storeOpenStrategy']);
         Route::delete('/open-strategies', [EngineController::class, 'destroyOpenStrategy']);

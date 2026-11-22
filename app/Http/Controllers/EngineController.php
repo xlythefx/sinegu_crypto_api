@@ -352,6 +352,23 @@ class EngineController extends Controller
     }
 
     /**
+     * POST /api/engine/{exchange}/dev-alert — one of the engine's own hard
+     * errors (a poller crashing, a rate limit / ban, billing or recaps switched
+     * off), already posted to the admin Telegram group; this is the copy for
+     * the developer error bot. Always 200 so the engine never retries a notice.
+     */
+    public function devAlert(string $exchange, Request $request, DevBotReporter $reporter): JsonResponse
+    {
+        $data = $request->validate([
+            'context' => ['required', 'string', 'max:200'],
+            'detail' => ['nullable', 'string', 'max:2000'],
+        ]);
+        $reporter->engineAlert($exchange, $data['context'], (string) ($data['detail'] ?? ''));
+
+        return response()->json(['success' => true]);
+    }
+
+    /**
      * A rejected signal whose reason is `assets_unavailable`: the engine never
      * got the coin list, so EVERY entry on that venue is refused until it
      * does — a high-risk alert, once an hour per venue while it lasts.

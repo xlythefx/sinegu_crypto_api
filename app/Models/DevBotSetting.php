@@ -21,6 +21,7 @@ class DevBotSetting extends Model
         'coins' => ['Missing-coin buttons', 'A signal for a coin that is not set up, with $5 / $10 / $15 size buttons. Off = a plain trade-problem message instead.'],
         'risk' => ['High-risk alerts', 'Kill switch, a close that failed, a house key refused, the engine not answering, a trade on the wrong feed.'],
         'errors' => ['Server errors', 'Any crash on the API: in a page request, a command or a scheduled job.'],
+        'engine' => ['Engine errors', 'The trading engine’s own failures: a data poller crashing, a Binance rate limit or ban, monthly billing or the recaps switched off.'],
         'scheduled' => ['Failed scheduled jobs', 'A scheduled job (crypto listener, overdue sweep, …) that ended with a failure code.'],
         'watchdog' => ['Service down / recovered', 'The crypto payment listener, the scheduler, background jobs, engine pollers or disk stopping, and coming back.'],
     ];
