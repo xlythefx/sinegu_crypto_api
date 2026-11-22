@@ -44,7 +44,11 @@ class DevBotWatch
             $was = Cache::get(self::STATE.$c['key']);
             Cache::forever(self::STATE.$c['key'], $c['ok'] ? 'ok' : 'bad');
             // First sight: report a problem that is already there, stay quiet about health.
+            // While muted the state is still kept, so the recovery after the mute is right.
             if ($was === null ? $c['ok'] : ($was === ($c['ok'] ? 'ok' : 'bad'))) {
+                continue;
+            }
+            if (! \App\Models\DevBotSetting::allows('watchdog')) {
                 continue;
             }
             try {

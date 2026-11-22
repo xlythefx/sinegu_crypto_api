@@ -380,6 +380,15 @@ Route::middleware(['auth:sanctum', 'account.active', 'email.verified'])->group(f
         // May this key make images / clips and Idea plans in Creatives (off by default).
         Route::put('/ai-access/keys/{id}', [AdminAiAccessController::class, 'update'])->whereNumber('id');
 
+        // Admin → Error Bot (2026-11-23): the developer error bot's status,
+        // what it may send, the PC agent's pause switch and its job list.
+        // Full admins only — it can pause the agent and re-run a deploy.
+        Route::get('/devbot', [\App\Http\Controllers\AdminDevBotController::class, 'index']);
+        Route::put('/devbot/settings', [\App\Http\Controllers\AdminDevBotController::class, 'updateSettings']);
+        Route::post('/devbot/test', [\App\Http\Controllers\AdminDevBotController::class, 'test'])->middleware('throttle:6,1');
+        Route::post('/devbot/jobs/{id}/cancel', [\App\Http\Controllers\AdminDevBotController::class, 'cancelJob'])->whereNumber('id');
+        Route::post('/devbot/jobs/{id}/retry', [\App\Http\Controllers\AdminDevBotController::class, 'retryJob'])->whereNumber('id')->middleware('throttle:10,1');
+
         // Admin → Creatives' monthly spending cap: any full admin sets it; the
         // marketing team (collaborators) only sees it (GET is in the
         // admin/creatives staff group above). 0 switches generation off.

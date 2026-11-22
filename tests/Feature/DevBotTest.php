@@ -525,6 +525,93 @@ class DevBotTest extends EngineTestCase
         $this->assertNotContains('Admin', $strings); // too generic to block code with
     }
 
+    // ---- Admin → Error Bot ------------------------------------------------------
+
+    private function as(string $type): array
+    {
+        $uni = $this->makeUser(['type' => $type, 'name' => 'Admin '.$type]);
+        $this->app['auth']->forgetGuards();
+
+        return ['Authorization' => 'Bearer '.\App\Models\UserCredential::where('uni_id', $uni)->firstOrFail()->createToken('t')->plainTextToken];
+    }
+
+    public function test_the_admin_page_shows_status_jobs_and_never_a_secret(): void
+    {
+        config(['services.dev_bot.agent_key' => self::AGENT_KEY]);
+        $this->fakeEngineHealth($this->healthyEngine());
+        $this->say('why did LTC skip?');
+
+        $body = $this->getJson('/api/admin/devbot', $this->as('admin'))->assertOk()
+            ->assertJsonPath('bot.configured', true)
+            ->assertJsonPath('bot.agent_key_set', true)
+            ->assertJsonPath('settings.agent_paused', false)
+            ->assertJsonPath('jobs.0.prompt', 'why did LTC skip?')
+            ->assertJsonCount(count(\App\Models\DevBotSetting::KINDS), 'kinds')
+            ->getContent();
+        foreach (['test-token', self::SECRET, self::AGENT_KEY] as $secret) {
+            $this->assertStringNotContainsString($secret, $body);
+        }
+        $this->assertStringContainsString('Crypto payment listener', $body);
+
+        $this->getJson('/api/admin/devbot', $this->as('collaborator'))->assertForbidden();
+        $this->getJson('/api/admin/devbot', $this->as('user'))->assertForbidden();
+    }
+
+    public function test_switching_a_kind_off_or_muting_silences_the_bot_but_never_replies(): void
+    {
+        $admin = $this->as('admin');
+        $failed = ['category' => 'signal', 'ticker' => 'LTCUSDT', 'details' => [['account' => 'x', 'status' => 'failed', 'error' => 'boom']]];
+
+        $this->putJson('/api/admin/devbot/settings', ['disabled_kinds' => ['signals']], $admin)->assertOk()
+            ->assertJsonPath('settings.disabled_kinds', ['signals']);
+        $this->signal($failed);
+        $this->assertSame([], $this->sent('sendMessage'));
+
+        $this->putJson('/api/admin/devbot/settings', ['disabled_kinds' => [], 'mute_minutes' => 60], $admin)->assertOk();
+        $this->assertNotNull(\App\Models\DevBotSetting::current()->muted_until);
+        app(\Illuminate\Contracts\Debug\ExceptionHandler::class)->report(new \RuntimeException('muted'));
+        $this->assertSame([], $this->sent('sendMessage'));
+
+        $this->say('/status'); // a reply to the owner is never muted
+        $this->assertCount(1, $this->sent('sendMessage'));
+
+        $this->putJson('/api/admin/devbot/settings', ['mute_minutes' => 0], $admin)->assertOk()
+            ->assertJsonPath('settings.muted_until', null);
+        $this->putJson('/api/admin/devbot/settings', ['disabled_kinds' => ['nonsense']], $admin)->assertStatus(422);
+    }
+
+    public function test_a_paused_agent_gets_no_work_until_resumed(): void
+    {
+        config(['services.dev_bot.agent_key' => self::AGENT_KEY]);
+        $admin = $this->as('admin');
+        $this->putJson('/api/admin/devbot/settings', ['agent_paused' => true], $admin)->assertOk();
+        $this->say('look into the RENDER skip');
+        $this->assertStringContainsString('paused on Admin', $this->sent('sendMessage')[0]['text']);
+
+        $this->agent('POST', '/claim')->assertOk()->assertJsonPath('job', null);
+        $this->putJson('/api/admin/devbot/settings', ['agent_paused' => false], $admin)->assertOk();
+        $this->agent('POST', '/claim')->assertOk()->assertJsonPath('job.prompt', 'look into the RENDER skip');
+    }
+
+    public function test_cancel_a_queued_job_and_retry_a_finished_one(): void
+    {
+        $admin = $this->as('admin');
+        $this->say('first question');
+        $job = \App\Models\DevBotJob::sole();
+
+        $this->postJson("/api/admin/devbot/jobs/{$job->id}/retry", [], $admin)->assertStatus(409); // not finished
+        $this->postJson("/api/admin/devbot/jobs/{$job->id}/cancel", [], $admin)->assertOk();
+        $this->assertSame('cancelled', $job->fresh()->status);
+        $this->postJson("/api/admin/devbot/jobs/{$job->id}/cancel", [], $admin)->assertStatus(409);
+
+        $newId = $this->postJson("/api/admin/devbot/jobs/{$job->id}/retry", [], $admin)->assertOk()->json('job_id');
+        $this->assertSame('first question', \App\Models\DevBotJob::find($newId)->prompt);
+        $this->assertSame('queued', \App\Models\DevBotJob::find($newId)->status);
+
+        $this->postJson('/api/admin/devbot/test', [], $admin)->assertOk();
+        $this->assertStringContainsString('Test message', collect($this->sent('sendMessage'))->last()['text']);
+    }
+
     // ---- the button maths ------------------------------------------------------
 
     public function test_options_floor_to_the_step_and_drop_what_binance_would_refuse(): void

@@ -4,6 +4,7 @@ namespace App\Services\DevBot;
 
 use App\Models\Asset;
 use App\Models\DevBotAction;
+use App\Models\DevBotSetting;
 use App\Models\RiskAlert;
 use App\Models\TradeLog;
 use App\Services\Admin\SignalHealth;
@@ -52,7 +53,7 @@ class DevBotReporter
 
     public function riskAlert(RiskAlert $alert): void
     {
-        if (! $this->telegram->configured()) {
+        if (! $this->telegram->configured() || ! DevBotSetting::allows('risk')) {
             return;
         }
         try {
@@ -76,7 +77,7 @@ class DevBotReporter
      */
     public function exception(Throwable $e): void
     {
-        if (! $this->telegram->configured()) {
+        if (! $this->telegram->configured() || ! DevBotSetting::allows('errors')) {
             return;
         }
         try {
@@ -107,7 +108,7 @@ class DevBotReporter
     /** A scheduled job that ended with a failure code. Once an hour per job. */
     public function scheduledFailure(string $command, int $exitCode): void
     {
-        if (! $this->telegram->configured()) {
+        if (! $this->telegram->configured() || ! DevBotSetting::allows('scheduled')) {
             return;
         }
         try {
@@ -160,7 +161,10 @@ class DevBotReporter
         }
 
         foreach ($groups as $key => $group) {
-            if ($key === 'asset_missing' && $this->suggestCoin($log)) {
+            if ($key === 'asset_missing' && DevBotSetting::allows('coins') && $this->suggestCoin($log)) {
+                continue;
+            }
+            if (! DevBotSetting::allows('signals')) {
                 continue;
             }
             $dedupe = "devbot:told:{$log->exchange}:{$log->feed}:{$log->ticker}:{$key}";

@@ -4,6 +4,7 @@ namespace App\Services\DevBot;
 
 use App\Models\DevBotAction;
 use App\Models\DevBotJob;
+use App\Models\DevBotSetting;
 use App\Models\TradeLog;
 use App\Services\Exchanges\ExchangeSchema;
 use Illuminate\Support\Facades\Cache;
@@ -37,14 +38,11 @@ class DevBotJobs
             'prompt' => mb_substr(trim($prompt), 0, 4000),
             'context' => $context ?: null,
         ]);
-        $online = $this->agentOnline();
         $messageId = $this->telegram->send(implode("\n", [
             "🤖 <b>Job #{$job->id} queued</b>",
             e(mb_substr($job->prompt, 0, 300)),
             '',
-            $online
-                ? 'Your PC agent is online and will start in a few seconds.'
-                : '⚠️ Your PC agent has not checked in for a while — it starts as soon as the PC is on and the agent is running.',
+            $this->waitingLine(),
         ]));
         $job->forceFill(['message_id' => $messageId])->save();
 
@@ -75,6 +73,11 @@ class DevBotJobs
         // notice the scheduler itself has stopped. Once a minute at most.
         if (Cache::add('devbot:scheduler-check', 1, 60)) {
             app(DevBotWatch::class)->run(['scheduler']);
+        }
+        // Paused on Admin → Error Bot: the agent still checks in (so it shows
+        // online) but gets no work; queued jobs wait for the resume.
+        if (DevBotSetting::agentPaused()) {
+            return null;
         }
 
         $job = DB::transaction(function () {
@@ -239,7 +242,7 @@ class DevBotJobs
                 'result_text' => "Deploy queued as job #{$job->id} by {$who}.", 'resolved_by' => $who, 'resolved_at' => now()])->save();
 
             return ['toast' => "Deploy queued (job #{$job->id})", 'keyboard' => null,
-                'html' => $base."\n\n🚀 Deploy queued as job #{$job->id} by ".e($who).'.'.($this->agentOnline() ? '' : ' Your PC agent is offline: it starts when the agent runs.')];
+                'html' => $base."\n\n🚀 Deploy queued as job #{$job->id} by ".e($who).".\n".e($this->waitingLine())];
         });
     }
 
@@ -248,6 +251,24 @@ class DevBotJobs
         $labels = array_map(fn ($t) => self::TARGET_LABELS[$t] ?? $t, $targets);
 
         return count($labels) > 1 ? implode(', ', array_slice($labels, 0, -1)).' and '.end($labels) : (string) ($labels[0] ?? 'nothing');
+    }
+
+    /** When a queued job will start, in one line. */
+    public function waitingLine(): string
+    {
+        return match (true) {
+            DevBotSetting::agentPaused() => '⏸ The PC agent is paused on Admin → Error Bot: it starts when you resume it.',
+            $this->agentOnline() => 'Your PC agent is online and will start in a few seconds.',
+            default => '⚠️ Your PC agent has not checked in for a while — it starts as soon as the PC is on and the agent is running.',
+        };
+    }
+
+    /** The agent's last check-in, or null. */
+    public function lastSeen(): ?\Illuminate\Support\Carbon
+    {
+        $seen = (int) Cache::get(self::SEEN_KEY, 0);
+
+        return $seen > 0 ? \Illuminate\Support\Carbon::createFromTimestamp($seen) : null;
     }
 
     public function agentOnline(): bool
