@@ -204,7 +204,9 @@ class DevBotTest extends EngineTestCase
         $this->assertSame(1, DevBotAction::count());
         $last = collect($this->sent('sendMessage'))->last();
         $this->assertStringContainsString('Coin not added yet', $last['text']);
-        $this->assertArrayNotHasKey('reply_markup', $last->data());
+        // No size buttons for an exit — only the Investigate one every problem carries.
+        $buttons = collect($last['reply_markup']['inline_keyboard'])->flatten(1)->pluck('text')->all();
+        $this->assertSame(['🤖 Investigate on my PC'], $buttons);
     }
 
     public function test_the_owners_tap_adds_the_coin_once_through_the_normal_asset_path(): void
@@ -287,6 +289,85 @@ class DevBotTest extends EngineTestCase
         $this->postJson('/api/devbot/telegram', ['message' => ['chat' => ['id' => (int) self::OWNER], 'text' => '/start']],
             ['X-Telegram-Bot-Api-Secret-Token' => self::SECRET])->assertOk();
         $this->assertStringContainsString('Connected', $this->sent('sendMessage')[0]['text']);
+    }
+
+    // ---- the PC agent's jobs ---------------------------------------------------
+
+    private const AGENT_KEY = 'agent-key-for-tests-0123456789abcdef';
+
+    private function agent(string $method, string $path, array $body = [], string $key = self::AGENT_KEY)
+    {
+        return $this->json($method, '/api/devbot/agent'.$path, $body, ['X-Devbot-Agent-Key' => $key]);
+    }
+
+    private function say(string $text, string $from = self::OWNER)
+    {
+        return $this->postJson('/api/devbot/telegram', ['message' => [
+            'chat' => ['id' => (int) $from], 'from' => ['id' => (int) $from], 'text' => $text,
+        ]], ['X-Telegram-Bot-Api-Secret-Token' => self::SECRET])->assertOk();
+    }
+
+    public function test_the_owners_text_becomes_a_job_the_agent_claims_and_reports_on(): void
+    {
+        config(['services.dev_bot.agent_key' => self::AGENT_KEY]);
+        $this->say('why did the LTC buy at 14:15 skip?');
+        $this->say('/start');                         // answered, not a job
+        $this->say('please fix it', from: '999');     // a stranger: refused, not a job
+
+        $job = \App\Models\DevBotJob::sole();
+        $this->assertSame('queued', $job->status);
+        $this->assertSame('message', $job->source);
+        $texts = array_map(fn ($r) => $r['text'], $this->sent('sendMessage'));
+        $this->assertStringContainsString('Job #'.$job->id.' queued', $texts[0]);
+        $this->assertStringContainsString('has not checked in', $texts[0]); // the agent never polled
+
+        $this->agent('POST', '/claim')->assertOk()->assertJsonPath('job.id', $job->id)
+            ->assertJsonPath('job.prompt', 'why did the LTC buy at 14:15 skip?');
+        $this->agent('POST', '/claim')->assertOk()->assertJsonPath('job', null);
+        $this->agent('POST', "/jobs/{$job->id}/finish", [
+            'ok' => true, 'summary' => 'The master was already full on LTC; no bug.',
+            'links' => [['label' => 'Pull request', 'url' => 'https://github.com/xlythefx/sinegu_crypto/pull/7'],
+                ['label' => 'Bad', 'url' => 'https://evil.test/x']],
+        ])->assertOk();
+
+        $this->assertSame('done', $job->fresh()->status);
+        $last = collect($this->sent('sendMessage'))->last()['text'];
+        $this->assertStringContainsString('Job #'.$job->id.' done', $last);
+        $this->assertStringContainsString('pull/7', $last);
+        $this->assertStringNotContainsString('evil.test', $last); // only GitHub links are relayed
+        $this->agent('POST', "/jobs/{$job->id}/finish", ['ok' => true, 'summary' => 'again'])->assertNotFound();
+    }
+
+    public function test_investigate_button_queues_one_job_with_the_signal_as_context(): void
+    {
+        $this->signal(['category' => 'signal', 'ticker' => 'LTCUSDT', 'details' => [
+            ['account' => 'x', 'status' => 'failed', 'error' => 'boom'],
+        ]]);
+        $button = $this->sent('sendMessage')[0]['reply_markup']['inline_keyboard'][0][0];
+        $this->assertSame('🤖 Investigate on my PC', $button['text']);
+
+        $this->tap($button['callback_data'])->assertOk();
+        $this->tap($button['callback_data'])->assertOk(); // a second tap queues nothing
+
+        $job = \App\Models\DevBotJob::sole();
+        $this->assertSame('button', $job->source);
+        $this->assertSame('order_failed', $job->context['reason']);
+        $this->assertStringContainsString('Signal Log row #'.$job->context['trade_log_id'], $job->prompt);
+    }
+
+    public function test_the_agent_api_is_shut_without_the_right_key_and_lists_private_strings(): void
+    {
+        $this->agent('POST', '/claim')->assertForbidden(); // no key configured
+        config(['services.dev_bot.agent_key' => self::AGENT_KEY]);
+        $this->agent('POST', '/claim', [], 'wrong-key-wrong-key-wrong-key')->assertForbidden();
+
+        $uni = $this->makeUser(['name' => 'Alexandre Guyomard', 'type' => 'user']);
+        $this->makeAccount($uni, ['name' => 'alex-main-binance']);
+        $this->makeUser(['name' => 'Admin', 'type' => 'admin']);
+        $strings = $this->agent('GET', '/private-strings')->assertOk()->json('strings');
+        $this->assertContains('Alexandre Guyomard', $strings);
+        $this->assertContains('alex-main-binance', $strings);
+        $this->assertNotContains('Admin', $strings); // too generic to block code with
     }
 
     // ---- the button maths ------------------------------------------------------

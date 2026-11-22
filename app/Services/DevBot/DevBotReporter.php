@@ -110,7 +110,7 @@ class DevBotReporter
                 $group['leverage_refused'] !== null ? $this->leverageHint($log, (int) $group['leverage_refused']) : null,
                 "\nSignal Log row #{$log->id} · repeats are muted for an hour",
                 $this->link('/admin/trade-logs?view=issues', 'Open the Signal Log'),
-            ])));
+            ])), [[['text' => '🤖 Investigate on my PC', 'callback_data' => "dj:{$log->id}:{$key}"]]]);
         }
     }
 

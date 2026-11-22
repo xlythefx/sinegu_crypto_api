@@ -269,6 +269,9 @@ return [
         'token' => env('DEV_BOT_TOKEN'),
         'chat_id' => env('DEV_BOT_CHAT_ID'),
         'webhook_secret' => env('DEV_BOT_WEBHOOK_SECRET'),
+        // The PC agent's key (X-Devbot-Agent-Key) for /api/devbot/agent/*:
+        // claiming jobs and reporting back. Empty = the agent API is shut.
+        'agent_key' => env('DEV_BOT_AGENT_KEY'),
         'base_url' => env('DEV_BOT_API_BASE', 'https://api.telegram.org'),
         'site_url' => env('DEV_BOT_SITE_URL', 'https://pixel-alpha.com'),
         'ca_bundle' => env('DEV_BOT_CACERT') ?: env('TRON_CACERT'),

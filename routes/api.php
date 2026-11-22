@@ -699,3 +699,11 @@ Route::match(['get', 'delete'], '/mcp', [McpController::class, 'notAllowed'])->m
 // Telegram's secret header + the owner's Telegram id are checked inside.
 Route::post('/devbot/telegram', [\App\Http\Controllers\DevBotWebhookController::class, 'handle'])
     ->middleware('throttle:120,1');
+// The developer agent on Christian's PC: its own key (X-Devbot-Agent-Key),
+// checked inside. Polls every few seconds, hence the roomier limit.
+Route::prefix('devbot/agent')->middleware('throttle:60,1')->group(function () {
+    Route::post('/claim', [\App\Http\Controllers\DevBotAgentController::class, 'claim']);
+    Route::post('/jobs/{id}/progress', [\App\Http\Controllers\DevBotAgentController::class, 'progress'])->whereNumber('id');
+    Route::post('/jobs/{id}/finish', [\App\Http\Controllers\DevBotAgentController::class, 'finish'])->whereNumber('id');
+    Route::get('/private-strings', [\App\Http\Controllers\DevBotAgentController::class, 'privateStrings']);
+});

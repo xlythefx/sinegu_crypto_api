@@ -45,5 +45,6 @@
         <env name="DEV_BOT_TOKEN" value=""/>
         <env name="DEV_BOT_CHAT_ID" value=""/>
         <env name="DEV_BOT_WEBHOOK_SECRET" value=""/>
+        <env name="DEV_BOT_AGENT_KEY" value=""/>
     </php>
 </phpunit>
