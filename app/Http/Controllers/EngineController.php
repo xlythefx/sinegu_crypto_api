@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Services\Exchanges\ExchangeSchema;
 use App\Models\RiskAlert;
 use App\Services\Alerts\RiskAlerts;
+use App\Services\DevBot\DevBotReporter;
 use App\Services\Alerts\FeedAudit;
 use Illuminate\Validation\Rule;
 use App\Services\Engine\WebhookPaths;
@@ -334,6 +335,18 @@ class EngineController extends Controller
         // engine could not load the coin list at all.
         $feedAudit->check($log);
         $this->alertIfAssetsUnavailable($log, $alerts);
+
+        // The developer error bot reads the outcome AFTER the engine has its
+        // answer: building coin buttons asks Binance and the engine itself,
+        // and the engine must never wait on that. The flag stops a second
+        // request in the same process (tests) re-running this one.
+        $told = false;
+        app()->terminating(function () use ($log, &$told) {
+            if (! $told) {
+                $told = true;
+                app(DevBotReporter::class)->tradeLog($log);
+            }
+        });
 
         return response()->json(['success' => true, 'trade_log_id' => $log->id], 201);
     }

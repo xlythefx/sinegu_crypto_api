@@ -5,6 +5,7 @@ namespace App\Services\Alerts;
 use App\Http\Controllers\AdminInsightsController;
 use App\Mail\RiskAlertNotice;
 use App\Models\RiskAlert;
+use App\Services\DevBot\DevBotReporter;
 use App\Services\EngineCache;
 use App\Services\Notifications\TradeAlerts;
 use Illuminate\Support\Facades\Cache;
@@ -102,6 +103,11 @@ class RiskAlerts
         }
         if ($telegram && $fresh && $this->engine->riskAlert(self::LABELS[$kind] ?? $kind, $title, $lines)) {
             $alert->forceFill(['telegram_at' => now()])->save();
+        }
+        // The developer error bot hears every NEW alert, whoever raised it
+        // (repeats only count, like the email's hourly limit). Best-effort.
+        if ($fresh) {
+            app(DevBotReporter::class)->riskAlert($alert);
         }
 
         return $alert;

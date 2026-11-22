@@ -256,4 +256,21 @@ return [
         // `?:` rather than env()'s default, so an EMPTY ANTHROPIC_CACERT= line still falls back.
         'ca_bundle' => env('ANTHROPIC_CACERT') ?: env('TRON_CACERT'),
     ],
+
+    // The developer error bot (2026-11-22, @errorpixel_bot): trading problems
+    // and high-risk alerts go to ONE private chat — Christian's DM, whose chat
+    // id is also his Telegram user id, so `chat_id` is both where messages go
+    // and the only person whose button taps count. A separate bot from the
+    // engine's on purpose: this token can never post to the public channel.
+    // Off unless token AND chat id are set; the webhook (button taps) also
+    // needs `webhook_secret`, which Telegram echoes in a header on every call.
+    // Box-local like ENGINE_SECRET: never mirrored, so a local box never DMs.
+    'dev_bot' => [
+        'token' => env('DEV_BOT_TOKEN'),
+        'chat_id' => env('DEV_BOT_CHAT_ID'),
+        'webhook_secret' => env('DEV_BOT_WEBHOOK_SECRET'),
+        'base_url' => env('DEV_BOT_API_BASE', 'https://api.telegram.org'),
+        'site_url' => env('DEV_BOT_SITE_URL', 'https://pixel-alpha.com'),
+        'ca_bundle' => env('DEV_BOT_CACERT') ?: env('TRON_CACERT'),
+    ],
 ];

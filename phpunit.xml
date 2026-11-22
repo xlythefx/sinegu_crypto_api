@@ -41,5 +41,9 @@
         <env name="HIGGSFIELD_KEY_SECRET" value=""/>
         <!-- Claude (Admin → Creatives' AI writer): pinned empty for the same reason. Tests bind a fake CreativeWriter and never call Anthropic. -->
         <env name="ANTHROPIC_API_KEY" value=""/>
+        <!-- The developer error bot: pinned empty so the suite can never DM anyone. Tests set config and fake Telegram. -->
+        <env name="DEV_BOT_TOKEN" value=""/>
+        <env name="DEV_BOT_CHAT_ID" value=""/>
+        <env name="DEV_BOT_WEBHOOK_SECRET" value=""/>
     </php>
 </phpunit>

@@ -694,3 +694,8 @@ Route::middleware(['throttle:ai-guard', 'ai.key'])->group(function () {
     Route::post('/mcp', [McpController::class, 'handle']);
 });
 Route::match(['get', 'delete'], '/mcp', [McpController::class, 'notAllowed'])->middleware('throttle:ai-guard');
+
+// The developer error bot's Telegram webhook (button taps). No user token:
+// Telegram's secret header + the owner's Telegram id are checked inside.
+Route::post('/devbot/telegram', [\App\Http\Controllers\DevBotWebhookController::class, 'handle'])
+    ->middleware('throttle:120,1');

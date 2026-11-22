@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\Asset;
 use App\Models\AssetChange;
+use App\Services\Assets\AssetCreator;
 use App\Services\Assets\AssetHistory;
 use App\Services\Assets\BinanceSizingCheck;
 use App\Services\Assets\KillSwitch;
@@ -202,26 +203,14 @@ class AssetController extends Controller
     {
         $validated = $this->validated($request);
         $ladder = $this->validatedLadder($request);
+        // Checked before the image is stored, so a refused size leaves no file behind.
         PendingSizing::validate($validated);
 
         if ($request->hasFile('asset_image')) {
             $validated['asset_image'] = $request->file('asset_image')->store('asset-images', 'public');
         }
 
-        $asset = DB::transaction(function () use ($validated, $ladder) {
-            $asset = Asset::create($validated);
-            if ($ladder !== null) {
-                $this->streakSizing->replace($asset, $ladder['enabled'], $ladder['steps']);
-            }
-
-            return $asset;
-        });
-        $asset = $asset->fresh();
-        $this->history->record(
-            $asset, AssetChange::CREATED, AssetHistory::diff(null, AssetHistory::snapshot($asset)),
-            AssetHistory::actor($request),
-        );
-        $this->engineCache->refreshAssets();
+        $asset = app(AssetCreator::class)->create($validated, $ladder, AssetHistory::actor($request));
 
         return response()->json([
             'success' => true,
