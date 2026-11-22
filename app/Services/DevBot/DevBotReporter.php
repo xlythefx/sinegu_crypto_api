@@ -90,16 +90,17 @@ class DevBotReporter
                 ? 'command: '.implode(' ', array_slice((array) ($_SERVER['argv'] ?? []), 1, 3))
                 : (request() ? request()->method().' /'.ltrim(request()->path(), '/') : 'unknown');
             $message = $this->scrub(mb_substr($e->getMessage(), 0, 400));
-            Cache::put("devbot:exc:{$sig}", [
-                'class' => get_class($e), 'message' => $message, 'at' => "{$file}:{$e->getLine()}", 'where' => $where,
-            ], now()->addDays(7));
-            $this->telegram->send(implode("\n", [
+            $exc = ['class' => get_class($e), 'message' => $message, 'at' => "{$file}:{$e->getLine()}", 'where' => $where];
+            Cache::put("devbot:exc:{$sig}", $exc, now()->addDays(7));
+            $auto = $this->jobs()->autoInvestigate("exc:{$sig}", "exc:{$sig}", fn () => $this->jobs()->queueForError($exc, $sig, 'auto', false));
+            $this->telegram->send(implode("\n", array_filter([
                 '💥 <b>Server error</b> · '.e(class_basename($e)),
                 '<code>'.e($message !== '' ? $message : '(no message)').'</code>',
                 'at '.e("{$file}:{$e->getLine()}"),
                 e($where),
                 "\nThe same error is muted for an hour.",
-            ]), [[['text' => '🤖 Investigate on my PC', 'callback_data' => "dx:{$sig}"]]]);
+                $auto ? DevBotJobs::autoLine($auto) : null,
+            ])), $auto ? null : [[['text' => '🤖 Investigate on my PC', 'callback_data' => "dx:{$sig}"]]]);
         } catch (Throwable) {
             // Reporting an error must never cause one.
         }
@@ -122,14 +123,15 @@ class DevBotReporter
             }
             $detail = $this->scrub(mb_substr($detail, 0, 600));
             // Same shape as a server error, so the same Investigate button works.
-            Cache::put("devbot:exc:{$sig}", [
-                'class' => 'Trading engine', 'message' => "{$context}: {$detail}", 'at' => 'trading-flask (binance_abcd)', 'where' => "engine, {$exchange}",
-            ], now()->addDays(7));
+            $exc = ['class' => 'Trading engine', 'message' => "{$context}: {$detail}", 'at' => 'trading-flask (binance_abcd)', 'where' => "engine, {$exchange}"];
+            Cache::put("devbot:exc:{$sig}", $exc, now()->addDays(7));
+            $auto = $this->jobs()->autoInvestigate("exc:{$sig}", "exc:{$sig}", fn () => $this->jobs()->queueForError($exc, $sig, 'auto', false));
             $this->telegram->send(implode("\n", array_filter([
                 '⚙️ <b>Engine error</b> · '.e($context),
                 $detail !== '' ? '<code>'.e($detail).'</code>' : null,
                 "\nAlso in the admin group. The same error is muted for an hour.",
-            ])), [[['text' => '🤖 Investigate on my PC', 'callback_data' => "dx:{$sig}"]]]);
+                $auto ? DevBotJobs::autoLine($auto) : null,
+            ])), $auto ? null : [[['text' => '🤖 Investigate on my PC', 'callback_data' => "dx:{$sig}"]]]);
         } catch (Throwable) {
             // Reporting an error must never cause one.
         }
@@ -153,6 +155,12 @@ class DevBotReporter
             ]));
         } catch (Throwable) {
         }
+    }
+
+    /** Resolved late: DevBotJobs is built after this class in the container graph. */
+    private function jobs(): DevBotJobs
+    {
+        return app(DevBotJobs::class);
     }
 
     private function scrub(string $text): string
@@ -202,6 +210,8 @@ class DevBotReporter
                 continue;
             }
             $accounts = array_values(array_unique($group['accounts']));
+            $auto = $this->jobs()->autoInvestigate(DevBotJobs::signalKind($log, $key), "signal:{$log->id}:{$key}",
+                fn () => $this->jobs()->queueForSignal($log, $key, 'auto', false));
             $this->telegram->send(implode("\n", array_filter([
                 '🔴 <b>'.e($group['label']).'</b>',
                 $this->signalLine($log),
@@ -209,8 +219,9 @@ class DevBotReporter
                 $group['text'] ? '<code>'.e(mb_substr($group['text'], 0, 300)).'</code>' : null,
                 $group['leverage_refused'] !== null ? $this->leverageHint($log, (int) $group['leverage_refused']) : null,
                 "\nSignal Log row #{$log->id} · repeats are muted for an hour",
+                $auto ? DevBotJobs::autoLine($auto) : null,
                 $this->link('/admin/trade-logs?view=issues', 'Open the Signal Log'),
-            ])), [[['text' => '🤖 Investigate on my PC', 'callback_data' => "dj:{$log->id}:{$key}"]]]);
+            ])), $auto ? null : [[['text' => '🤖 Investigate on my PC', 'callback_data' => "dj:{$log->id}:{$key}"]]]);
         }
     }
 

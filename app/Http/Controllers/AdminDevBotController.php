@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\DevBotAction;
 use App\Models\DevBotJob;
+use App\Models\DevBotMemory;
 use App\Models\DevBotSetting;
 use App\Services\DevBot\DevBotJobs;
 use App\Services\DevBot\DevBotTelegram;
@@ -56,6 +57,7 @@ class AdminDevBotController extends Controller
                 'paused' => (bool) $s->agent_paused,
             ],
             'checks' => $this->status->checks(),
+            'memories' => DevBotMemory::query()->orderByDesc('updated_at')->limit(200)->get()->map->present()->values(),
             'jobs' => DevBotJob::query()->orderByDesc('id')->limit(30)->get()->map(fn (DevBotJob $j) => [
                 'id' => $j->id,
                 'status' => $j->status,
@@ -93,6 +95,7 @@ class AdminDevBotController extends Controller
             // 0 = unmute now; otherwise mute for this many minutes from now.
             'mute_minutes' => ['sometimes', 'integer', Rule::in([0, 60, 480, 1440])],
             'agent_paused' => ['sometimes', 'boolean'],
+            'auto_investigate' => ['sometimes', 'boolean'],
         ]);
         $s = DevBotSetting::current();
         if (array_key_exists('disabled_kinds', $data)) {
@@ -103,6 +106,9 @@ class AdminDevBotController extends Controller
         }
         if (array_key_exists('agent_paused', $data)) {
             $s->agent_paused = (bool) $data['agent_paused'];
+        }
+        if (array_key_exists('auto_investigate', $data)) {
+            $s->auto_investigate = (bool) $data['auto_investigate'];
         }
         $user = $request->user();
         $s->updated_by_name = mb_substr((string) ($user?->name ?: $user?->email ?: 'Admin'), 0, 100);
@@ -149,12 +155,54 @@ class AdminDevBotController extends Controller
         return response()->json(['success' => true, 'job_id' => $new->id]);
     }
 
+    /** POST /api/admin/devbot/memories {title, body} — a note written by an admin. */
+    public function storeMemory(Request $request): JsonResponse
+    {
+        $data = $this->validatedMemory($request);
+        $m = DevBotMemory::create($data + ['source' => 'admin', 'updated_by_name' => $this->who($request)]);
+
+        return response()->json(['success' => true, 'memory' => $m->present()], 201);
+    }
+
+    /** PUT /api/admin/devbot/memories/{id} {title, body} */
+    public function updateMemory(Request $request, int $id): JsonResponse
+    {
+        $m = DevBotMemory::findOrFail($id);
+        $m->fill($this->validatedMemory($request) + ['updated_by_name' => $this->who($request)])->save();
+
+        return response()->json(['success' => true, 'memory' => $m->present()]);
+    }
+
+    /** DELETE /api/admin/devbot/memories/{id} — the agent stops being told it. */
+    public function destroyMemory(int $id): JsonResponse
+    {
+        DevBotMemory::findOrFail($id)->delete();
+
+        return response()->json(['success' => true]);
+    }
+
+    private function validatedMemory(Request $request): array
+    {
+        return $request->validate([
+            'title' => ['required', 'string', 'max:200'],
+            'body' => ['required', 'string', 'max:6000'],
+        ]);
+    }
+
+    private function who(Request $request): string
+    {
+        $user = $request->user();
+
+        return mb_substr((string) ($user?->name ?: $user?->email ?: 'Admin'), 0, 100);
+    }
+
     private function presentSettings(DevBotSetting $s): array
     {
         return [
             'disabled_kinds' => array_values((array) ($s->disabled_kinds ?? [])),
             'muted_until' => $s->isMuted() ? $s->muted_until->toIso8601String() : null,
             'agent_paused' => (bool) $s->agent_paused,
+            'auto_investigate' => (bool) ($s->auto_investigate ?? true),
             'updated_by' => $s->updated_by_name,
             'updated_at' => $s->updated_at?->toIso8601String(),
         ];

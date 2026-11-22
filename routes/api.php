@@ -388,6 +388,10 @@ Route::middleware(['auth:sanctum', 'account.active', 'email.verified'])->group(f
         Route::post('/devbot/test', [\App\Http\Controllers\AdminDevBotController::class, 'test'])->middleware('throttle:6,1');
         Route::post('/devbot/jobs/{id}/cancel', [\App\Http\Controllers\AdminDevBotController::class, 'cancelJob'])->whereNumber('id');
         Route::post('/devbot/jobs/{id}/retry', [\App\Http\Controllers\AdminDevBotController::class, 'retryJob'])->whereNumber('id')->middleware('throttle:10,1');
+        // The PC agent's memory: what it learned, editable by an admin.
+        Route::post('/devbot/memories', [\App\Http\Controllers\AdminDevBotController::class, 'storeMemory']);
+        Route::put('/devbot/memories/{id}', [\App\Http\Controllers\AdminDevBotController::class, 'updateMemory'])->whereNumber('id');
+        Route::delete('/devbot/memories/{id}', [\App\Http\Controllers\AdminDevBotController::class, 'destroyMemory'])->whereNumber('id');
 
         // Admin → Creatives' monthly spending cap: any full admin sets it; the
         // marketing team (collaborators) only sees it (GET is in the

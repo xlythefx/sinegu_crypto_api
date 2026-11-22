@@ -4,6 +4,7 @@ namespace Tests\Feature;
 
 use App\Models\Asset;
 use App\Models\DevBotAction;
+use App\Models\DevBotSetting;
 // (DevBotJob, DevBotWatch, SystemStatus are referenced fully qualified below.)
 use App\Models\RiskAlert;
 use App\Services\Alerts\RiskAlerts;
@@ -35,6 +36,8 @@ class DevBotTest extends EngineTestCase
             'services.engine.targets.local' => 'http://engine.test',
             'services.dev_bot.check_disk' => false, // the test machine's own disk is not the server's
         ]);
+        // The button tests below need the button: auto-investigate has its own tests.
+        DevBotSetting::current()->forceFill(['auto_investigate' => false])->save();
         $this->fakeAll();
     }
 
@@ -56,7 +59,7 @@ class DevBotTest extends EngineTestCase
                 'success' => true, 'max_leverage' => $maxLeverage, 'mark_price' => 0.628,
                 'accounts' => [
                     ['name' => 'master', 'is_master' => true, 'balance' => 12000, 'entry_qty' => 12.0],
-                    ['name' => 'dima-submaster', 'is_master' => false, 'balance' => 1080, 'entry_qty' => 1.0],
+                    ['name' => 'sample-submaster', 'is_master' => false, 'balance' => 1080, 'entry_qty' => 1.0],
                 ],
             ]),
             'engine.test/*' => Http::response(['ok' => true]),
@@ -92,7 +95,7 @@ class DevBotTest extends EngineTestCase
     public function test_a_problem_outcome_is_dmd_once_an_hour_and_normal_outcomes_never(): void
     {
         $failed = ['category' => 'signal', 'success' => false, 'ticker' => 'LTCUSDT', 'failed' => 1, 'details' => [
-            ['account' => 'dima-submaster', 'uni_id' => 'u1', 'status' => 'failed', 'error' => 'Order failed: -2027 Exceeded the maximum allowable position'],
+            ['account' => 'sample-submaster', 'uni_id' => 'u1', 'status' => 'failed', 'error' => 'Order failed: -2027 Exceeded the maximum allowable position'],
         ]];
         $this->signal($failed);
         $this->signal($failed); // same coin + reason within the hour: muted
@@ -104,7 +107,7 @@ class DevBotTest extends EngineTestCase
         $this->assertCount(1, $sends);
         $this->assertSame(self::OWNER, (string) $sends[0]['chat_id']);
         $this->assertStringContainsString('Order refused by the exchange', $sends[0]['text']);
-        $this->assertStringContainsString('dima-submaster', $sends[0]['text']);
+        $this->assertStringContainsString('sample-submaster', $sends[0]['text']);
         $this->assertStringContainsString('-2027', $sends[0]['text']);
     }
 
@@ -176,7 +179,7 @@ class DevBotTest extends EngineTestCase
     public function test_a_refused_leverage_names_binances_max_and_where_to_change_it(): void
     {
         $failed = fn (string $ticker) => ['category' => 'signal', 'success' => false, 'ticker' => $ticker, 'failed' => 1, 'details' => [[
-            'account' => 'dima-submaster', 'status' => 'failed', 'leverage' => 25,
+            'account' => 'sample-submaster', 'status' => 'failed', 'leverage' => 25,
             'leverage_refused' => '-4028 Leverage 25 is not valid',
             'error' => 'Order failed: -2027 — 25x leverage refused (-4028 Leverage 25 is not valid)',
         ]]];
@@ -535,12 +538,12 @@ class DevBotTest extends EngineTestCase
         config(['services.dev_bot.agent_key' => self::AGENT_KEY]);
         $this->agent('POST', '/claim', [], 'wrong-key-wrong-key-wrong-key')->assertForbidden();
 
-        $uni = $this->makeUser(['name' => 'Alexandre Guyomard', 'type' => 'user']);
-        $this->makeAccount($uni, ['name' => 'alex-main-binance']);
+        $uni = $this->makeUser(['name' => 'Jane Example', 'type' => 'user']);
+        $this->makeAccount($uni, ['name' => 'jane-main-binance']);
         $this->makeUser(['name' => 'Admin', 'type' => 'admin']);
         $strings = $this->agent('GET', '/private-strings')->assertOk()->json('strings');
-        $this->assertContains('Alexandre Guyomard', $strings);
-        $this->assertContains('alex-main-binance', $strings);
+        $this->assertContains('Jane Example', $strings);
+        $this->assertContains('jane-main-binance', $strings);
         $this->assertNotContains('Admin', $strings); // too generic to block code with
     }
 
@@ -629,6 +632,85 @@ class DevBotTest extends EngineTestCase
 
         $this->postJson('/api/admin/devbot/test', [], $admin)->assertOk();
         $this->assertStringContainsString('Test message', collect($this->sent('sendMessage'))->last()['text']);
+    }
+
+    // ---- auto-investigate + memory ----------------------------------------------
+
+    public function test_a_new_kind_of_problem_starts_the_agent_by_itself_once(): void
+    {
+        DevBotSetting::current()->forceFill(['auto_investigate' => true])->save();
+        $failed = ['category' => 'signal', 'ticker' => 'LTCUSDT', 'details' => [['account' => 'x', 'status' => 'failed', 'error' => 'boom']]];
+
+        $this->signal($failed);
+        $job = \App\Models\DevBotJob::sole();
+        $this->assertSame('auto', $job->source);
+        $this->assertSame('signal:binance:submaster:LTCUSDT:order_failed', $job->context['signature']);
+        $sent = $this->sent('sendMessage');
+        $this->assertCount(1, $sent); // the problem message carries the news; no separate "queued" line
+        $this->assertStringContainsString('looking into it by itself (job #'.$job->id.')', $sent[0]['text']);
+        $this->assertArrayNotHasKey('reply_markup', $sent[0]->data());
+
+        // The same kind again (a new signal, after the hourly mute): no second job.
+        \Illuminate\Support\Facades\Cache::flush();
+        \Illuminate\Support\Facades\Cache::put('devbot:auto:kind:'.md5('signal:binance:submaster:LTCUSDT:order_failed'), 1, 3600);
+        $this->signal($failed);
+        $this->assertSame(1, \App\Models\DevBotJob::count());
+        $this->assertSame('🤖 Investigate on my PC', collect($this->sent('sendMessage'))->last()['reply_markup']['inline_keyboard'][0][0]['text']);
+    }
+
+    public function test_auto_investigate_respects_the_switch_the_pause_and_the_daily_cap(): void
+    {
+        $handler = app(\Illuminate\Contracts\Debug\ExceptionHandler::class);
+        $handler->report(new \RuntimeException('switch off'));          // switch off (setUp)
+        $this->assertSame(0, \App\Models\DevBotJob::count());
+
+        DevBotSetting::current()->forceFill(['auto_investigate' => true, 'agent_paused' => true])->save();
+        $handler->report(new \LogicException('paused'));                 // paused agent: no job
+        $this->assertSame(0, \App\Models\DevBotJob::count());
+
+        DevBotSetting::current()->forceFill(['agent_paused' => false])->save();
+        \Illuminate\Support\Facades\Cache::put('devbot:auto:day:'.now('UTC')->format('Ymd'), \App\Services\DevBot\DevBotJobs::AUTO_PER_DAY, 3600);
+        $handler->report(new \DomainException('cap reached'));           // today's cap used up
+        $this->assertSame(0, \App\Models\DevBotJob::count());
+    }
+
+    public function test_the_agent_gets_its_memory_and_saves_what_it_learned(): void
+    {
+        config(['services.dev_bot.agent_key' => self::AGENT_KEY]);
+        $old = \App\Models\DevBotMemory::create(['title' => 'SANTOS max leverage', 'body' => 'Binance allows 10x on SANTOS.', 'source' => 'admin']);
+        $this->say('why did SANTOS fail?');
+
+        $claim = $this->agent('POST', '/claim')->assertOk();
+        $this->assertSame('SANTOS max leverage', $claim->json('job.memories.0.title'));
+        $id = $claim->json('job.id');
+
+        $this->agent('POST', "/jobs/{$id}/finish", ['ok' => true, 'summary' => 'Leverage again.',
+            'memory' => ['title' => 'SANTOS max leverage (updated)', 'body' => 'Binance allows 10x; the alert sends 25x.', 'replaces_id' => $old->id]])->assertOk();
+        $this->assertSame(1, \App\Models\DevBotMemory::count()); // updated, not duplicated
+        $this->assertSame('agent', $old->fresh()->source);
+        $this->assertStringContainsString('Remembered: SANTOS max leverage (updated)', collect($this->sent('sendMessage'))->last()['text']);
+
+        $this->say('and LTC?');
+        $id2 = $this->agent('POST', '/claim')->json('job.id');
+        $this->agent('POST', "/jobs/{$id2}/finish", ['ok' => true, 'summary' => 'x',
+            'memory' => ['title' => 'LTC skips', 'body' => 'Main account full means everyone waits.']])->assertOk();
+        $this->assertSame(2, \App\Models\DevBotMemory::count());
+    }
+
+    public function test_admins_add_edit_and_delete_memory_and_switch_auto_investigate(): void
+    {
+        $admin = $this->as('admin');
+        $id = $this->postJson('/api/admin/devbot/memories', ['title' => 'Overdue sweep', 'body' => 'Runs 00:10 UTC.'], $admin)
+            ->assertCreated()->assertJsonPath('memory.source', 'admin')->json('memory.id');
+        $this->putJson("/api/admin/devbot/memories/{$id}", ['title' => 'Overdue sweep', 'body' => 'Runs 00:10 UTC daily.'], $admin)
+            ->assertOk()->assertJsonPath('memory.body', 'Runs 00:10 UTC daily.');
+        $this->getJson('/api/admin/devbot', $admin)->assertOk()->assertJsonPath('memories.0.title', 'Overdue sweep');
+        $this->deleteJson("/api/admin/devbot/memories/{$id}", [], $admin)->assertOk();
+        $this->assertSame(0, \App\Models\DevBotMemory::count());
+        $this->putJson('/api/admin/devbot/settings', ['auto_investigate' => true], $admin)->assertOk()
+            ->assertJsonPath('settings.auto_investigate', true);
+
+        $this->postJson('/api/admin/devbot/memories', ['title' => 'x'], $this->as('collaborator'))->assertForbidden();
     }
 
     // ---- the button maths ------------------------------------------------------

@@ -4,6 +4,7 @@ namespace App\Services\DevBot;
 
 use App\Models\DevBotAction;
 use App\Models\DevBotJob;
+use App\Models\DevBotMemory;
 use App\Models\DevBotSetting;
 use App\Models\TradeLog;
 use App\Services\Exchanges\ExchangeSchema;
@@ -29,8 +30,17 @@ class DevBotJobs
 
     public function __construct(private DevBotTelegram $telegram) {}
 
-    /** Queue a job and say so in the DM. */
-    public function queue(string $prompt, string $source, array $context = []): DevBotJob
+    /** How many jobs the bot may start by itself per UTC day. */
+    public const AUTO_PER_DAY = 10;
+
+    /** The same kind of error is investigated by itself at most once in this many days. */
+    public const AUTO_EVERY_DAYS = 7;
+
+    /**
+     * Queue a job. `$announce` = say so in its own DM line; an automatic job
+     * is told inside the problem message instead.
+     */
+    public function queue(string $prompt, string $source, array $context = [], bool $announce = true): DevBotJob
     {
         $job = DevBotJob::create([
             'status' => DevBotJob::QUEUED,
@@ -38,19 +48,61 @@ class DevBotJobs
             'prompt' => mb_substr(trim($prompt), 0, 4000),
             'context' => $context ?: null,
         ]);
-        $messageId = $this->telegram->send(implode("\n", [
-            "🤖 <b>Job #{$job->id} queued</b>",
-            e(mb_substr($job->prompt, 0, 300)),
-            '',
-            $this->waitingLine(),
-        ]));
-        $job->forceFill(['message_id' => $messageId])->save();
+        if ($announce) {
+            $messageId = $this->telegram->send(implode("\n", [
+                "🤖 <b>Job #{$job->id} queued</b>",
+                e(mb_substr($job->prompt, 0, 300)),
+                '',
+                $this->waitingLine(),
+            ]));
+            $job->forceFill(['message_id' => $messageId])->save();
+        }
 
         return $job;
     }
 
-    /** A tap on "Investigate" under a signal problem. */
-    public function queueForSignal(TradeLog $log, string $reasonKey): DevBotJob
+    /**
+     * Start the PC agent BY ITSELF on a new kind of error (2026-11-23,
+     * Christian: "auto investigate"). Null = not this time: the switch is
+     * off or the agent paused, this kind was already investigated in the last
+     * AUTO_EVERY_DAYS, or AUTO_PER_DAY jobs already started today.
+     *
+     * `$kind` names the KIND of error (venue + feed + coin + reason, a server
+     * error's class + file + line), so the same failure repeating does not
+     * start a job each time; `$buttonKey` is the Investigate button's own key,
+     * so a later tap says "already sent" instead of starting a second job.
+     */
+    public function autoInvestigate(string $kind, string $buttonKey, \Closure $make): ?DevBotJob
+    {
+        if (! DevBotSetting::autoInvestigate()) {
+            return null;
+        }
+        $kindKey = 'devbot:auto:kind:'.md5($kind);
+        if (Cache::has($kindKey)) {
+            return null;
+        }
+        $dayKey = 'devbot:auto:day:'.now('UTC')->format('Ymd');
+        Cache::add($dayKey, 0, now()->addDays(2));
+        if ((int) Cache::get($dayKey, 0) >= self::AUTO_PER_DAY) {
+            return null;
+        }
+        if (! Cache::add("devbot:job-for:{$buttonKey}", 1, now()->addHours(6))) {
+            return null; // already tapped
+        }
+        Cache::put($kindKey, 1, now()->addDays(self::AUTO_EVERY_DAYS));
+        Cache::increment($dayKey);
+
+        return $make();
+    }
+
+    /** The line an automatic job adds to the problem message. */
+    public static function autoLine(DevBotJob $job): string
+    {
+        return "\n🤖 Your PC agent is looking into it by itself (job #{$job->id}); the answer arrives here.";
+    }
+
+    /** A tap on "Investigate" under a signal problem (or the automatic start). */
+    public function queueForSignal(TradeLog $log, string $reasonKey, string $source = 'button', bool $announce = true): DevBotJob
     {
         $venue = ExchangeSchema::isSupported((string) $log->exchange)
             ? ExchangeSchema::for((string) $log->exchange)->brokerLabel : ucfirst((string) $log->exchange);
@@ -59,10 +111,38 @@ class DevBotJobs
         return $this->queue(
             "Investigate the \"{$label}\" problem on {$log->action} {$log->ticker} ({$venue}, {$log->feed} feed), "
             ."Signal Log row #{$log->id}. Find the root cause; fix it in code only if the code is wrong.",
-            'button',
+            $source,
             ['trade_log_id' => $log->id, 'reason' => $reasonKey, 'exchange' => $log->exchange,
-                'ticker' => $log->ticker, 'action' => $log->action, 'feed' => $log->feed],
+                'ticker' => $log->ticker, 'action' => $log->action, 'feed' => $log->feed,
+                'signature' => self::signalKind($log, $reasonKey)],
+            $announce,
         );
+    }
+
+    /** A server or engine error (cached by the reporter under devbot:exc:{sig}). */
+    public function queueForError(array $exc, string $sig, string $source = 'button', bool $announce = true): DevBotJob
+    {
+        return $this->queue(
+            "A server error was reported: {$exc['class']}: {$exc['message']} at {$exc['at']} ({$exc['where']}). "
+            .'Find the cause. If the code is wrong, fix it with a test.',
+            $source, ['kind' => 'exception', 'signature' => "exc:{$sig}"] + $exc, $announce,
+        );
+    }
+
+    /** A service check that went down (SystemStatus / DevBotWatch). */
+    public function queueForCheck(array $check, string $source = 'button', bool $announce = true): DevBotJob
+    {
+        return $this->queue(
+            "The \"{$check['name']}\" service check is failing: {$check['detail']}. Find out why it stopped and what "
+            .'brings it back. Fix code only if the code is wrong; otherwise say exactly what to do on the server.',
+            $source, ['kind' => 'service', 'check' => $check, 'signature' => 'watch:'.$check['key']], $announce,
+        );
+    }
+
+    /** The KIND of a signal problem, as auto-investigate and the memory name it. */
+    public static function signalKind(TradeLog $log, string $reasonKey): string
+    {
+        return mb_substr("signal:{$log->exchange}:{$log->feed}:{$log->ticker}:{$reasonKey}", 0, 120);
     }
 
     /** The oldest queued job, now WORKING — or null. Also records that the agent is alive. */
@@ -107,7 +187,7 @@ class DevBotJobs
      *
      * @param  list<array{label: string, url: string}>  $links
      */
-    public function finish(DevBotJob $job, bool $ok, string $summary, array $links = []): void
+    public function finish(DevBotJob $job, bool $ok, string $summary, array $links = [], ?array $memory = null): void
     {
         $job->forceFill([
             'status' => $ok ? DevBotJob::DONE : DevBotJob::FAILED,
@@ -115,6 +195,7 @@ class DevBotJobs
             'summary' => mb_substr($summary, 0, 8000),
             'links' => $links ?: null,
         ])->save();
+        $learned = $memory ? $this->remember($job, $memory) : null;
 
         $lines = [($ok ? '✅' : '❌')." <b>Job #{$job->id} ".($ok ? 'done' : 'failed').'</b>', '', e(mb_substr($summary, 0, 3000))];
         foreach ($links as $l) {
@@ -126,7 +207,49 @@ class DevBotJobs
         if ($links !== []) {
             $lines[] = "\nNothing is merged or deployed until you approve the pull request on GitHub.";
         }
+        if ($learned) {
+            $lines[] = "\n🧠 Remembered: ".e($learned->title).' (Admin → Error Bot → Memory)';
+        }
         $this->telegram->send(implode("\n", $lines));
+    }
+
+    /**
+     * Keep what the agent learned. `replaces_id` updates an existing note
+     * (the agent was shown them all) instead of adding a near-copy; the
+     * job's error signature is attached so the next job of that kind finds it.
+     *
+     * @param  array{title?: string, body?: string, replaces_id?: int|null}  $memory
+     */
+    public function remember(DevBotJob $job, array $memory): ?DevBotMemory
+    {
+        $title = trim((string) ($memory['title'] ?? ''));
+        $body = trim((string) ($memory['body'] ?? ''));
+        if ($title === '' || $body === '') {
+            return null;
+        }
+        $attrs = [
+            'title' => mb_substr($title, 0, 200),
+            'body' => mb_substr($body, 0, 6000),
+            'source' => 'agent',
+            'job_id' => $job->id,
+            'updated_by_name' => 'PC agent',
+        ];
+        $existing = ! empty($memory['replaces_id']) ? DevBotMemory::find((int) $memory['replaces_id']) : null;
+        if ($existing) {
+            $existing->fill($attrs)->save();
+
+            return $existing;
+        }
+
+        return DevBotMemory::create($attrs + ['signature' => $job->context['signature'] ?? null]);
+    }
+
+    /** What the agent is handed before every job: its notes, newest first. @return list<array<string, mixed>> */
+    public function memoriesForAgent(): array
+    {
+        return DevBotMemory::query()->orderByDesc('updated_at')->limit(DevBotMemory::FOR_AGENT)->get()
+            ->map(fn (DevBotMemory $m) => ['id' => $m->id, 'title' => $m->title, 'body' => $m->body, 'signature' => $m->signature])
+            ->all();
     }
 
     /** What a merged change sends live, by repo + changed paths. */

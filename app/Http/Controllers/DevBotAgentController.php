@@ -40,6 +40,8 @@ class DevBotAgentController extends Controller
             'source' => $job->source,
             'prompt' => $job->prompt,
             'context' => $job->context ?? (object) [],
+            // What the agent learned before (Admin → Error Bot → Memory), read first.
+            'memories' => $this->jobs->memoriesForAgent(),
         ] : null]);
     }
 
@@ -68,9 +70,14 @@ class DevBotAgentController extends Controller
             'links' => ['nullable', 'array', 'max:6'],
             'links.*.label' => ['required', 'string', 'max:120'],
             'links.*.url' => ['required', 'string', 'max:500'],
+            // Something worth remembering for the next job (optional).
+            'memory' => ['nullable', 'array'],
+            'memory.title' => ['required_with:memory', 'string', 'max:200'],
+            'memory.body' => ['required_with:memory', 'string', 'max:6000'],
+            'memory.replaces_id' => ['nullable', 'integer'],
         ]);
         $job = DevBotJob::where('status', DevBotJob::WORKING)->findOrFail($id);
-        $this->jobs->finish($job, (bool) $data['ok'], $data['summary'], $data['links'] ?? []);
+        $this->jobs->finish($job, (bool) $data['ok'], $data['summary'], $data['links'] ?? [], $data['memory'] ?? null);
 
         return response()->json(['ok' => true]);
     }

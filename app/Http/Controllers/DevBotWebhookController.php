@@ -112,18 +112,14 @@ class DevBotWebhookController extends Controller
         }
         if (preg_match('/^dw:([a-z_]{1,20})$/', $data, $m)) {
             $check = collect($this->status->checks())->firstWhere('key', $m[1]);
-            $this->once($id, "watch:{$m[1]}", $check === null ? null : fn () => $this->jobs->queue(
-                "The \"{$check['name']}\" service check is failing: {$check['detail']}. Find out why it stopped and what "
-                .'brings it back. Fix code only if the code is wrong; otherwise say exactly what to do on the server.',
-                'button', ['kind' => 'service', 'check' => $check]), 'That check no longer exists.');
+            $this->once($id, "watch:{$m[1]}", $check === null ? null : fn () => $this->jobs->queueForCheck($check),
+                'That check no longer exists.');
 
             return;
         }
         if (preg_match('/^dx:([a-f0-9]{16})$/', $data, $m)) {
             $exc = Cache::get("devbot:exc:{$m[1]}");
-            $this->once($id, "exc:{$m[1]}", ! is_array($exc) ? null : fn () => $this->jobs->queue(
-                "A server error was reported: {$exc['class']}: {$exc['message']} at {$exc['at']} ({$exc['where']}). "
-                .'Find the cause. If the code is wrong, fix it with a test.', 'button', ['kind' => 'exception'] + $exc),
+            $this->once($id, "exc:{$m[1]}", ! is_array($exc) ? null : fn () => $this->jobs->queueForError($exc, $m[1]),
                 'That error is too old to investigate from here; type it to me instead.');
 
             return;

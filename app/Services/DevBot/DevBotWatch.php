@@ -52,10 +52,14 @@ class DevBotWatch
                 continue;
             }
             try {
+                $jobs = app(DevBotJobs::class);
+                $auto = $c['ok'] ? null : $jobs->autoInvestigate('watch:'.$c['key'], 'watch:'.$c['key'],
+                    fn () => $jobs->queueForCheck($c, 'auto', false));
                 $this->telegram->send($c['ok']
                     ? '🟢 <b>'.e($c['name']).' recovered</b>'."\n".e($c['detail'])
-                    : '🔴 <b>'.e($c['name']).' has a problem</b>'."\n".e($c['detail'])."\n\nSend /status for everything.",
-                    $c['ok'] ? null : [[['text' => '🤖 Investigate on my PC', 'callback_data' => 'dw:'.$c['key']]]]);
+                    : '🔴 <b>'.e($c['name']).' has a problem</b>'."\n".e($c['detail'])."\n\nSend /status for everything."
+                        .($auto ? "\n".DevBotJobs::autoLine($auto) : ''),
+                    $c['ok'] || $auto ? null : [[['text' => '🤖 Investigate on my PC', 'callback_data' => 'dw:'.$c['key']]]]);
                 $told++;
             } catch (Throwable) {
                 // DevBotTelegram never throws; belt and braces for a watchdog.

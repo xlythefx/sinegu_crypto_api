@@ -28,7 +28,7 @@ class DevBotSetting extends Model
 
     protected $table = 'dev_bot_settings';
 
-    protected $fillable = ['disabled_kinds', 'muted_until', 'agent_paused', 'updated_by_name'];
+    protected $fillable = ['disabled_kinds', 'muted_until', 'agent_paused', 'auto_investigate', 'updated_by_name'];
 
     protected function casts(): array
     {
@@ -36,12 +36,13 @@ class DevBotSetting extends Model
             'disabled_kinds' => 'array',
             'muted_until' => 'datetime',
             'agent_paused' => 'boolean',
+            'auto_investigate' => 'boolean',
         ];
     }
 
     public static function current(): self
     {
-        return self::query()->firstOrCreate(['id' => 1], ['disabled_kinds' => [], 'agent_paused' => false]);
+        return self::query()->firstOrCreate(['id' => 1], ['disabled_kinds' => [], 'agent_paused' => false, 'auto_investigate' => true]);
     }
 
     public function isMuted(): bool
@@ -58,6 +59,18 @@ class DevBotSetting extends Model
             return ! $s->isMuted() && ! in_array($kind, (array) ($s->disabled_kinds ?? []), true);
         } catch (Throwable) {
             return true;
+        }
+    }
+
+    /** Start the PC agent by itself on a NEW kind of error (Admin → Error Bot switch, default on). */
+    public static function autoInvestigate(): bool
+    {
+        try {
+            $s = self::current();
+
+            return (bool) ($s->auto_investigate ?? true) && ! $s->agent_paused;
+        } catch (Throwable) {
+            return false;
         }
     }
 
