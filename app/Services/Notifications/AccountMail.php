@@ -36,10 +36,10 @@ class AccountMail
      */
     public function registrationPending(UserCredential $user, string $via): void
     {
-        $to = self::teamRecipients();
+        $to = TeamNotices::recipients('team-new-registration');
 
         if ($to === []) {
-            Log::warning('AccountMail: no mail.admin_address configured — registration notice skipped.', [
+            Log::warning('AccountMail: no recipients for team-new-registration (Admin → Notifications) — registration notice skipped.', [
                 'uni_id' => $user->uni_id,
             ]);
 
@@ -60,9 +60,11 @@ class AccountMail
     }
 
     /**
-     * Who receives team notices: MAIL_ADMIN_ADDRESS, a comma-separated list
+     * The DEFAULT team list: MAIL_ADMIN_ADDRESS, a comma-separated list
      * (support@ plus whoever else on the team asked to be told). Anything that
      * is not a valid address is dropped rather than failing every send.
+     * A notice asks TeamNotices::recipients(slug), which falls back to this
+     * until an admin sets its own list on Admin → Notifications.
      *
      * @return list<string>
      */

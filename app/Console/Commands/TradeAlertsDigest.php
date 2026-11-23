@@ -2,6 +2,7 @@
 
 namespace App\Console\Commands;
 
+use App\Services\Notifications\TeamNotices;
 use App\Mail\TradeFailureSummary;
 use App\Services\Admin\TradeFailureDigest;
 use App\Services\Notifications\TradeAlerts;
@@ -46,9 +47,9 @@ class TradeAlertsDigest extends Command
 
             return self::SUCCESS;
         }
-        $recipients = TradeAlerts::recipients();
+        $recipients = TeamNotices::recipients('trade-failure-summary');
         if ($recipients === []) {
-            $this->line('TRADE_ALERT_EMAILS is empty: no email.');
+            $this->line('No recipients (switched off on Admin → Notifications, or TRADE_ALERT_EMAILS empty): no email.');
 
             return self::SUCCESS;
         }

@@ -35,6 +35,8 @@ return Application::configure(basePath: dirname(__DIR__))
             'ai.key' => \App\Http\Middleware\VerifyAiAccessKey::class,
             'stripe.webhook' => \App\Http\Middleware\VerifyStripeSignature::class,
             'coinsbuy.webhook' => \App\Http\Middleware\VerifyCoinsbuySignature::class,
+            // `activity:<action>` — the customer's own activity log (UserActivity).
+            'activity' => \App\Http\Middleware\RecordUserActivity::class,
         ]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {

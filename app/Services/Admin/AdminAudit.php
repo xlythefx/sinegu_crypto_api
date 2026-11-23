@@ -22,6 +22,8 @@ class AdminAudit
         'user.created', 'user.approved', 'user.rejected', 'user.status', 'user.role', 'user.fees',
         'user.deleted', 'invoice.marked_paid', 'invoice.fee_changed', 'invoice.deleted',
         'invoice.attributed', 'account.disconnected', 'account.purged', 'account.updated', 'note.deleted',
+        // No customer: a team setting (Admin → Notifications, 2026-11-23).
+        'notification.updated',
     ];
 
     /**

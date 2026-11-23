@@ -4,6 +4,8 @@ namespace App\Services\Admin;
 
 use App\Models\Invoice;
 use App\Models\UserCredential;
+use App\Services\Activity\ActivityFeed;
+use App\Services\Activity\UserActivity;
 use App\Services\Billing\PaymentMethod;
 use App\Services\Exchanges\ExchangeSchema;
 use Illuminate\Support\Carbon;
@@ -142,9 +144,37 @@ class CustomerTimeline
             ]);
         }
 
+        // ---- their own actions (2026-11-23) ----------------------------------
+        // Connect / disconnect are already told above from the account rows
+        // (back to the beginning); the log only adds what nothing else holds.
+        $own = DB::table('user_activity_logs')->where('uni_id', $user->uni_id)
+            ->whereNotIn('action', ['exchange.connected', 'exchange.disconnected'])
+            ->orderByDesc('id')->limit(500)->get();
+        foreach ($own as $row) {
+            $add(Carbon::parse($row->created_at, 'UTC'), 'customer', self::customerTone($row->action), $row->summary,
+                $row->ip ? 'IP '.$row->ip : null);
+        }
+
+        // ---- sign-ins (recorded since 2026-10-14) ----------------------------
+        $signins = DB::table('user_access_events')->where('uni_id', $user->uni_id)->where('event', 'login')
+            ->orderByDesc('id')->limit(200)->get();
+        foreach ($signins as $s) {
+            $where = implode(' · ', array_filter([ActivityFeed::device($s), $s->country, $s->ip]));
+            $add(Carbon::parse($s->created_at, 'UTC'), 'signin', 'neutral',
+                ActivityFeed::signinTitle('login', (string) $s->method), $where !== '' ? $where : null);
+        }
+
         usort($events, fn ($a, $b) => strcmp($b['at'], $a['at']));
 
         return $events;
+    }
+
+    private static function customerTone(string $action): string
+    {
+        return match (UserActivity::group($action)) {
+            'billing' => 'info',
+            default => 'neutral',
+        };
     }
 
     private static function auditTone(string $action): string

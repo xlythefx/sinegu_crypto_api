@@ -116,7 +116,7 @@ Route::prefix('auth')->group(function () {
     Route::post('/forgot-password', [PasswordResetController::class, 'forgot'])
         ->middleware('throttle:forgot-password');
     Route::post('/reset-password', [PasswordResetController::class, 'reset'])
-        ->middleware('throttle:reset-password');
+        ->middleware(['throttle:reset-password', 'activity:auth.password_reset']);
 
     // "Sign in with Discord". config is read on every /auth page view and
     // carries nothing secret (60/min, like /public). callback and
@@ -142,13 +142,13 @@ Route::prefix('auth')->group(function () {
     // Sign-out alone is open to a SUSPENDED account: dropping your own token
     // must always work. Everything else signed-in — these three included —
     // sits behind account.active (EnsureAccountActive → 403 ACCOUNT_SUSPENDED).
-    Route::middleware('auth:sanctum')->post('/logout', [AuthController::class, 'logout']);
+    Route::middleware(['auth:sanctum', 'activity:auth.logout'])->post('/logout', [AuthController::class, 'logout']);
 
     Route::middleware(['auth:sanctum', 'account.active'])->group(function () {
         Route::get('/me', [AuthController::class, 'me']);
 
         Route::post('/email/verify', [EmailVerificationController::class, 'verify'])
-            ->middleware('throttle:10,1');
+            ->middleware(['throttle:10,1', 'activity:email.verified']);
         Route::post('/email/resend', [EmailVerificationController::class, 'resend'])
             ->middleware('throttle:3,1');
     });
@@ -177,7 +177,7 @@ Route::middleware(['auth:sanctum', 'account.active', 'email.verified'])->group(f
     Route::prefix('payments')->group(function () {
         Route::get('/methods', [PaymentController::class, 'methods']);
         Route::post('/stripe/checkout-session', [PaymentController::class, 'stripeCheckout'])
-            ->middleware('throttle:12,1');
+            ->middleware(['throttle:12,1', 'activity:payment.card_started']);
         Route::post('/coinsbuy/deposit', [PaymentController::class, 'coinsbuyDeposit'])
             ->middleware('throttle:12,1');
 
@@ -185,7 +185,7 @@ Route::middleware(['auth:sanctum', 'account.active', 'email.verified'])->group(f
         // from their role — a client-supplied one would let a trader settle a
         // real invoice with testnet tokens.
         Route::post('/tron/intent', [PaymentController::class, 'tronIntent'])
-            ->middleware('throttle:12,1');
+            ->middleware(['throttle:12,1', 'activity:payment.crypto_started']);
         // Higher limit than its siblings on purpose: the pay sheet polls this
         // every 10 s while it waits for the chain, and two open tabs would trip
         // 12/min on their own.
@@ -197,7 +197,7 @@ Route::middleware(['auth:sanctum', 'account.active', 'email.verified'])->group(f
         // already on someone else's invoice (TronPaymentClaims).
         Route::post('/tron/intent/{invoiceId}/claim', [PaymentController::class, 'tronClaim'])
             ->whereNumber('invoiceId')
-            ->middleware('throttle:10,1');
+            ->middleware(['throttle:10,1', 'activity:payment.txid_sent']);
         // Settles an invoice WITHOUT money — the developer test button. Two
         // independent gates: this middleware (role === 'developer' exactly,
         // NOT satisfied by admin or master) and, in the controller,
@@ -209,19 +209,21 @@ Route::middleware(['auth:sanctum', 'account.active', 'email.verified'])->group(f
     });
 
     Route::prefix('user')->group(function () {
-        Route::put('/profile', [ProfileController::class, 'updateProfile']);
-        Route::delete('/email/pending', [ProfileController::class, 'cancelPendingEmail']);
-        Route::post('/image', [ProfileController::class, 'uploadImage']);
-        Route::put('/password', [ProfileController::class, 'updatePassword']);
+        // `activity:` = one row in the user's own activity log on success
+        // (UserActivity; Admin → Activity and the customer's Timeline).
+        Route::put('/profile', [ProfileController::class, 'updateProfile'])->middleware('activity:profile.updated');
+        Route::delete('/email/pending', [ProfileController::class, 'cancelPendingEmail'])->middleware('activity:email.change_cancelled');
+        Route::post('/image', [ProfileController::class, 'uploadImage'])->middleware('activity:profile.image');
+        Route::put('/password', [ProfileController::class, 'updatePassword'])->middleware('activity:password.changed');
         // The first password of a Discord-only account (refused once one exists).
-        Route::post('/password/set', [ProfileController::class, 'setPassword']);
+        Route::post('/password/set', [ProfileController::class, 'setPassword'])->middleware('activity:password.set');
         // Settings → Connect / Disconnect Discord for a signed-in user.
         Route::post('/discord/link', [DiscordAuthController::class, 'link'])
-            ->middleware('throttle:10,1');
-        Route::delete('/discord', [DiscordAuthController::class, 'unlink']);
+            ->middleware(['throttle:10,1', 'activity:discord.linked']);
+        Route::delete('/discord', [DiscordAuthController::class, 'unlink'])->middleware('activity:discord.unlinked');
         // Settings → the optional Telegram / Discord usernames given at sign-up.
         Route::get('/contacts', [ContactHandleController::class, 'show']);
-        Route::put('/contacts', [ContactHandleController::class, 'update']);
+        Route::put('/contacts', [ContactHandleController::class, 'update'])->middleware('activity:contacts.updated');
         // A tester's "Fetch" on /dashboard/positions (tester role checked in
         // the controller, plus its own 15 s per-user cooldown).
         Route::post('/positions/refresh', [PositionRefreshController::class, 'refresh'])
@@ -230,7 +232,7 @@ Route::middleware(['auth:sanctum', 'account.active', 'email.verified'])->group(f
 
     Route::prefix('referrals')->group(function () {
         Route::get('/', [ReferralController::class, 'index']);
-        Route::post('/code', [ReferralController::class, 'createCode']);
+        Route::post('/code', [ReferralController::class, 'createCode'])->middleware('activity:referral.code_created');
         Route::get('/community', [ReferralController::class, 'community']);
         Route::post('/community', [ReferralController::class, 'saveCommunity']);
         Route::post('/members/remove', [ReferralController::class, 'removeMember']);
@@ -239,13 +241,13 @@ Route::middleware(['auth:sanctum', 'account.active', 'email.verified'])->group(f
 
     Route::prefix('payout-methods')->group(function () {
         Route::get('/', [PayoutMethodController::class, 'index']);
-        Route::post('/wallets', [PayoutMethodController::class, 'storeWallet']);
-        Route::put('/wallets/{id}', [PayoutMethodController::class, 'updateWallet']);
-        Route::delete('/wallets/{id}', [PayoutMethodController::class, 'destroyWallet']);
-        Route::post('/banks', [PayoutMethodController::class, 'storeBank']);
-        Route::put('/banks/{id}', [PayoutMethodController::class, 'updateBank']);
-        Route::delete('/banks/{id}', [PayoutMethodController::class, 'destroyBank']);
-        Route::post('/set-main', [PayoutMethodController::class, 'setMain']);
+        Route::post('/wallets', [PayoutMethodController::class, 'storeWallet'])->middleware('activity:payout.wallet_added');
+        Route::put('/wallets/{id}', [PayoutMethodController::class, 'updateWallet'])->middleware('activity:payout.wallet_updated');
+        Route::delete('/wallets/{id}', [PayoutMethodController::class, 'destroyWallet'])->middleware('activity:payout.wallet_removed');
+        Route::post('/banks', [PayoutMethodController::class, 'storeBank'])->middleware('activity:payout.bank_added');
+        Route::put('/banks/{id}', [PayoutMethodController::class, 'updateBank'])->middleware('activity:payout.bank_updated');
+        Route::delete('/banks/{id}', [PayoutMethodController::class, 'destroyBank'])->middleware('activity:payout.bank_removed');
+        Route::post('/set-main', [PayoutMethodController::class, 'setMain'])->middleware('activity:payout.main_set');
     });
 
     // Staff reads — the ONLY admin endpoints a read-only `collaborator` may
@@ -434,6 +436,13 @@ Route::middleware(['auth:sanctum', 'account.active', 'email.verified'])->group(f
         // The admin audit (2026-11-11): a customer's timeline, notes, and the
         // bot's last signals for them. Full admins only.
         Route::get('/users/{uniId}/timeline', [AdminCustomerActivityController::class, 'timeline']);
+        // Admin → Activity: every user's own actions, sign-ins and admin
+        // actions in one list (2026-11-23).
+        Route::get('/activity', [\App\Http\Controllers\AdminActivityController::class, 'index']);
+        // Admin → Notifications: who gets each team email (2026-11-23).
+        Route::get('/notifications', [\App\Http\Controllers\AdminNotificationController::class, 'index']);
+        Route::put('/notifications/{slug}', [\App\Http\Controllers\AdminNotificationController::class, 'update'])
+            ->where('slug', '[a-z0-9-]{1,64}');
         Route::get('/users/{uniId}/signals', [AdminCustomerActivityController::class, 'signals']);
         Route::post('/users/{uniId}/notes', [AdminCustomerActivityController::class, 'addNote']);
         Route::delete('/users/{uniId}/notes/{id}', [AdminCustomerActivityController::class, 'deleteNote'])->whereNumber('id');
@@ -616,19 +625,19 @@ Route::middleware(['auth:sanctum', 'account.active', 'email.verified'])->group(f
         // unwired exchanges (bybit) answer 400 from the controller, unknown
         // names 404 here.
         Route::post('/{exchange}', [ExchangeAccountController::class, 'store'])
-            ->whereIn('exchange', ['binance', 'bybit', 'mexc']);
+            ->whereIn('exchange', ['binance', 'bybit', 'mexc'])->middleware('activity:exchange.connected');
         Route::prefix('{exchange}/accounts')->whereIn('exchange', ['binance', 'bybit', 'mexc'])->group(function () {
-            Route::put('/{id}', [ExchangeAccountController::class, 'update'])->whereNumber('id');
-            Route::delete('/{id}', [ExchangeAccountController::class, 'destroy'])->whereNumber('id');
+            Route::put('/{id}', [ExchangeAccountController::class, 'update'])->whereNumber('id')->middleware('activity:exchange.renamed');
+            Route::delete('/{id}', [ExchangeAccountController::class, 'destroy'])->whereNumber('id')->middleware('activity:exchange.disconnected');
             // Own 60s per-account cooldown inside the controller — see refreshBalance().
-            Route::post('/{id}/refresh-balance', [ExchangeAccountController::class, 'refreshBalance'])->whereNumber('id');
+            Route::post('/{id}/refresh-balance', [ExchangeAccountController::class, 'refreshBalance'])->whereNumber('id')->middleware('activity:exchange.rechecked');
         });
 
         // Binance-only forms from before MEXC existed, kept so a client built
         // against them keeps working through a deploy. Same handlers.
-        Route::put('/accounts/{id}', [ExchangeAccountController::class, 'updateBinance'])->whereNumber('id');
-        Route::delete('/accounts/{id}', [ExchangeAccountController::class, 'destroyBinance'])->whereNumber('id');
-        Route::post('/accounts/{id}/refresh-balance', [ExchangeAccountController::class, 'refreshBalanceBinance'])->whereNumber('id');
+        Route::put('/accounts/{id}', [ExchangeAccountController::class, 'updateBinance'])->whereNumber('id')->middleware('activity:exchange.renamed');
+        Route::delete('/accounts/{id}', [ExchangeAccountController::class, 'destroyBinance'])->whereNumber('id')->middleware('activity:exchange.disconnected');
+        Route::post('/accounts/{id}/refresh-balance', [ExchangeAccountController::class, 'refreshBalanceBinance'])->whereNumber('id')->middleware('activity:exchange.rechecked');
     });
 });
 

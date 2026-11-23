@@ -3,17 +3,23 @@
 namespace App\Http\Controllers;
 
 use App\Http\Middleware\EnsureAdmin;
+use App\Mail\ExchangeConnectedNotice;
 use App\Models\ExchangeAccount;
 use App\Models\Invoice;
+use App\Models\UserCredential;
 use App\Services\Discord\DiscordRoleSync;
 use App\Services\EngineCache;
 use App\Services\Exchanges\ExchangeSchema;
+use App\Services\Notifications\TeamNotices;
 use App\Services\Signup\ContactHandles;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Mail;
 use Illuminate\Validation\Rule;
+use Throwable;
 
 /**
  * Exchange accounts connected by the user — Binance and MEXC today, one
@@ -254,6 +260,7 @@ class ExchangeAccountController extends Controller
         $this->engineCache->refreshAccounts();
         // A live account is what earns the Discord "Trader" role (demo does not).
         $this->discordRoles->syncUser($request->user());
+        $this->announceConnect($request->user(), $label, $demo, $account);
 
         return response()->json([
             'success' => true,
@@ -412,6 +419,37 @@ class ExchangeAccountController extends Controller
             'success' => true,
             'message' => 'Account disconnected',
         ]);
+    }
+
+    /**
+     * "A customer connected an exchange" to the team (Dima, 2026-11-23).
+     * Customers only — a staff member's test account is not news. Best-effort
+     * like every team notice: the connected account is the fact.
+     */
+    private function announceConnect(UserCredential $user, string $label, bool $demo, ExchangeAccount $account): void
+    {
+        if ($user->type !== 'user') {
+            return;
+        }
+        $to = TeamNotices::recipients('team-exchange-connected');
+        if ($to === []) {
+            return;
+        }
+        try {
+            Mail::to($to)->send(new ExchangeConnectedNotice(
+                name: (string) $user->name,
+                email: (string) $user->email,
+                uniId: (string) $user->uni_id,
+                exchange: $label,
+                mode: $demo ? 'Demo' : 'Live',
+                balance: $account->balance === null ? null : (float) $account->balance,
+                connectedAt: now()->utc()->format('d M Y, H:i').' UTC',
+            ));
+        } catch (Throwable $e) {
+            Log::warning('ExchangeAccountController: exchange-connected notice failed to send.', [
+                'uni_id' => $user->uni_id, 'error' => $e->getMessage(),
+            ]);
+        }
     }
 
     /** Null when the exchange is wired; a 400 otherwise (bybit, today). */

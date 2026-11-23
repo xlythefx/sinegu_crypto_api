@@ -26,7 +26,12 @@ use Throwable;
  */
 class TradeAlerts
 {
-    /** @return list<string> */
+    /**
+     * The DEFAULT alert list (TRADE_ALERT_EMAILS). Senders ask
+     * TeamNotices::recipients(slug), which falls back to this.
+     *
+     * @return list<string>
+     */
     public static function recipients(): array
     {
         $list = array_map('trim', explode(',', (string) config('mail.trade_alerts')));
@@ -72,7 +77,7 @@ class TradeAlerts
      */
     public function exitStuck(string $exchange, string $action, string $ticker, string $why, ?int $attempts, array $accounts, int $total): bool
     {
-        $to = self::recipients();
+        $to = TeamNotices::recipients('trade-exit-stuck');
         if ($to === [] || $accounts === []) {
             return false;
         }

@@ -44,6 +44,14 @@ class EmailCatalogue
     /**
      * @return list<array{slug:string,audience:string,title:string,trigger:string,to:string,live:bool,note:string,mail:PixelMail}>
      */
+    /** Who a team notice goes to now, as the preview page prints it. */
+    private static function toFor(string $slug): string
+    {
+        $to = TeamNotices::recipients($slug);
+
+        return $to === [] ? 'Nobody: switched off or no address (Admin â†’ Notifications)' : implode(', ', $to);
+    }
+
     public static function all(): array
     {
         $team = implode(', ', AccountMail::teamRecipients()) ?: 'the team (MAIL_ADMIN_ADDRESS — not set)';
@@ -177,7 +185,7 @@ class EmailCatalogue
                 'audience' => self::AUDIENCE_TEAM,
                 'title' => 'New sign-up',
                 'trigger' => 'The moment a new sign-up confirms their email (or signs up through Discord with a verified email).',
-                'to' => $team,
+                'to' => self::toFor('team-new-registration'),
                 'live' => true,
                 'note' => 'Already sent today.',
                 'mail' => new NewRegistrationNotice(
@@ -192,10 +200,10 @@ class EmailCatalogue
                 'slug' => 'team-exchange-connected',
                 'audience' => self::AUDIENCE_TEAM,
                 'title' => 'Exchange connected',
-                'trigger' => 'When a customer connects an exchange account.',
-                'to' => $team,
-                'live' => false,
-                'note' => '',
+                'trigger' => 'When a customer connects (or reconnects) an exchange account, live or demo. Staff accounts are not announced.',
+                'to' => self::toFor('team-exchange-connected'),
+                'live' => true,
+                'note' => 'Sent since 23 Nov 2026 (Dima asked to be told). Who gets it: Admin â†’ Notifications.',
                 'mail' => new ExchangeConnectedNotice(
                     name: $customer['name'],
                     email: $customer['email'],
@@ -211,7 +219,7 @@ class EmailCatalogue
                 'audience' => self::AUDIENCE_TEAM,
                 'title' => 'Invoice issued',
                 'trigger' => 'When a customer is invoiced.',
-                'to' => $team,
+                'to' => self::toFor('team-invoice-issued'),
                 'live' => false,
                 'note' => '',
                 'mail' => new InvoiceIssuedNotice(
@@ -230,7 +238,7 @@ class EmailCatalogue
                 'audience' => self::AUDIENCE_TEAM,
                 'title' => 'Invoice still unpaid',
                 'trigger' => 'With each customer reminder (day 2, day 3) and when trading pauses (day 5).',
-                'to' => $team,
+                'to' => self::toFor('team-invoice-unpaid'),
                 'live' => false,
                 'note' => 'Shown at day 3. So the team knows who to chase before trading pauses.',
                 'mail' => new InvoiceUnpaidNotice(
@@ -250,7 +258,7 @@ class EmailCatalogue
                 'audience' => self::AUDIENCE_TEAM,
                 'title' => 'Invoice paid',
                 'trigger' => 'When a customer pays an invoice.',
-                'to' => $team,
+                'to' => self::toFor('team-invoice-paid'),
                 'live' => true,
                 'note' => 'Sent with the customer thank-you; the same news goes to the admin Telegram group.',
                 'mail' => new InvoicePaidNotice(
@@ -270,7 +278,7 @@ class EmailCatalogue
                 'audience' => self::AUDIENCE_TEAM,
                 'title' => 'Disputed crypto payment',
                 'trigger' => 'When a customer enters a transaction ID that is already paying someone else\'s invoice — two customers saying the same payment is theirs.',
-                'to' => $team,
+                'to' => self::toFor('team-payment-disputed'),
                 'live' => true,
                 'note' => 'Sent once per dispute. The Admin Overview shows a caution strip until it is marked resolved on Crypto Transfers.',
                 'mail' => new PaymentDisputedNotice(
@@ -296,7 +304,7 @@ class EmailCatalogue
                 'audience' => self::AUDIENCE_TEAM,
                 'title' => 'Kill switch turned a coin off',
                 'trigger' => 'When the master account loses as many trades in a row on a coin as that asset\'s kill switch allows — the coin is switched off for everyone.',
-                'to' => $team,
+                'to' => self::toFor('team-kill-switch'),
                 'live' => true,
                 'note' => 'Sent once per trip. The Admin Overview shows a caution strip and the admin Telegram group gets a message until the coin is turned back on in Trading Assets.',
                 'mail' => new AssetKillSwitchNotice(
@@ -312,7 +320,7 @@ class EmailCatalogue
                 'audience' => self::AUDIENCE_TEAM,
                 'title' => 'Hourly summary of trades that need a look',
                 'trigger' => 'At :02 past every hour, for the hour that just ended, ONLY when a signal had a refused or unconfirmed order, an entry shrunk or skipped at Binance\'s position limit, or a rejected signal. A clean hour sends nothing.',
-                'to' => implode(', ', TradeAlerts::recipients()) ?: 'TRADE_ALERT_EMAILS (not set: nothing is sent)',
+                'to' => self::toFor('trade-failure-summary'),
                 'live' => true,
                 'note' => 'Built from the Signal Log (main feed). A failure a retry fixed is listed in green; blocked keys and similar repeating skips are only counted.',
                 'mail' => new TradeFailureSummary(
@@ -342,7 +350,7 @@ class EmailCatalogue
                 'audience' => self::AUDIENCE_TEAM,
                 'title' => 'A close failed: positions may still be open',
                 'trigger' => 'At once, when the exchange refuses a CLOSE outright or the bot gives up retrying one — the moment the admin Telegram gets "EXIT FAILED — MANUAL ACTION REQUIRED". Main feed only.',
-                'to' => implode(', ', TradeAlerts::recipients()) ?: 'TRADE_ALERT_EMAILS (not set: nothing is sent)',
+                'to' => self::toFor('trade-exit-stuck'),
                 'live' => true,
                 'note' => 'The one failed-trade email that does not wait for the hourly summary, because a real position may still be open.',
                 'mail' => new TradeExitStuckNotice(
@@ -363,7 +371,7 @@ class EmailCatalogue
                 'audience' => self::AUDIENCE_TEAM,
                 'title' => 'High-risk alert',
                 'trigger' => 'At once, when: a trade reaches accounts outside its signal feed (e.g. a customer filled from the sub-master feed); a close fails for good; the kill switch trips; the master\'s or sub-master\'s key is refused; the bot engine stops answering; a signal is refused because the coin list could not load. Then at most once an hour while the same problem repeats.',
-                'to' => implode(', ', TradeAlerts::recipients()) ?: 'TRADE_ALERT_EMAILS (not set: nothing is sent)',
+                'to' => self::toFor('risk-alert'),
                 'live' => true,
                 'note' => 'Also listed in red on Admin → Overview → Needs attention until a full admin marks it resolved. A wrong-feed trade is posted to the admin Telegram group too; the rest are already posted there by the bot. A stuck close keeps its own email (above) and is only listed here.',
                 'mail' => new RiskAlertNotice(

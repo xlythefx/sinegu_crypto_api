@@ -2,6 +2,7 @@
 
 namespace App\Services\Billing;
 
+use App\Services\Notifications\TeamNotices;
 use App\Mail\InvoicePaidNotice;
 use App\Mail\PaymentReceived;
 use App\Models\Invoice;
@@ -103,7 +104,7 @@ class PaymentNotifier
             ));
         }
 
-        $team = AccountMail::teamRecipients();
+        $team = TeamNotices::recipients('team-invoice-paid');
         if ($team === []) {
             Log::warning('PaymentNotifier: no mail.admin_address configured — team notice skipped.', ['invoice_id' => $invoice->id]);
         } else {

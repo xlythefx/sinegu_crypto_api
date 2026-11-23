@@ -2,6 +2,7 @@
 
 namespace App\Services\Alerts;
 
+use App\Services\Notifications\TeamNotices;
 use App\Http\Controllers\AdminInsightsController;
 use App\Mail\RiskAlertNotice;
 use App\Models\RiskAlert;
@@ -127,7 +128,7 @@ class RiskAlerts
 
     private function mail(RiskAlert $alert): bool
     {
-        $to = TradeAlerts::recipients();
+        $to = TeamNotices::recipients('risk-alert');
         if ($to === []) {
             return false;
         }

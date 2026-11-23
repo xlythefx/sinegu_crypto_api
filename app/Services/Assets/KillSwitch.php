@@ -2,6 +2,7 @@
 
 namespace App\Services\Assets;
 
+use App\Services\Notifications\TeamNotices;
 use App\Models\RiskAlert;
 use App\Services\Alerts\RiskAlerts;
 use App\Http\Controllers\AdminInsightsController;
@@ -214,7 +215,7 @@ final class KillSwitch
     /** Best-effort, like every team notice: the switched-off asset is the fact. */
     private function emailTeam(Asset $asset, int $losses, string $reason, string $when): void
     {
-        $to = AccountMail::teamRecipients();
+        $to = TeamNotices::recipients('team-kill-switch');
         if ($to === []) {
             Log::warning('KillSwitch: no mail.admin_address configured — kill switch notice skipped.', [
                 'asset_id' => $asset->asset_id,

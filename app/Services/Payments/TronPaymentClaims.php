@@ -2,6 +2,7 @@
 
 namespace App\Services\Payments;
 
+use App\Services\Notifications\TeamNotices;
 use App\Http\Controllers\AdminInsightsController;
 use App\Mail\PaymentDisputedNotice;
 use App\Models\Invoice;
@@ -315,7 +316,7 @@ class TronPaymentClaims
     /** Best-effort, like every team notice: the dispute row is the fact. */
     private function notifyTeam(TronTransfer $transfer, Invoice $claimantInvoice, string $claimantUniId): void
     {
-        $to = AccountMail::teamRecipients();
+        $to = TeamNotices::recipients('team-payment-disputed');
         if ($to === []) {
             Log::warning('TronPaymentClaims: no mail.admin_address configured — dispute notice skipped.', [
                 'transfer_id' => $transfer->id,
