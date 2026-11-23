@@ -24,6 +24,14 @@ use Illuminate\Support\Collection;
  *   that exchange at the time — nobody "missed" a trade made before they
  *   connected. A customer close with no master partner is "extra" (closed by
  *   hand, their own stop, or a trade the master never took).
+ * - **Why the gap** (`gap_parts`): each close's share of its owner's return
+ *   is its P&L after fees over the capital its day started with — the same
+ *   division as the day's %, so the parts add up to the gap (to the cent of
+ *   a percent the daily rounding leaves). same = the customer's share minus
+ *   the master's on the trades both took; missed = minus the master's share
+ *   on trades the customer could have taken and did not; extra = the
+ *   customer's own unmatched closes; before = minus the master's share on
+ *   trades made while the customer had no account there.
  * - Days are UTC days, like every per-user P&L screen. Customers only
  *   (`type = 'user'`), real money only, disconnected accounts included —
  *   their history is still theirs.
@@ -43,9 +51,8 @@ class MasterComparison
     /** @return array<string, mixed> */
     public function compare(?string $exchange, string $from, string $to): array
     {
-        $scope = fn (Collection $accs) => ($exchange ? $accs->where('exchange', $exchange) : $accs)->values();
-        $masterAccounts = $scope($this->insights->masterAccounts());
-        $customerAccounts = $scope($this->insights->customerAccounts());
+        $masterAccounts = $this->scoped($this->insights->masterAccounts(), $exchange);
+        $customerAccounts = $this->scoped($this->insights->customerAccounts(), $exchange);
 
         $master = $masterAccounts->isEmpty() ? null : $this->measure($masterAccounts, $from, $to);
         $masterCloses = $master ? $master['closes'] : collect();
@@ -57,7 +64,10 @@ class MasterComparison
         foreach ($customerAccounts->groupBy('uni_id') as $uni => $accounts) {
             $accounts = $accounts->values();
             $m = $this->measure($accounts, $from, $to);
-            $eligible = $masterCloses->filter(fn ($c) => $this->hadAccount($accounts, $c['exchange'], $c['at']));
+            [$eligible, $before] = $masterCloses->partition(
+                fn ($c) => $this->hadAccount($accounts, $c['exchange'], $c['at'])
+            );
+            $eligible = $eligible->values();
             $pairs = self::pair($eligible, $m['closes']);
 
             // Live (not disconnected) accounts only: a closed account's
@@ -70,6 +80,7 @@ class MasterComparison
             $days = $this->dayDuel($master['days'] ?? [], $m['days'], $accounts, $from, $to);
             $pct = $m['summary']['pct'];
             $masterPct = $master['summary']['pct'] ?? null;
+            $matched = count($pairs);
 
             $rows[] = [
                 'uni_id' => $uni,
@@ -78,10 +89,13 @@ class MasterComparison
                 'connected' => $live->isNotEmpty(),
                 'balance' => $live->isNotEmpty() ? round((float) $live->sum('balance'), 2) : null,
                 'gap' => $pct !== null && $masterPct !== null ? round($pct - $masterPct, 2) : null,
-                'followed' => $pairs['matched'],
-                'missed' => $eligible->count() - $pairs['matched'],
+                'gap_parts' => $pct !== null && $masterPct !== null
+                    ? self::gapParts($eligible, $before->values(), $m['closes'], $pairs)
+                    : null,
+                'followed' => $matched,
+                'missed' => $eligible->count() - $matched,
                 'master_closes' => $eligible->count(),
-                'extra' => $m['closes']->count() - $pairs['matched'],
+                'extra' => $m['closes']->count() - $matched,
                 'days_ahead' => $days['ahead'],
                 'days_behind' => $days['behind'],
             ] + $m['summary'];
@@ -106,8 +120,47 @@ class MasterComparison
     }
 
     /**
+     * One customer against the master, day by day over the window: each
+     * side's daily % (the calendar's), for the page's head-to-head chart.
+     *
+     * @return array{uni_id: string, name: string, from: string, to: string, master: list<array>, customer: list<array>}|null
+     */
+    public function headToHead(string $uniId, ?string $exchange, string $from, string $to): ?array
+    {
+        $accounts = $this->scoped($this->insights->customerAccounts(), $exchange)->where('uni_id', $uniId)->values();
+        if ($accounts->isEmpty()) {
+            return null;
+        }
+        $masterAccounts = $this->scoped($this->insights->masterAccounts(), $exchange);
+        $series = function (array $days) use ($from, $to): array {
+            $out = [];
+            foreach ($days as $date => $d) {
+                if ($date >= $from && $date <= $to) {
+                    $out[] = ['date' => $date, 'pct' => $d['pct'], 'pnl' => $d['pnl'], 'trades' => $d['trades']];
+                }
+            }
+
+            return $out;
+        };
+
+        return [
+            'uni_id' => $uniId,
+            'name' => UserCredential::where('uni_id', $uniId)->value('name') ?? $uniId,
+            'from' => $from,
+            'to' => $to,
+            'master' => $masterAccounts->isEmpty() ? [] : $series($this->measure($masterAccounts, $from, $to)['days']),
+            'customer' => $series($this->measure($accounts, $from, $to)['days']),
+        ];
+    }
+
+    private function scoped(Collection $accounts, ?string $exchange): Collection
+    {
+        return ($exchange ? $accounts->where('exchange', $exchange) : $accounts)->values();
+    }
+
+    /**
      * One owner's window: the summary, its daily returns, and its closes
-     * reduced to what pairing needs.
+     * reduced to what pairing and the gap split need.
      *
      * @return array{summary: array<string, mixed>, days: array<string, array>, closes: Collection}
      */
@@ -161,12 +214,18 @@ class MasterComparison
                 'worst_day' => $worst,
             ],
             'days' => $days,
-            'closes' => $inWindow->map(fn ($t) => [
-                'exchange' => $t->exchange,
-                'coin' => preg_replace('/[^A-Z0-9]/', '', strtoupper((string) $t->symbol)),
-                'side' => TradeSide::closed($t->position_side ?? null, $t->side ?? null),
-                'at' => Carbon::parse($t->closed_at, 'UTC')->getTimestamp(),
-            ])->values(),
+            'closes' => $inWindow->map(function ($t) use ($days) {
+                $base = $days[substr((string) $t->closed_at, 0, 10)]['start_balance'] ?? null;
+
+                return [
+                    'exchange' => $t->exchange,
+                    'coin' => preg_replace('/[^A-Z0-9]/', '', strtoupper((string) $t->symbol)),
+                    'side' => TradeSide::closed($t->position_side ?? null, $t->side ?? null),
+                    'at' => Carbon::parse($t->closed_at, 'UTC')->getTimestamp(),
+                    // This close's share of its owner's return, in % points.
+                    'share' => $base !== null && $base > 0 ? (float) ($t->pnl_net ?? 0) / $base * 100 : 0.0,
+                ];
+            })->values(),
         ];
     }
 
@@ -188,14 +247,14 @@ class MasterComparison
      * Pairs master closes with the customer's, one to one: same exchange,
      * coin and side, nearest in time within MATCH_SECONDS.
      *
-     * @return array{matched: int}
+     * @return list<array{0: int, 1: int}> [master index, customer index] pairs
      */
     public static function pair(Collection $master, Collection $customer): array
     {
         $pool = $customer->values()->all();
         $used = [];
-        $matched = 0;
-        foreach ($master->sortBy('at') as $m) {
+        $pairs = [];
+        foreach ($master->values()->sortBy('at') as $mKey => $m) {
             $bestKey = null;
             $bestGap = self::MATCH_SECONDS + 1;
             foreach ($pool as $k => $c) {
@@ -210,11 +269,41 @@ class MasterComparison
             }
             if ($bestKey !== null) {
                 $used[$bestKey] = true;
-                $matched++;
+                $pairs[] = [$mKey, $bestKey];
             }
         }
 
-        return ['matched' => $matched];
+        return $pairs;
+    }
+
+    /**
+     * Where a customer's gap to the master comes from, in % points (see the
+     * class note). same + missed + extra + before = the gap, give or take the
+     * daily rounding.
+     *
+     * @param  list<array{0: int, 1: int}>  $pairs
+     * @return array{same: float, missed: float, extra: float, before: float}
+     */
+    public static function gapParts(Collection $eligible, Collection $before, Collection $customer, array $pairs): array
+    {
+        $eligible = $eligible->values();
+        $customer = $customer->values();
+        $matchedM = array_flip(array_column($pairs, 0));
+        $matchedC = array_flip(array_column($pairs, 1));
+
+        $same = 0.0;
+        foreach ($pairs as [$m, $c]) {
+            $same += $customer[$c]['share'] - $eligible[$m]['share'];
+        }
+        $missed = -$eligible->filter(fn ($_, $k) => ! isset($matchedM[$k]))->sum('share');
+        $extra = $customer->filter(fn ($_, $k) => ! isset($matchedC[$k]))->sum('share');
+
+        return [
+            'same' => round($same, 2),
+            'missed' => round($missed, 2),
+            'extra' => round($extra, 2),
+            'before' => round(-$before->sum('share'), 2),
+        ];
     }
 
     /**

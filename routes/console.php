@@ -118,6 +118,12 @@ Schedule::command('creatives:weekly-recap')->saturdays()->at('00:15')->timezone(
 // spend) are never deleted.
 Schedule::command('creatives:agent-prune')->dailyAt('01:20');
 
+// Customers vs master, weekly (2026-11-23): Mondays 09:13 Manila, the admin
+// Telegram group gets last week's (Mon–Sun UTC) master return and who fell
+// more than 1 pp behind it, with the reason (missed trades or the same trades
+// doing worse). Odd minute, off the :00 / :15 / :30 / :45 signal slots.
+Schedule::command('insights:vs-master-weekly')->mondays()->at('09:13')->timezone('Asia/Manila')->withoutOverlapping(30);
+
 // The visitor counter keeps full IP addresses for 90 days (owner, 2026-10-28;
 // the Privacy Policy says so). After that the IP and User-Agent are removed
 // from the row and the counts stay.

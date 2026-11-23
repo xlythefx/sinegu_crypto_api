@@ -102,6 +102,22 @@ class EngineCache
     }
 
     /**
+     * Ask the engine to post a scheduled TEAM REPORT to the admin Telegram
+     * group (the weekly Customers vs master summary). Private chat only; a
+     * neutral 📊 message, never the 🚨 of a risk alert.
+     *
+     * @param  list<string>  $lines
+     */
+    public function teamReport(string $title, array $lines, string $link = ''): bool
+    {
+        return $this->ping('team-report', [
+            'title' => $title,
+            'lines' => array_values(array_slice($lines, 0, 30)),
+            'link' => $link,
+        ]);
+    }
+
+    /**
      * Ask the engine to tell the admin Telegram group that an invoice was paid
      * (App\Services\Billing\PaymentNotifier). Same messenger arrangement as the
      * kill switch: the engine owns the bot token and the admin chat.

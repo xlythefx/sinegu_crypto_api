@@ -123,22 +123,49 @@ class AdminInsightsController extends Controller
      */
     public function vsMaster(Request $request, MasterComparison $comparison): JsonResponse
     {
-        $exchange = $request->query('exchange');
-        if ($exchange !== null && $exchange !== '' && $exchange !== 'all' && ! ExchangeSchema::isSupported($exchange)) {
-            return response()->json(['success' => false, 'error' => 'EXCHANGE_NOT_SUPPORTED'], 400);
+        $window = $this->vsWindow($request);
+        if ($window instanceof JsonResponse) {
+            return $window;
         }
-        $exchange = in_array($exchange, [null, '', 'all'], true) ? null : $exchange;
-        $today = now('UTC')->toDateString();
-        $from = $this->date($request->query('from')) ?? now('UTC')->startOfMonth()->toDateString();
-        $to = $this->date($request->query('to')) ?? $today;
-        if ($from > $to) {
-            return response()->json(['success' => false, 'error' => 'RANGE_INVALID'], 422);
-        }
+        [$exchange, $from, $to] = $window;
 
         return $this->answer(
             'vs-master:'.($exchange ?? 'all').':'.$from.':'.$to,
             fn () => $comparison->compare($exchange, $from, $to),
         );
+    }
+
+    /** Same query — one customer's day-by-day % beside the master's (the head-to-head chart). */
+    public function vsMasterCustomer(Request $request, MasterComparison $comparison, string $uniId): JsonResponse
+    {
+        $window = $this->vsWindow($request);
+        if ($window instanceof JsonResponse) {
+            return $window;
+        }
+        [$exchange, $from, $to] = $window;
+        $data = $comparison->headToHead($uniId, $exchange, $from, $to);
+        if ($data === null) {
+            return response()->json(['success' => false, 'error' => 'NOT_A_CUSTOMER'], 404);
+        }
+
+        return response()->json(['success' => true] + $data);
+    }
+
+    /** @return array{0: ?string, 1: string, 2: string}|JsonResponse exchange, from, to — this month by default */
+    private function vsWindow(Request $request): array|JsonResponse
+    {
+        $exchange = $request->query('exchange');
+        if ($exchange !== null && $exchange !== '' && $exchange !== 'all' && ! ExchangeSchema::isSupported($exchange)) {
+            return response()->json(['success' => false, 'error' => 'EXCHANGE_NOT_SUPPORTED'], 400);
+        }
+        $exchange = in_array($exchange, [null, '', 'all'], true) ? null : $exchange;
+        $from = $this->date($request->query('from')) ?? now('UTC')->startOfMonth()->toDateString();
+        $to = $this->date($request->query('to')) ?? now('UTC')->toDateString();
+        if ($from > $to) {
+            return response()->json(['success' => false, 'error' => 'RANGE_INVALID'], 422);
+        }
+
+        return [$exchange, $from, $to];
     }
 
     /**
