@@ -14,6 +14,7 @@ use App\Services\InvoiceService;
 use App\Services\Payments\PaymentEnvironment;
 use App\Services\Payments\TronGateway;
 use App\Services\UserStatsService;
+use App\Services\Positions\TradeSide;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
@@ -732,6 +733,8 @@ class AdminInsights
                 'exchange_fee' => $p->exchange_fee !== null ? (float) $p->exchange_fee : null,
                 'closed_at' => $p->closed_at,
                 'exchange' => $p->exchange,
+                // LONG / SHORT — the strategy page's side filter (2026-11-23).
+                'side' => TradeSide::closed($p->position_side ?? null, $p->side ?? null),
                 'uni_id' => $p->uni_id,
                 'owner_name' => $owners[$p->uni_id]->name ?? null,
                 'owner_role' => $owners[$p->uni_id]->type ?? null,
@@ -852,7 +855,7 @@ class AdminInsights
      * Every account of the master's that traded real money, soft-deleted
      * included.
      */
-    private function masterAccounts(): Collection
+    public function masterAccounts(): Collection
     {
         $masterIds = UserCredential::where('type', 'master')->pluck('uni_id');
 
@@ -861,7 +864,7 @@ class AdminInsights
     }
 
     /** Customer accounts (type = user), soft-deleted included; demo excluded unless asked. */
-    private function customerAccounts(bool $includeDemo = false): Collection
+    public function customerAccounts(bool $includeDemo = false): Collection
     {
         $ids = UserCredential::where('type', 'user')->pluck('uni_id')->flip();
 
@@ -913,7 +916,7 @@ class AdminInsights
                     ->where('is_sandbox', 0)
                     ->when($since, fn ($q) => $q->where('closed_at', '>=', $since))
                     ->get(['uni_id', 'symbol', 'strategy', 'realized_pnl', 'exchange_fee',
-                        'closed_at', 'increments_closed'])
+                        'closed_at', 'increments_closed', 'position_side', 'side'])
                     ->each(fn ($p) => $p->exchange = $ex)
             );
         }

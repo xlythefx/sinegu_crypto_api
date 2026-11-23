@@ -444,6 +444,9 @@ Route::middleware(['auth:sanctum', 'account.active', 'email.verified'])->group(f
         Route::get('/insights/money', [AdminInsightsController::class, 'money']);
         Route::get('/insights/system', [AdminInsightsController::class, 'system']);
         Route::get('/insights/strategies', [AdminInsightsController::class, 'strategies']);
+        // Customers vs master (2026-11-23): customers' names, P&L and balances
+        // beside the master's — full admins only, like Customers / Money.
+        Route::get('/insights/vs-master', [AdminInsightsController::class, 'vsMaster']);
         Route::put('/users/{uniId}', [AdminUserController::class, 'update']);
         Route::delete('/users/{uniId}', [AdminUserController::class, 'destroy']);
         Route::post('/users/{uniId}/refresh', [AdminUserController::class, 'refresh'])->middleware('throttle:10,1');

@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Http\Middleware\EnsureStaff;
 use App\Services\Admin\AdminInsights;
+use App\Services\Admin\MasterComparison;
 use App\Services\Exchanges\ExchangeSchema;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -112,6 +113,31 @@ class AdminInsightsController extends Controller
         return $this->answer(
             'strategies:'.($exchange ?? 'all').':'.($from ?? '').':'.($to ?? ''),
             fn () => $this->insights->strategyInsights($exchange, $from, $to),
+        );
+    }
+
+    /**
+     * ?exchange=&from=YYYY-MM-DD&to=YYYY-MM-DD — Customers vs master: every
+     * customer's return beside the master's over the same UTC days, ranked.
+     * Defaults to this month so far.
+     */
+    public function vsMaster(Request $request, MasterComparison $comparison): JsonResponse
+    {
+        $exchange = $request->query('exchange');
+        if ($exchange !== null && $exchange !== '' && $exchange !== 'all' && ! ExchangeSchema::isSupported($exchange)) {
+            return response()->json(['success' => false, 'error' => 'EXCHANGE_NOT_SUPPORTED'], 400);
+        }
+        $exchange = in_array($exchange, [null, '', 'all'], true) ? null : $exchange;
+        $today = now('UTC')->toDateString();
+        $from = $this->date($request->query('from')) ?? now('UTC')->startOfMonth()->toDateString();
+        $to = $this->date($request->query('to')) ?? $today;
+        if ($from > $to) {
+            return response()->json(['success' => false, 'error' => 'RANGE_INVALID'], 422);
+        }
+
+        return $this->answer(
+            'vs-master:'.($exchange ?? 'all').':'.$from.':'.$to,
+            fn () => $comparison->compare($exchange, $from, $to),
         );
     }
 
