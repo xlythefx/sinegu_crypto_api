@@ -13,7 +13,7 @@ use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Mail;
 
 /**
- * "An invoice was paid" is TOLD (2026-11-11). Alexandre Guyomard paid his
+ * "An invoice was paid" is TOLD (2026-11-11). A customer paid their
  * October invoice by card on 10 Nov; it settled correctly and nobody heard
  * about it — no email, and the only payments page (Crypto Transfers) cannot
  * show a card. InvoiceService::settle now announces every settlement once:
@@ -38,7 +38,7 @@ class PaymentNotificationTest extends PaymentTestCase
 
     private function invoiceFor(array $user = [], array $invoice = [], array $account = []): Invoice
     {
-        $uniId = $this->makeUser(array_merge(['name' => 'Alexandre Guyomard', 'email' => 'alex@example.test'], $user));
+        $uniId = $this->makeUser(array_merge(['name' => 'Sam Carter', 'email' => 'sam@example.test'], $user));
 
         return $this->makeInvoice($this->makeAccount($uniId, $account), $uniId, array_merge(['month_year' => '2026-10'], $invoice));
     }
@@ -70,8 +70,8 @@ class PaymentNotificationTest extends PaymentTestCase
 
         $this->assertTrue($this->settle($invoice));
 
-        Mail::assertSent(PaymentReceived::class, fn (PaymentReceived $m) => $m->hasTo('alex@example.test')
-            && $m->name === 'Alexandre'
+        Mail::assertSent(PaymentReceived::class, fn (PaymentReceived $m) => $m->hasTo('sam@example.test')
+            && $m->name === 'Sam'
             && $m->amount === 12.34
             && $m->period === 'October 2026'
             && $m->method === 'Card (Stripe)'
@@ -79,13 +79,13 @@ class PaymentNotificationTest extends PaymentTestCase
             && $m->wasPaused === false);
         Mail::assertSent(InvoicePaidNotice::class, fn (InvoicePaidNotice $m) => $m->hasTo('desk@pixel-alpha.test')
             && $m->hasTo('dima@pixel-alpha.test')
-            && ! $m->hasTo('alex@example.test')
-            && $m->name === 'Alexandre Guyomard'
+            && ! $m->hasTo('sam@example.test')
+            && $m->name === 'Sam Carter'
             && $m->invoiceId === (int) $invoice->id);
 
         $pings = $this->telegramPings();
         $this->assertCount(1, $pings);
-        $this->assertSame('Alexandre Guyomard', $pings[0]['name']);
+        $this->assertSame('Sam Carter', $pings[0]['name']);
         $this->assertSame(12.34, $pings[0]['amount']);
         $this->assertSame('October 2026', $pings[0]['period']);
         $this->assertSame('Card (Stripe)', $pings[0]['method']);
@@ -151,7 +151,7 @@ class PaymentNotificationTest extends PaymentTestCase
         // customer's email names the way, never the admin.
         $this->putJson("/api/admin/invoices/{$real->id}",
             ['status' => 'paid', 'method' => 'bank_transfer', 'note' => 'Wise, ref 4471'], $admin)->assertOk();
-        Mail::assertSent(PaymentReceived::class, fn (PaymentReceived $m) => $m->hasTo('alex@example.test')
+        Mail::assertSent(PaymentReceived::class, fn (PaymentReceived $m) => $m->hasTo('sam@example.test')
             && $m->method === 'Bank transfer (marked paid by an admin)'
             && $m->reference === '—');
         $this->assertCount(1, $this->telegramPings());
@@ -228,7 +228,7 @@ class PaymentNotificationTest extends PaymentTestCase
         $this->assertSame(24.04, $recent['amount']);
         $this->assertSame(7, $recent['days']);
         $this->assertSame((int) $paid->id, $recent['latest'][0]['invoice_id']);
-        $this->assertSame('Alexandre Guyomard', $recent['latest'][0]['name']);
+        $this->assertSame('Sam Carter', $recent['latest'][0]['name']);
         $this->assertSame('stripe', $recent['latest'][0]['provider']);
     }
 
