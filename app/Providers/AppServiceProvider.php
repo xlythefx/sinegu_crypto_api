@@ -7,6 +7,8 @@ use App\Services\Creatives\ClaudeWriter;
 use App\Services\Creatives\CreativeAgentModel;
 use App\Services\Creatives\CreativeWriter;
 use App\Services\Payments\PaymentEnvironment;
+use App\Support\RetryingRateLimiter;
+use Illuminate\Cache\RateLimiter as CacheRateLimiter;
 use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\RateLimiter;
@@ -28,6 +30,14 @@ class AppServiceProvider extends ServiceProvider
         $this->app->bind(CreativeWriter::class, ClaudeWriter::class);
         // …and its chat agent (Claude with tools). Same: tests bind a fake.
         $this->app->bind(CreativeAgentModel::class, ClaudeAgent::class);
+
+        // Every throttle retries a cache write that lost a MySQL deadlock
+        // (see RetryingRateLimiter). `extend`, not `singleton`: the cache
+        // provider is deferred and would re-bind the stock limiter over ours
+        // the first time it is asked for.
+        $this->app->extend(CacheRateLimiter::class, fn ($limiter, $app) => new RetryingRateLimiter(
+            $app->make('cache')->driver($app['config']->get('cache.limiter'))
+        ));
     }
 
     /**
