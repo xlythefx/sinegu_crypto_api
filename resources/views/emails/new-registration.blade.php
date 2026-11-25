@@ -14,42 +14,29 @@
     but every trading feature stays locked — connecting an exchange included — until you approve them.
   </p>
 
-  {{-- The facts an admin needs before opening the queue: who, which address,
-       which row, and how they arrived. --}}
-  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 24px;border:1px solid #e5e7eb;border-radius:12px;background:#f9fafb;">
-    <tr>
-      <td style="padding:14px 18px 6px;font-size:12px;color:#6b7280;">Name</td>
-    </tr>
-    <tr>
-      <td style="padding:0 18px 12px;font-size:15px;font-weight:600;color:#111827;">{{ $name }}</td>
-    </tr>
-    <tr>
-      <td style="padding:0 18px 6px;font-size:12px;color:#6b7280;border-top:1px solid #e5e7eb;padding-top:12px;">Email</td>
-    </tr>
-    <tr>
-      <td style="padding:0 18px 12px;font-size:15px;color:#111827;">
-        <a href="mailto:{{ $email }}" style="color:#b8862a;text-decoration:none;">{{ $email }}</a>
-      </td>
-    </tr>
-    <tr>
-      <td style="padding:0 18px 6px;font-size:12px;color:#6b7280;border-top:1px solid #e5e7eb;padding-top:12px;">Signed up with</td>
-    </tr>
-    <tr>
-      <td style="padding:0 18px 12px;font-size:15px;color:#111827;">{{ $via }}</td>
-    </tr>
-    <tr>
-      <td style="padding:0 18px 6px;font-size:12px;color:#6b7280;border-top:1px solid #e5e7eb;padding-top:12px;">Registered</td>
-    </tr>
-    <tr>
-      <td style="padding:0 18px 12px;font-size:15px;color:#111827;">{{ $registeredAt }}</td>
-    </tr>
-    <tr>
-      <td style="padding:0 18px 6px;font-size:12px;color:#6b7280;border-top:1px solid #e5e7eb;padding-top:12px;">Account ID</td>
-    </tr>
-    <tr>
-      <td style="padding:0 18px 16px;font-family:'IBM Plex Mono',SFMono-Regular,Menlo,Consolas,monospace;font-size:13px;color:#374151;word-break:break-all;">{{ $uniId }}</td>
-    </tr>
-  </table>
+  {{-- The facts an admin needs before opening the queue: who, how to reach
+       them, where they signed up from, which row, and how they arrived.
+       Telegram / WhatsApp are typed by the person (never checked); the IP and
+       country are the REGISTRATION's, read from the sign-up record. --}}
+  @include('emails.partials.facts', ['rows' => [
+      ['Name', $name, ['strong' => true]],
+      ['Email', $email, ['href' => 'mailto:'.$email]],
+      $telegram
+          ? ['Telegram', '@'.$telegram, ['href' => 'https://t.me/'.$telegram]]
+          : ['Telegram', 'Not given', ['color' => '#6b7280']],
+      $whatsapp
+          ? ['WhatsApp', $whatsapp, ['href' => 'https://wa.me/'.ltrim($whatsapp, '+')]]
+          : ['WhatsApp', 'Not given', ['color' => '#6b7280']],
+      ['Location (from their IP address)', $location ?? 'Not known', $location ? [] : ['color' => '#6b7280']],
+      ['IP address', $ip ?? 'Not recorded', $ip ? ['mono' => true] : ['color' => '#6b7280']],
+      ['Signed up with', $via],
+      ['Registered', $registeredAt],
+      ['Account ID', $uniId, ['mono' => true]],
+  ]])
+
+  <p style="margin:0 0 22px;font-size:13px;line-height:1.7;color:#6b7280;">
+    Telegram and WhatsApp are as they typed them at sign-up; neither is checked.
+  </p>
 
   <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 22px;">
     <tr>

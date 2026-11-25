@@ -187,13 +187,19 @@ class EmailCatalogue
                 'trigger' => 'The moment a new sign-up confirms their email (or signs up through Discord with a verified email).',
                 'to' => self::toFor('team-new-registration'),
                 'live' => true,
-                'note' => 'Already sent today.',
+                'note' => 'Already sent today. Since 25 Nov 2026 it also shows their Telegram, WhatsApp, IP address and country.',
                 'mail' => new NewRegistrationNotice(
                     name: $customer['name'],
                     email: $customer['email'],
                     uniId: $customer['uni'],
                     via: AccountMail::VIA_PASSWORD,
                     registeredAt: '28 Sep 2026, 10:53 UTC',
+                    // 203.0.113.0/24 is reserved for documentation: a sample
+                    // that can never be somebody's real address.
+                    ip: '203.0.113.42',
+                    location: 'Thailand (TH)',
+                    telegram: 'jonathan_meyer',
+                    whatsapp: '+66812345678',
                 ),
             ],
             [

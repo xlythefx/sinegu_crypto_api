@@ -71,6 +71,76 @@ class AccountMailTest extends EngineTestCase
         });
     }
 
+    public function test_the_notice_carries_the_signups_ip_country_telegram_and_whatsapp(): void
+    {
+        // Registered from Thailand…
+        $token = $this->withServerVariables(['REMOTE_ADDR' => '203.0.113.7'])
+            ->withHeaders(['CF-IPCountry' => 'TH'])
+            ->postJson('/api/auth/register', [
+                'name' => 'Jonathan Meyer',
+                'email' => 'jonathan@example.test',
+                'password' => 'super-secret-1',
+                'password_confirmation' => 'super-secret-1',
+                'terms' => true,
+                'telegram' => '@pixel_trader',
+                'whatsapp' => '+66 81 234 5678',
+            ])->assertStatus(201)->json('token');
+        $code = DB::table('user_credentials')->where('email', 'jonathan@example.test')->value('verification_code');
+
+        // …then typed the code from somewhere else. The notice is sent NOW,
+        // but the IP and country it names must be the REGISTRATION's.
+        $this->withServerVariables(['REMOTE_ADDR' => '198.51.100.9'])
+            ->withHeaders(['CF-IPCountry' => 'DE', 'Authorization' => 'Bearer '.$token])
+            ->postJson('/api/auth/email/verify', ['code' => $code])
+            ->assertOk();
+
+        Mail::assertSent(NewRegistrationNotice::class, function (NewRegistrationNotice $mail) {
+            $html = $mail->render();
+
+            return $mail->ip === '203.0.113.7'
+                && $mail->location === 'Thailand (TH)'
+                && $mail->telegram === 'pixel_trader'
+                && $mail->whatsapp === '+66812345678'
+                && str_contains($html, '203.0.113.7')
+                && ! str_contains($html, '198.51.100.9')
+                && str_contains($html, 'Thailand (TH)')
+                && str_contains($html, 'https://t.me/pixel_trader')
+                && str_contains($html, '@pixel_trader')
+                && str_contains($html, 'https://wa.me/66812345678')
+                && str_contains($html, 'jonathan@example.test');
+        });
+    }
+
+    public function test_the_notice_says_so_when_a_detail_is_not_on_record(): void
+    {
+        // A sign-up with no access row (it predates the log, or its insert
+        // failed) and no contact row: the notice still goes, saying what is
+        // missing rather than printing blanks.
+        $uni = $this->makeUser(['status' => 'pending'], withContacts: false);
+
+        app(\App\Services\Notifications\AccountMail::class)
+            ->registrationPending(UserCredential::find($uni), 'Email + password');
+
+        Mail::assertSent(NewRegistrationNotice::class, function (NewRegistrationNotice $mail) {
+            $html = $mail->render();
+
+            return $mail->ip === null && $mail->location === null
+                && $mail->telegram === null && $mail->whatsapp === null
+                && str_contains($html, 'Not recorded')
+                && str_contains($html, 'Not known')
+                && substr_count($html, 'Not given') === 2;
+        });
+    }
+
+    public function test_a_country_code_reads_as_a_place(): void
+    {
+        $this->assertSame('Thailand (TH)', \App\Services\Auth\AccessLog::location('TH'));
+        $this->assertSame('Philippines (PH)', \App\Services\Auth\AccessLog::location('PH'));
+        // Cloudflare's code for Tor, which is not a country.
+        $this->assertSame('Tor network (T1)', \App\Services\Auth\AccessLog::location('T1'));
+        $this->assertNull(\App\Services\Auth\AccessLog::location(null));
+    }
+
     public function test_the_notice_goes_to_the_desk_and_never_to_the_person_who_registered(): void
     {
         $this->registerAndVerify()->assertOk();

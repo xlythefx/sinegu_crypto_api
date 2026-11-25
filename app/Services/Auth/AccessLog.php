@@ -104,6 +104,26 @@ final class AccessLog
     }
 
     /**
+     * A stored country code as a person reads it: "Thailand (TH)". Cloudflare's
+     * "T1" is Tor, not a country. Null in, null out. Without the intl
+     * extension the code alone is shown rather than nothing.
+     */
+    public static function location(?string $country): ?string
+    {
+        if ($country === null || $country === '') {
+            return null;
+        }
+
+        if ($country === 'T1') {
+            return 'Tor network (T1)';
+        }
+
+        $name = class_exists(\Locale::class) ? \Locale::getDisplayRegion('-'.$country, 'en') : '';
+
+        return $name !== '' && $name !== $country ? "{$name} ({$country})" : $country;
+    }
+
+    /**
      * Truncated to the column, and scrubbed to valid UTF-8: the header is
      * whatever the client chose to send, and one invalid byte would make
      * MySQL refuse the whole row. Shared with the visitor counter (VisitRecorder).

@@ -5,7 +5,10 @@ namespace App\Services\Notifications;
 use App\Mail\AccountApproved;
 use App\Mail\EmailVerificationCode;
 use App\Mail\NewRegistrationNotice;
+use App\Models\UserAccessEvent;
 use App\Models\UserCredential;
+use App\Services\Auth\AccessLog;
+use App\Services\Signup\ContactHandles;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Mail;
 use Throwable;
@@ -46,6 +49,8 @@ class AccountMail
             return;
         }
 
+        $facts = $this->signupFacts((string) $user->uni_id);
+
         $this->attempt('registration-notice', $user->uni_id, fn () => Mail::to($to)->send(
             new NewRegistrationNotice(
                 name: (string) $user->name,
@@ -55,8 +60,49 @@ class AccountMail
                 // The DB runs on UTC and an email has no reader to localise
                 // for, so the zone is named rather than implied.
                 registeredAt: ($user->created_at ?? now())->format('d M Y, H:i').' UTC',
+                ip: $facts['ip'],
+                location: $facts['location'],
+                telegram: $facts['telegram'],
+                whatsapp: $facts['whatsapp'],
             )
         ));
+    }
+
+    /**
+     * Where the sign-up came from and how to reach them, for the team notice
+     * (Dima, 2026-11-25). The IP and country are the REGISTRATION's
+     * (`user_access_events`, event `register`), never the current request's:
+     * the notice is usually sent when the code is entered, which can be from
+     * another network or device. Best-effort like the mail itself: a failed
+     * read sends the notice without these lines rather than not at all.
+     *
+     * @return array{ip: ?string, location: ?string, telegram: ?string, whatsapp: ?string}
+     */
+    private function signupFacts(string $uniId): array
+    {
+        $facts = ['ip' => null, 'location' => null, 'telegram' => null, 'whatsapp' => null];
+
+        try {
+            $signup = UserAccessEvent::where('uni_id', $uniId)
+                ->where('event', AccessLog::EVENT_REGISTER)
+                ->orderBy('id')
+                ->first();
+            $contacts = app(ContactHandles::class)->forUser($uniId);
+
+            return [
+                'ip' => $signup?->ip,
+                'location' => AccessLog::location($signup?->country),
+                'telegram' => $contacts[ContactHandles::TELEGRAM],
+                'whatsapp' => $contacts[ContactHandles::WHATSAPP],
+            ];
+        } catch (Throwable $e) {
+            Log::warning('AccountMail: sign-up details could not be read for the registration notice.', [
+                'uni_id' => $uniId,
+                'error' => $e->getMessage(),
+            ]);
+
+            return $facts;
+        }
     }
 
     /**

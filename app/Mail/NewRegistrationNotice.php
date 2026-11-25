@@ -24,6 +24,17 @@ class NewRegistrationNotice extends PixelMail
         public string $via,
         /** Already formatted, with its zone named: an email has no reader zone. */
         public string $registeredAt,
+        // Who they are and where they signed up from (Dima, 2026-11-25), so
+        // the desk can reach them or spot a fake without opening the profile.
+        // Null = not on record, and the email says so rather than guessing.
+        /** The sign-up's IP address (their registration, not the code entry). */
+        public ?string $ip = null,
+        /** Country from that IP, e.g. "Thailand (TH)" — AccessLog::location(). */
+        public ?string $location = null,
+        /** Telegram username without the @, as typed (unverified). */
+        public ?string $telegram = null,
+        /** WhatsApp number in E.164, as typed (unverified). */
+        public ?string $whatsapp = null,
     ) {
     }
 
