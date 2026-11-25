@@ -20,6 +20,23 @@ final class SignupSources
     /** The nine options, in the order the form shows them; `other` is last. */
     public const SLUGS = ['discord', 'telegram', 'ai', 'friend', 'youtube', 'x', 'google', 'social', 'other'];
 
+    /**
+     * What each slug reads as to a person: the form's own tile labels, kept in
+     * step with `src/lib/signupSources.ts` (SIGNUP_SOURCES) in the frontend.
+     * Relabel here and there together; never rename a slug.
+     */
+    public const LABELS = [
+        'discord' => 'Discord server',
+        'telegram' => 'Telegram',
+        'ai' => 'AI chatbot',
+        'friend' => 'Friend / referral',
+        'youtube' => 'YouTube',
+        'x' => 'X (Twitter)',
+        'google' => 'Google search',
+        'social' => 'TikTok / Instagram',
+        'other' => 'Other',
+    ];
+
     /** The one option that carries free text. */
     public const OTHER = 'other';
 
@@ -67,6 +84,25 @@ final class SignupSources
         if ($rows !== []) {
             UserSignupSource::insert($rows);
         }
+    }
+
+    /**
+     * The answers as one line a person reads: "YouTube, Other: a forum".
+     * Null when nothing was ticked (the question is optional).
+     *
+     * @param  list<array{source: string, detail: ?string}>  $answers  from forUser()
+     */
+    public static function describe(array $answers): ?string
+    {
+        $parts = [];
+        foreach ($answers as $answer) {
+            $label = self::LABELS[$answer['source']] ?? $answer['source'];
+            $parts[] = $answer['detail'] !== null && $answer['detail'] !== ''
+                ? "{$label}: {$answer['detail']}"
+                : $label;
+        }
+
+        return $parts === [] ? null : implode(', ', $parts);
     }
 
     /**

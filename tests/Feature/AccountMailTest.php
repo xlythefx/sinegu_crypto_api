@@ -75,7 +75,10 @@ class AccountMailTest extends EngineTestCase
     {
         // Registered from Thailand…
         $token = $this->withServerVariables(['REMOTE_ADDR' => '203.0.113.7'])
-            ->withHeaders(['CF-IPCountry' => 'TH'])
+            ->withHeaders([
+                'CF-IPCountry' => 'TH',
+                'User-Agent' => 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1',
+            ])
             ->postJson('/api/auth/register', [
                 'name' => 'Jonathan Meyer',
                 'email' => 'jonathan@example.test',
@@ -84,13 +87,19 @@ class AccountMailTest extends EngineTestCase
                 'terms' => true,
                 'telegram' => '@pixel_trader',
                 'whatsapp' => '+66 81 234 5678',
+                'heard_from' => ['other', 'youtube'],
+                'heard_from_other' => 'a trading forum',
             ])->assertStatus(201)->json('token');
         $code = DB::table('user_credentials')->where('email', 'jonathan@example.test')->value('verification_code');
 
         // …then typed the code from somewhere else. The notice is sent NOW,
         // but the IP and country it names must be the REGISTRATION's.
         $this->withServerVariables(['REMOTE_ADDR' => '198.51.100.9'])
-            ->withHeaders(['CF-IPCountry' => 'DE', 'Authorization' => 'Bearer '.$token])
+            ->withHeaders([
+                'CF-IPCountry' => 'DE',
+                'User-Agent' => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+                'Authorization' => 'Bearer '.$token,
+            ])
             ->postJson('/api/auth/email/verify', ['code' => $code])
             ->assertOk();
 
@@ -101,6 +110,13 @@ class AccountMailTest extends EngineTestCase
                 && $mail->location === 'Thailand (TH)'
                 && $mail->telegram === 'pixel_trader'
                 && $mail->whatsapp === '+66812345678'
+                // The phone they registered on, not the PC they confirmed from.
+                && $mail->device === 'Safari 18 on iOS 18 · phone'
+                // In the form's order, whatever order they were ticked in.
+                && $mail->heardFrom === 'YouTube, Other: a trading forum'
+                && str_contains($html, 'Safari 18 on iOS 18 · phone')
+                && ! str_contains($html, 'Chrome 131')
+                && str_contains($html, 'YouTube, Other: a trading forum')
                 && str_contains($html, '203.0.113.7')
                 && ! str_contains($html, '198.51.100.9')
                 && str_contains($html, 'Thailand (TH)')
@@ -126,9 +142,11 @@ class AccountMailTest extends EngineTestCase
 
             return $mail->ip === null && $mail->location === null
                 && $mail->telegram === null && $mail->whatsapp === null
+                && $mail->device === null && $mail->heardFrom === null
                 && str_contains($html, 'Not recorded')
-                && str_contains($html, 'Not known')
-                && substr_count($html, 'Not given') === 2;
+                && substr_count($html, 'Not known') === 2
+                && substr_count($html, 'Not given') === 2
+                && str_contains($html, 'Did not say');
         });
     }
 
@@ -139,6 +157,24 @@ class AccountMailTest extends EngineTestCase
         // Cloudflare's code for Tor, which is not a country.
         $this->assertSame('Tor network (T1)', \App\Services\Auth\AccessLog::location('T1'));
         $this->assertNull(\App\Services\Auth\AccessLog::location(null));
+    }
+
+    public function test_every_heard_about_us_answer_has_a_label(): void
+    {
+        // A slug with no label would print its raw key in the team's email.
+        $this->assertSame(
+            \App\Services\Signup\SignupSources::SLUGS,
+            array_keys(\App\Services\Signup\SignupSources::LABELS),
+        );
+    }
+
+    public function test_a_device_reads_as_one_line(): void
+    {
+        $describe = [\App\Services\Auth\DeviceInfo::class, 'describe'];
+        $this->assertSame('Chrome 131 on Windows · computer', $describe('desktop', 'Chrome 131', 'Windows'));
+        $this->assertSame('Android 15 · phone', $describe('mobile', null, 'Android 15'));
+        $this->assertSame('Firefox 133', $describe('unknown', 'Firefox 133', null));
+        $this->assertNull($describe('unknown', null, null));
     }
 
     public function test_the_notice_goes_to_the_desk_and_never_to_the_person_who_registered(): void

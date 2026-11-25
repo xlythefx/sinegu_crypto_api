@@ -15,7 +15,8 @@
   </p>
 
   {{-- The facts an admin needs before opening the queue: who, how to reach
-       them, where they signed up from, which row, and how they arrived.
+       them, where and on what they signed up from, how they found us, which
+       row, and how they arrived.
        Telegram / WhatsApp are typed by the person (never checked); the IP and
        country are the REGISTRATION's, read from the sign-up record. --}}
   @include('emails.partials.facts', ['rows' => [
@@ -29,6 +30,8 @@
           : ['WhatsApp', 'Not given', ['color' => '#6b7280']],
       ['Location (from their IP address)', $location ?? 'Not known', $location ? [] : ['color' => '#6b7280']],
       ['IP address', $ip ?? 'Not recorded', $ip ? ['mono' => true] : ['color' => '#6b7280']],
+      ['Device', $device ?? 'Not known', $device ? [] : ['color' => '#6b7280']],
+      ['Heard about us from', $heardFrom ?? 'Did not say', $heardFrom ? [] : ['color' => '#6b7280']],
       ['Signed up with', $via],
       ['Registered', $registeredAt],
       ['Account ID', $uniId, ['mono' => true]],

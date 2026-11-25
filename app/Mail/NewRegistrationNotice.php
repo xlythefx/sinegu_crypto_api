@@ -35,6 +35,10 @@ class NewRegistrationNotice extends PixelMail
         public ?string $telegram = null,
         /** WhatsApp number in E.164, as typed (unverified). */
         public ?string $whatsapp = null,
+        /** The sign-up's device, e.g. "Chrome 131 on Windows · computer" — DeviceInfo::describe(). */
+        public ?string $device = null,
+        /** "Where did you hear about us?" as one line — SignupSources::describe(). */
+        public ?string $heardFrom = null,
     ) {
     }
 

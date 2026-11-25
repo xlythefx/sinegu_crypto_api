@@ -8,7 +8,9 @@ use App\Mail\NewRegistrationNotice;
 use App\Models\UserAccessEvent;
 use App\Models\UserCredential;
 use App\Services\Auth\AccessLog;
+use App\Services\Auth\DeviceInfo;
 use App\Services\Signup\ContactHandles;
+use App\Services\Signup\SignupSources;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Mail;
 use Throwable;
@@ -64,23 +66,25 @@ class AccountMail
                 location: $facts['location'],
                 telegram: $facts['telegram'],
                 whatsapp: $facts['whatsapp'],
+                device: $facts['device'],
+                heardFrom: $facts['heard_from'],
             )
         ));
     }
 
     /**
      * Where the sign-up came from and how to reach them, for the team notice
-     * (Dima, 2026-11-25). The IP and country are the REGISTRATION's
+     * (Dima, 2026-11-25). The IP, country and device are the REGISTRATION's
      * (`user_access_events`, event `register`), never the current request's:
      * the notice is usually sent when the code is entered, which can be from
      * another network or device. Best-effort like the mail itself: a failed
      * read sends the notice without these lines rather than not at all.
      *
-     * @return array{ip: ?string, location: ?string, telegram: ?string, whatsapp: ?string}
+     * @return array{ip: ?string, location: ?string, telegram: ?string, whatsapp: ?string, device: ?string, heard_from: ?string}
      */
     private function signupFacts(string $uniId): array
     {
-        $facts = ['ip' => null, 'location' => null, 'telegram' => null, 'whatsapp' => null];
+        $facts = ['ip' => null, 'location' => null, 'telegram' => null, 'whatsapp' => null, 'device' => null, 'heard_from' => null];
 
         try {
             $signup = UserAccessEvent::where('uni_id', $uniId)
@@ -94,6 +98,8 @@ class AccountMail
                 'location' => AccessLog::location($signup?->country),
                 'telegram' => $contacts[ContactHandles::TELEGRAM],
                 'whatsapp' => $contacts[ContactHandles::WHATSAPP],
+                'device' => $signup ? DeviceInfo::describe($signup->device_type, $signup->browser, $signup->os) : null,
+                'heard_from' => SignupSources::describe(app(SignupSources::class)->forUser($uniId)),
             ];
         } catch (Throwable $e) {
             Log::warning('AccountMail: sign-up details could not be read for the registration notice.', [

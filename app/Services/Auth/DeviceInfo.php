@@ -44,6 +44,31 @@ final class DeviceInfo
     ];
 
     /**
+     * One line a person reads, from a stored row's three fields:
+     * "Chrome 131 on Windows · computer". Null when none of them says
+     * anything (no User-Agent, or one nothing could be read from).
+     */
+    public static function describe(?string $deviceType, ?string $browser, ?string $os): ?string
+    {
+        $what = match (true) {
+            $browser !== null && $os !== null => "{$browser} on {$os}",
+            default => $browser ?? $os,
+        };
+        $kind = match ($deviceType) {
+            self::DESKTOP => 'computer',
+            self::MOBILE => 'phone',
+            self::TABLET => 'tablet',
+            self::BOT => 'automated program',
+            default => null,
+        };
+
+        return match (true) {
+            $what !== null && $kind !== null => "{$what} · {$kind}",
+            default => $what ?? $kind,
+        };
+    }
+
+    /**
      * @return array{device_type: string, browser: ?string, os: ?string}
      */
     public static function parse(?string $ua): array

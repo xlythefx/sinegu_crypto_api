@@ -187,7 +187,7 @@ class EmailCatalogue
                 'trigger' => 'The moment a new sign-up confirms their email (or signs up through Discord with a verified email).',
                 'to' => self::toFor('team-new-registration'),
                 'live' => true,
-                'note' => 'Already sent today. Since 25 Nov 2026 it also shows their Telegram, WhatsApp, IP address and country.',
+                'note' => 'Already sent today. Since 25 Nov 2026 it also shows their Telegram, WhatsApp, IP address, country, device and where they heard about us.',
                 'mail' => new NewRegistrationNotice(
                     name: $customer['name'],
                     email: $customer['email'],
@@ -200,6 +200,8 @@ class EmailCatalogue
                     location: 'Thailand (TH)',
                     telegram: 'jonathan_meyer',
                     whatsapp: '+66812345678',
+                    device: 'Chrome 131 on Windows · computer',
+                    heardFrom: 'YouTube, Google search',
                 ),
             ],
             [
