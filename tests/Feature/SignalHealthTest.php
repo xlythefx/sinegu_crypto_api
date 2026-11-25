@@ -59,6 +59,7 @@ class SignalHealthTest extends EngineTestCase
             [['status' => 'skipped', 'reason' => 'maxed sizing'], 'maxed', 'normal'],
             [['status' => 'skipped', 'reason' => 'main account at max'], 'main_full', 'normal'],
             [['status' => 'skipped', 'reason' => 'deposit below minimum'], 'deposit_low', 'normal'],
+            [['status' => 'skipped', 'reason' => 'paused (unpaid invoice)'], 'paused_unpaid', 'normal'],
             [['status' => 'skipped', 'reason' => 'api key blocked'], 'key_blocked', 'problem'],
             [['status' => 'skipped', 'reason' => 'deposit unknown'], 'deposit_unknown', 'problem'],
             [['status' => 'skipped', 'reason' => 'size too small'], 'size_too_small', 'problem'],

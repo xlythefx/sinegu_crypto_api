@@ -72,6 +72,89 @@ class EngineAccountsTest extends EngineTestCase
         $this->assertFalse($byUni[$trader]['is_master']);
     }
 
+    /* ---- paused for an unpaid invoice: exits only (2026-11-25) ---- */
+
+    /** An invoice on one account, unpaid past its due date unless told otherwise. */
+    private function invoice(string $owner, int $accountId, array $overrides = []): void
+    {
+        DB::table('invoices')->insert($overrides + [
+            'user_id' => $owner, 'account_id' => $accountId, 'exchange' => 'binance',
+            'api_key' => 'INVKEY'.$accountId.uniqid(), 'month_year' => '2026-10',
+            'total_fee' => 50, 'status' => 'overdue', 'due_date' => '2026-11-04',
+            'created_at' => now(), 'updated_at' => now(),
+        ]);
+    }
+
+    /**
+     * A pause stops new trades, never the exit of a position already open.
+     * The account comes back flagged `exits_only` — but only to an engine
+     * that asks, because an engine too old to know the flag would open
+     * trades on it.
+     */
+    public function test_a_paused_account_is_listed_exits_only_when_the_engine_asks(): void
+    {
+        $owner = $this->makeUser();
+        $paused = $this->makeAccount($owner, ['enabled' => 0]);
+        $live = $this->makeAccount($this->makeUser());
+        $this->invoice($owner, $paused);
+        $pausedKey = DB::table('binance_accounts')->find($paused)->api_key;
+        $liveKey = DB::table('binance_accounts')->find($live)->api_key;
+
+        $old = collect($this->getJson('/api/engine/binance/accounts', $this->engineHeaders())
+            ->assertOk()->json('accounts'))->keyBy('api_key');
+        $this->assertFalse($old->has($pausedKey), 'an engine that does not ask never sees it');
+
+        $new = collect($this->getJson('/api/engine/binance/accounts?include_paused=1', $this->engineHeaders())
+            ->assertOk()->json('accounts'))->keyBy('api_key');
+        $this->assertTrue($new[$pausedKey]['exits_only']);
+        $this->assertFalse($new[$pausedKey]['enabled']);
+        $this->assertFalse($new[$liveKey]['exits_only']);
+    }
+
+    /**
+     * Only a pause for non-payment is exits-only. An account an admin
+     * switched off with nothing owed, one whose invoice is paid, and one
+     * whose unpaid invoice is on ANOTHER venue with the same id stay out.
+     */
+    public function test_only_an_unpaid_past_due_invoice_on_the_same_venue_lists_a_switched_off_account(): void
+    {
+        $owner = $this->makeUser();
+        $switchedOff = $this->makeAccount($owner, ['enabled' => 0]);
+        $paid = $this->makeAccount($this->makeUser(), ['enabled' => 0]);
+        $otherVenue = $this->makeAccount($this->makeUser(), ['enabled' => 0]);
+        $notDueYet = $this->makeAccount($this->makeUser(), ['enabled' => 0]);
+        $scenario = $this->makeAccount($this->makeUser(), ['enabled' => 0]);
+
+        $this->invoice(DB::table('binance_accounts')->find($paid)->uni_id, $paid, ['status' => 'paid']);
+        $this->invoice(DB::table('binance_accounts')->find($otherVenue)->uni_id, $otherVenue, ['exchange' => 'mexc']);
+        $this->invoice(DB::table('binance_accounts')->find($notDueYet)->uni_id, $notDueYet, [
+            'status' => 'pending', 'due_date' => now()->addDays(3)->toDateString(),
+        ]);
+        $this->invoice(DB::table('binance_accounts')->find($scenario)->uni_id, $scenario, ['api_key' => 'SBXINV-1']);
+
+        $listed = collect($this->getJson('/api/engine/binance/accounts?include_paused=1', $this->engineHeaders())
+            ->assertOk()->json('accounts'))->pluck('api_key')->all();
+
+        foreach ([$switchedOff, $paid, $otherVenue, $notDueYet, $scenario] as $id) {
+            $this->assertNotContains(DB::table('binance_accounts')->find($id)->api_key, $listed);
+        }
+    }
+
+    /** Sandbox accounts and suspended owners stay out even when paused. */
+    public function test_a_paused_account_still_obeys_the_other_filters(): void
+    {
+        $suspended = $this->makeUser(['status' => 'suspended']);
+        $a = $this->makeAccount($suspended, ['enabled' => 0]);
+        $this->invoice($suspended, $a);
+        $owner = $this->makeUser();
+        $b = $this->makeAccount($owner, ['enabled' => 0, 'is_sandbox' => 1]);
+        $this->invoice($owner, $b);
+
+        $this->getJson('/api/engine/binance/accounts?include_paused=1', $this->engineHeaders())
+            ->assertOk()
+            ->assertJsonCount(0, 'accounts');
+    }
+
     /** Insert a DEPOSIT/WITHDRAWAL row against an account's api_key. */
     private function transaction(int $accountId, string $type, float $amount): void
     {

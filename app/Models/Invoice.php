@@ -93,6 +93,38 @@ class Invoice extends Model
     }
 
     /**
+     * Ids of the accounts on one venue that are PAUSED for non-payment: the
+     * accounts an unpaid-past-due invoice bills, which is exactly what
+     * OverdueEnforcer switches off. A pause stops new trades, never the exits
+     * of positions already open (owner, 2026-11-25), so the engine's account
+     * list carries these as exits-only (EngineController::accounts) and Admin
+     * → Open positions may close them. Scenario scratch rows (`SBXINV-`) are
+     * nobody's real invoice.
+     *
+     * @return list<int>
+     */
+    public static function pausedAccountIds(string $exchange): array
+    {
+        return static::query()
+            ->where(function ($q) use ($exchange) {
+                $q->where('exchange', $exchange);
+                if ($exchange === 'binance') {
+                    $q->orWhereNull('exchange');
+                }
+            })
+            ->unpaidPastDue()
+            ->whereNotNull('account_id')
+            ->where(function ($q) {
+                $q->whereNull('api_key')->orWhere('api_key', 'not like', 'SBXINV-%');
+            })
+            ->distinct()
+            ->pluck('account_id')
+            ->map(fn ($id) => (int) $id)
+            ->values()
+            ->all();
+    }
+
+    /**
      * The invoice that keeps this user from connecting or reconnecting an
      * exchange account, or null when nothing blocks them.
      *

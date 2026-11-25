@@ -75,6 +75,36 @@ class AdminOpenPositionsTest extends EngineTestCase
         $rows->each(fn ($r) => $this->assertArrayNotHasKey('api_key', $r));
     }
 
+    /**
+     * Paused for an unpaid invoice is not "switched off": the engine still
+     * runs that account's exits (2026-11-25), so its position may be closed
+     * from here. An account switched off with nothing owed stays blocked.
+     */
+    public function test_a_position_on_an_account_paused_for_an_unpaid_invoice_is_closable(): void
+    {
+        $headers = $this->admin();
+        $owner = $this->makeUser(['name' => 'Owes']);
+        $pausedAccount = $this->makeAccount($owner, ['enabled' => 0]);
+        DB::table('invoices')->insert([
+            'user_id' => $owner, 'account_id' => $pausedAccount, 'exchange' => 'binance',
+            'api_key' => 'OWEDKEY01', 'month_year' => '2026-10', 'total_fee' => 40,
+            'status' => 'overdue', 'due_date' => '2026-11-04',
+            'created_at' => now(), 'updated_at' => now(),
+        ]);
+        $paused = $this->position($owner, $pausedAccount);
+        $other = $this->makeUser();
+        $off = $this->position($other, $this->makeAccount($other, ['enabled' => 0]));
+
+        $rows = collect($this->getJson('/api/admin/open-positions', $headers)->assertOk()->json('positions'))
+            ->where('exchange', 'binance')->keyBy('id');
+
+        $this->assertTrue($rows[$paused]['closable']);
+        $this->assertTrue($rows[$paused]['paused_unpaid']);
+        $this->assertFalse($rows[$off]['closable']);
+        $this->assertFalse($rows[$off]['paused_unpaid']);
+        $this->assertStringContainsString('switched off', $rows[$off]['blocked_reason']);
+    }
+
     public function test_names_the_venues_the_master_has_an_account_on(): void
     {
         $headers = $this->admin();

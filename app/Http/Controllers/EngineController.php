@@ -12,6 +12,7 @@ use App\Services\Engine\WebhookPaths;
 use App\Http\Controllers\Concerns\GuardsEngineExchange;
 use App\Models\Asset;
 use App\Models\ExchangeAccount;
+use App\Models\Invoice;
 use App\Models\OpenStrategy;
 use App\Models\TradeLog;
 use App\Models\UserCredential;
@@ -48,8 +49,16 @@ class EngineController extends Controller
      * the key works again. Filtering it out here instead would freeze it as
      * broken forever and then disconnect it at the 3-day deadline even though
      * the user had already fixed their whitelist.
+     *
+     * An account PAUSED for an unpaid invoice (Invoice::pausedAccountIds) is
+     * listed too, with `exits_only: true`, but only when the engine asks with
+     * `?include_paused=1` (owner, 2026-11-25). A pause stops new trades; it
+     * must never strand an open position, and until then the exit signal
+     * skipped the account entirely. The opt-in is the safety half: an engine
+     * too old to know the flag never asks, so it can never open a trade on a
+     * paused account by mistake — either side may deploy first.
      */
-    public function accounts(string $exchange): JsonResponse
+    public function accounts(Request $request, string $exchange): JsonResponse
     {
         if ($guard = $this->guardExchange($exchange)) {
             return $guard;
@@ -57,10 +66,18 @@ class EngineController extends Controller
 
         $schema = $this->schema($exchange);
         $t = $schema->accountsTable;
+        $paused = $request->boolean('include_paused')
+            ? Invoice::pausedAccountIds($exchange)
+            : [];
 
         $accounts = $schema->accountQuery()
             ->join('user_credentials', 'user_credentials.uni_id', '=', "{$t}.uni_id")
-            ->where("{$t}.enabled", 1)
+            ->where(function ($q) use ($t, $paused) {
+                $q->where("{$t}.enabled", 1);
+                if ($paused !== []) {
+                    $q->orWhereIn("{$t}.id", $paused);
+                }
+            })
             ->where("{$t}.is_sandbox", 0)
             ->where('user_credentials.status', '!=', 'suspended')
             ->orderBy("{$t}.created_at")
@@ -110,6 +127,10 @@ class EngineController extends Controller
                     'currency_type' => $a->currency_type,
                     'demo' => (bool) $a->demo,
                     'enabled' => (bool) $a->enabled,
+                    // Paused for an unpaid invoice: no entries, exits still
+                    // run — see the docblock. Only such rows can be switched
+                    // off and still listed.
+                    'exits_only' => ! $a->enabled,
                     // Skip in the fan-out, keep polling — see the docblock.
                     'key_blocked' => $a->keyIsBlocked(),
                     // The account the public channel reports on; see the select.

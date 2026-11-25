@@ -64,6 +64,9 @@ final class SignalHealth
         // engine's rule since 2026-10-14, working as intended.
         'main_full' => ['Main account already full', self::NORMAL, null, null],
         'deposit_low' => ['Deposit below the minimum', self::NORMAL, null, null],
+        // Switched off for an unpaid invoice: entries are refused on purpose,
+        // exits still run (2026-11-25). The billing gate working, not a fault.
+        'paused_unpaid' => ['Paused · unpaid invoice', self::NORMAL, 'Open Invoice History', '/admin/invoices'],
         'untradeable' => ['Account cannot trade on this venue', self::NORMAL, null, null],
         // A demo network lists fewer coins than production (the MEXC testnet
         // has no LTC_USDT): expected for a test account, not something to fix.
@@ -102,6 +105,7 @@ final class SignalHealth
                 $text === 'maxed sizing' => 'maxed',
                 $text === 'main account at max' => 'main_full',
                 $text === 'deposit below minimum' => 'deposit_low',
+                $text === 'paused (unpaid invoice)' => 'paused_unpaid',
                 $text === 'deposit unknown' => 'deposit_unknown',
                 $text === 'size too small' => 'size_too_small',
                 $text === 'exchange limit reached' => 'limit_reached',

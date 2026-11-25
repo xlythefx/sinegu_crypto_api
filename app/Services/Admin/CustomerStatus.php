@@ -24,7 +24,9 @@ use Illuminate\Support\Facades\DB;
  * not suspended (EngineController::accounts), then skips ENTRIES while the
  * key is blocked or the deposit is below the minimum (webhook._deposit_gate).
  * "Paused · unpaid invoice" is a switched-off account with an unpaid invoice
- * past its due date, which is exactly what OverdueEnforcer switches off.
+ * past its due date, which is exactly what OverdueEnforcer switches off. Such
+ * an account takes no new trades, but the engine still runs its exits
+ * (Invoice::pausedAccountIds, 2026-11-25).
  */
 class CustomerStatus
 {

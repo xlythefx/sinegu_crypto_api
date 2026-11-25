@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Services\Engine\WebhookPaths;
+use App\Models\Invoice;
 use App\Models\UserCredential;
 use App\Services\EngineCache;
 use App\Services\Exchanges\ExchangeSchema;
@@ -214,8 +215,9 @@ class AdminOpenPositionsController extends Controller
     /**
      * Open rows on one venue, joined to their account and owner, each with the
      * verdict "can the engine close this?" — the engine only trades accounts
-     * its own accounts endpoint returns (enabled, connected, not a sandbox,
-     * owner not suspended), so anything else would come back "no accounts".
+     * its own accounts endpoint returns (enabled or paused for an unpaid
+     * invoice, connected, not a sandbox, owner not suspended), so anything
+     * else would come back "no accounts".
      *
      * @param  list<int>|null  $ids
      * @return Collection<int, array<string, mixed>>
@@ -229,6 +231,9 @@ class AdminOpenPositionsController extends Controller
         // silent) blocks nothing; the engine's own refusal still stands.
         $traded = $this->engine->tradedExchanges();
         $venueOff = $traded !== null && ! in_array($exchange, $traded, true);
+        // Paused for an unpaid invoice: switched off, but the engine still
+        // runs its exits (Invoice::pausedAccountIds), so a close goes through.
+        $paused = array_flip(Invoice::pausedAccountIds($exchange));
         $query = DB::table("{$schema->positions} as p")
             ->leftJoin("{$schema->accountsTable} as a", 'p.api_key', '=', 'a.api_key')
             ->leftJoin('user_credentials as u', 'p.uni_id', '=', 'u.uni_id')
@@ -243,14 +248,15 @@ class AdminOpenPositionsController extends Controller
             'a.id as account_id', 'a.name as account_name', 'a.enabled', 'a.demo', 'a.is_sandbox',
             'a.deleted_at', 'a.key_status',
             'u.name as owner_name', 'u.type as owner_type', 'u.status as owner_status',
-        ])->map(function ($p) use ($exchange, $venueOff) {
+        ])->map(function ($p) use ($exchange, $venueOff, $paused) {
             $amount = (float) $p->position_amt;
             $side = in_array($p->position_side, ['LONG', 'SHORT'], true)
                 ? $p->position_side
                 : ($amount < 0 ? 'SHORT' : 'LONG');
+            $isPaused = $p->account_id !== null && isset($paused[(int) $p->account_id]);
             $reason = $venueOff
                 ? 'The engine is not trading '.ucfirst($exchange).' — close it on the exchange.'
-                : $this->blockedReason($p);
+                : $this->blockedReason($p, $isPaused);
 
             return [
                 'id' => (int) $p->id,
@@ -264,6 +270,8 @@ class AdminOpenPositionsController extends Controller
                 'feed' => self::feedOf($p->owner_type),
                 'demo' => (bool) $p->demo,
                 'key_blocked' => $p->key_status !== null && $p->key_status !== 'ok',
+                // Switched off for an unpaid invoice: no new trades, still closable.
+                'paused_unpaid' => $isPaused && (int) $p->enabled !== 1,
                 'symbol' => $p->symbol,
                 'side' => $side,
                 'size' => abs($amount),
@@ -290,12 +298,14 @@ class AdminOpenPositionsController extends Controller
         return WebhookPaths::feedForRole($ownerType);
     }
 
-    private function blockedReason(object $p): ?string
+    private function blockedReason(object $p, bool $pausedUnpaid = false): ?string
     {
         return match (true) {
             $p->account_id === null, $p->deleted_at !== null => 'Account disconnected — close it on the exchange.',
             (int) $p->is_sandbox === 1 => 'Sandbox account — nothing real to close.',
-            (int) $p->enabled !== 1 => 'Account disabled (e.g. unpaid invoice) — the engine does not trade it.',
+            // An account paused for an unpaid invoice is NOT blocked: the
+            // engine still runs its exits (EngineController::accounts).
+            (int) $p->enabled !== 1 && ! $pausedUnpaid => 'Account switched off — the engine does not trade it.',
             $p->owner_status === 'suspended' => 'Owner suspended — the engine does not trade it.',
             default => null,
         };
