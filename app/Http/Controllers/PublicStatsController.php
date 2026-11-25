@@ -47,12 +47,18 @@ class PublicStatsController extends Controller
      * "See every trade, verified" section. Every supported exchange the master
      * trades on is pooled as ONE portfolio (capital summed, P&L summed).
      *
-     * `symbols` narrows the TRADES to those tickers (2026-09-18: the landing
-     * page shows the LTC/USDT strategy alone). The capital is still the whole
+     * `symbols` narrows the TRADES to those tickers (the landing page used it
+     * for LTC/USDT alone from 2026-09-18 to 2026-11-25). The capital is still the whole
      * account's — it is not partitioned per asset, every position is backed by
      * all of it — so a filtered `roc` is "what that strategy made on the
      * capital it had". The applied filter is echoed as `symbols` so the page
      * labels what it shows rather than claiming the whole account.
+     *
+     * `exclude_symbols` (2026-11-25) does the opposite: the TRADES of those
+     * markets are left out, everything else stays, so a coin added later
+     * still appears. The landing page uses it to leave out coins the master
+     * no longer trades (the user's call); it is echoed as
+     * `excluded_symbols`, and the page must say that it leaves them out.
      *
      * `recent_closes` (2026-11-25) lists the latest closes in scope, newest
      * first — the landing page's "latest closed trades" strip. Each one's
@@ -69,7 +75,7 @@ class PublicStatsController extends Controller
      */
     public function trackRecord(Request $request): JsonResponse
     {
-        return response()->json($this->cached(null, $this->symbolsFilter($request)));
+        return response()->json($this->cached(null, $this->symbolsFilter($request), $this->excludeFilter($request)));
     }
 
     /**
@@ -83,7 +89,7 @@ class PublicStatsController extends Controller
      */
     public function trackRecordForExchange(Request $request, string $exchange): JsonResponse
     {
-        return response()->json($this->cached($exchange, $this->symbolsFilter($request)));
+        return response()->json($this->cached($exchange, $this->symbolsFilter($request), $this->excludeFilter($request)));
     }
 
     /**
@@ -133,12 +139,13 @@ class PublicStatsController extends Controller
     /**
      * @param  list<string>  $symbols  normalized, sorted, deduplicated
      */
-    private function cached(?string $exchange, array $symbols): array
+    private function cached(?string $exchange, array $symbols, array $exclude = []): array
     {
         $key = self::CACHE_KEY.'.'.($exchange ?? self::ALL_EXCHANGES)
-            .($symbols ? '.'.implode('+', $symbols) : '');
+            .($symbols ? '.'.implode('+', $symbols) : '')
+            .($exclude ? '.-'.implode('+', $exclude) : '');
 
-        return Cache::remember($key, self::CACHE_TTL_SECONDS, fn () => $this->compute($exchange, $symbols));
+        return Cache::remember($key, self::CACHE_TTL_SECONDS, fn () => $this->compute($exchange, $symbols, $exclude));
     }
 
     /**
@@ -151,8 +158,29 @@ class PublicStatsController extends Controller
      */
     private function symbolsFilter(Request $request): array
     {
+        return $this->tickerList((string) $request->query('symbols', ''));
+    }
+
+    /**
+     * `exclude_symbols`, parsed exactly like `symbols` (same shape check,
+     * same cap — it is part of the cache key too).
+     *
+     * @return list<string>
+     */
+    private function excludeFilter(Request $request): array
+    {
+        return $this->tickerList((string) $request->query('exclude_symbols', ''));
+    }
+
+    /**
+     * A comma-separated query value as canonical tickers.
+     *
+     * @return list<string>
+     */
+    private function tickerList(string $raw): array
+    {
         $keys = [];
-        foreach (explode(',', (string) $request->query('symbols', '')) as $part) {
+        foreach (explode(',', $raw) as $part) {
             $key = self::symbolKey($part);
             if ($key !== '' && preg_match('/^[A-Z0-9]{3,20}$/', $key)) {
                 $keys[$key] = true;
@@ -204,12 +232,12 @@ class PublicStatsController extends Controller
      * two disagree about, the total is the one a customer can verify against a
      * balance, and this section's whole claim is that it is verifiable.
      */
-    private function compute(?string $exchange, array $symbols = []): array
+    private function compute(?string $exchange, array $symbols = [], array $exclude = []): array
     {
         $master = UserCredential::where('type', 'master')->first();
 
         if (! $master) {
-            return $this->unavailable($exchange, $symbols);
+            return $this->unavailable($exchange, $symbols, $exclude);
         }
 
         $exchanges = $exchange === null ? ExchangeSchema::supported() : [$exchange];
@@ -269,9 +297,14 @@ class PublicStatsController extends Controller
                 fn ($t) => in_array(self::symbolKey((string) $t->symbol), $symbols, true)
             );
         }
+        if ($exclude) {
+            $trades = $trades->reject(
+                fn ($t) => in_array(self::symbolKey((string) $t->symbol), $exclude, true)
+            );
+        }
 
         if (! $contributing || $trades->isEmpty()) {
-            return $this->unavailable($exchange, $symbols);
+            return $this->unavailable($exchange, $symbols, $exclude);
         }
 
         $trades = $trades->sortBy('closed_at')->values();
@@ -410,7 +443,7 @@ class PublicStatsController extends Controller
         }
 
         if (! $series) {  // trades exist but no capital was ever recorded
-            return $this->unavailable($exchange, $symbols);
+            return $this->unavailable($exchange, $symbols, $exclude);
         }
 
         // --- Headline stats ---------------------------------------------------
@@ -432,6 +465,8 @@ class PublicStatsController extends Controller
             // The ticker filter applied, canonical form; [] is the whole
             // account. A ticker is already public on every announced entry.
             'symbols' => $symbols,
+            // Markets left OUT (`exclude_symbols`), canonical; [] = none.
+            'excluded_symbols' => $exclude,
             'timezone' => $timezone,
             'stats' => [
                 // TWO different questions, deliberately both published:
@@ -468,7 +503,7 @@ class PublicStatsController extends Controller
             ],
             'series' => $series,
             'recent_closes' => $exchange === null
-                ? $this->pooledRecentCloses($contributing, $symbols)
+                ? $this->pooledRecentCloses($contributing, $symbols, $exclude)
                 : $this->recentCloses($trades, $capitalByDay, $timezone),
         ];
     }
@@ -526,13 +561,14 @@ class PublicStatsController extends Controller
      *
      * @param  list<string>  $exchanges  the venues the master has a real account on
      * @param  list<string>  $symbols
+     * @param  list<string>  $exclude
      * @return list<array<string, mixed>>
      */
-    private function pooledRecentCloses(array $exchanges, array $symbols): array
+    private function pooledRecentCloses(array $exchanges, array $symbols, array $exclude = []): array
     {
         $all = [];
         foreach ($exchanges as $name) {
-            foreach ($this->cached($name, $symbols)['recent_closes'] ?? [] as $close) {
+            foreach ($this->cached($name, $symbols, $exclude)['recent_closes'] ?? [] as $close) {
                 $all[] = $close;
             }
         }
@@ -574,7 +610,7 @@ class PublicStatsController extends Controller
     }
 
     /** Nothing to publish yet — a shape the landing page can render safely. */
-    private function unavailable(?string $exchange, array $symbols = []): array
+    private function unavailable(?string $exchange, array $symbols = [], array $exclude = []): array
     {
         return [
             'success' => true,
@@ -582,6 +618,7 @@ class PublicStatsController extends Controller
             'exchange' => $exchange ?? self::ALL_EXCHANGES,
             'exchanges' => [],
             'symbols' => $symbols,
+            'excluded_symbols' => $exclude,
             'timezone' => $this->timezone(),
             'stats' => null,
             'series' => [],

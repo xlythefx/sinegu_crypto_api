@@ -597,6 +597,44 @@ class PublicTrackRecordTest extends EngineTestCase
         $this->assertSame(['LTCUSDT'], array_column($recent, 'symbol'));
     }
 
+    /**
+     * The landing page hides coins the master no longer trades: their trades
+     * leave the record entirely (series, stats, latest closes), P&L included,
+     * so the walk's capital is the deposits plus the coins still shown —
+     * exactly how the `symbols` filter has always worked. The list is echoed
+     * so the page can say it leaves them out.
+     */
+    public function test_exclude_symbols_drops_those_trades_but_not_the_capital(): void
+    {
+        $uniId = $this->makeMaster(['initial_deposit' => 1000]);
+        $this->makeClose($uniId, '2026-01-02 03:00:00', -200, 'LONG', 'BTCUSDT');   // the excluded loser
+        $this->makeClose($uniId, '2026-01-03 03:00:00', 40, 'LONG', 'LTCUSDT');
+
+        $body = $this->getJson('/api/public/track-record?exclude_symbols=BTCUSDT,algo_usdt')->assertOk()->json();
+
+        $this->assertSame(['ALGOUSDT', 'BTCUSDT'], $body['excluded_symbols']);
+        $this->assertSame([], $body['symbols']);
+        $this->assertCount(1, $body['series']);
+        $this->assertSame('2026-01-03', $body['series'][0]['date']);
+        // The BTC loss is out of the record and out of the walk, so day 2 is
+        // measured on the 1,000 deposited: +40 is 4%.
+        $this->assertEquals(4.0, $body['series'][0]['pct']);
+        $this->assertSame(1, $body['stats']['trades']);
+        $this->assertSame(['LTCUSDT'], array_column($body['recent_closes'], 'symbol'));
+    }
+
+    public function test_no_exclusion_is_the_whole_record_and_echoes_nothing(): void
+    {
+        $uniId = $this->makeMaster(['initial_deposit' => 1000]);
+        $this->makeClose($uniId, '2026-01-02 03:00:00', 10, 'LONG', 'BTCUSDT');
+        $this->makeClose($uniId, '2026-01-03 03:00:00', 10, 'LONG', 'LTCUSDT');
+
+        $body = $this->getJson('/api/public/track-record')->assertOk()->json();
+
+        $this->assertSame([], $body['excluded_symbols']);
+        $this->assertSame(2, $body['stats']['trades']);
+    }
+
     public function test_nothing_to_publish_lists_no_recent_closes(): void
     {
         $this->getJson('/api/public/track-record')->assertOk()
