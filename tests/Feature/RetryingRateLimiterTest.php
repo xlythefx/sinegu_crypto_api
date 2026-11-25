@@ -107,6 +107,32 @@ class RetryingRateLimiterTest extends TestCase
     }
 
     /**
+     * MySQL says "lock wait timeout" only after waiting ~50 s, so retrying it
+     * would hold the request for minutes: thrown at once, unlike a deadlock.
+     */
+    public function test_a_lock_wait_timeout_is_not_retried(): void
+    {
+        $timeout = new QueryException(
+            'mysql',
+            'insert ignore into `cache` (`key`, `value`, `expiration`) values (?, ?, ?)',
+            ['test-key:timer', 'i:1;', 1],
+            new PDOException('SQLSTATE[HY000]: General error: 1205 Lock wait timeout exceeded; try restarting transaction'),
+        );
+        $store = self::flakyStore(failures: 1, error: $timeout);
+        $limiter = new RetryingRateLimiter(new Repository($store));
+
+        try {
+            $limiter->hit('visitor');
+            $this->fail('A lock wait timeout must not be retried.');
+        } catch (QueryException) {
+            $this->assertSame(1, $store->writes);
+        }
+
+        $this->assertTrue(RetryingRateLimiter::isDeadlock(self::deadlock()));
+        $this->assertFalse(RetryingRateLimiter::isDeadlock($timeout));
+    }
+
+    /**
      * MySQL rolls the WHOLE transaction back on a deadlock, so re-running one
      * statement inside it would carry on as if nothing had been lost.
      */
