@@ -521,6 +521,88 @@ class PublicTrackRecordTest extends EngineTestCase
         }
     }
 
+    /* ============ recent closes ============ */
+
+    /** One closed trade on the master's Binance key, direction as stored. */
+    private function makeClose(
+        string $uniId, string $closedAt, ?float $pnl, string $positionSide = 'LONG',
+        string $symbol = 'LTCUSDT', ?int $increments = null,
+    ): void {
+        DB::table('binance_pastpositions')->insert([
+            'uni_id' => $uniId,
+            'api_key' => self::KEY,
+            'symbol' => $symbol,
+            'position_side' => $positionSide,
+            'position_amt' => 1,
+            'increments_closed' => $increments,
+            'entry_price' => 100,
+            'exit_price' => 101,
+            'realized_pnl' => $pnl,
+            'exchange_fee' => $pnl === null ? null : 0.0,
+            // The ORDER that closed it — the opposite of the direction.
+            'side' => $positionSide === 'SHORT' ? 'BUY' : 'SELL',
+            'closed_at' => $closedAt,
+        ]);
+    }
+
+    /**
+     * The landing strip: newest first, each close's P&L over the capital its
+     * day started with — the share rankAssets gives, one close at a time.
+     */
+    public function test_recent_closes_list_the_latest_closes_newest_first_on_that_days_capital(): void
+    {
+        $uniId = $this->makeMaster(['initial_deposit' => 1000]);
+        $this->makeClose($uniId, '2026-01-02 03:00:00', 100);                    // 10% of 1000
+        $this->makeClose($uniId, '2026-01-03 03:00:00', -11, 'SHORT', 'LTCUSDT', 2);  // day 2 starts on 1100
+        $this->makeClose($uniId, '2026-01-03 05:00:00', 22);
+
+        $recent = $this->getJson('/api/public/track-record')->assertOk()->json('recent_closes');
+
+        $this->assertCount(3, $recent);
+        $this->assertSame('2026-01-03T05:00:00Z', $recent[0]['closed_at']);
+        $this->assertEquals(2.0, $recent[0]['pct']);    // 22 on 1100
+        $this->assertSame('LONG', $recent[0]['side']);
+        $this->assertEquals(-1.0, $recent[1]['pct']);   // -11 on 1100
+        $this->assertSame('SHORT', $recent[1]['side']);
+        $this->assertSame(2, $recent[1]['trades']);     // increments, as `trades` counts them
+        $this->assertEquals(10.0, $recent[2]['pct']);
+        $this->assertSame('binance', $recent[0]['exchange']);
+        $this->assertSame('LTCUSDT', $recent[0]['symbol']);
+    }
+
+    public function test_recent_closes_are_capped_and_skip_a_close_with_no_pnl_yet(): void
+    {
+        $uniId = $this->makeMaster(['initial_deposit' => 1000]);
+        foreach (range(2, 8) as $day) {
+            $this->makeClose($uniId, sprintf('2026-01-%02d 03:00:00', $day), 10);
+        }
+        // The webhook writes the row before the venue indexes the fill: no
+        // P&L yet. It must not be published as a 0.00% close.
+        $this->makeClose($uniId, '2026-01-09 03:00:00', null);
+
+        $recent = $this->getJson('/api/public/track-record')->assertOk()->json('recent_closes');
+
+        $this->assertCount(\App\Http\Controllers\PublicStatsController::RECENT_CLOSES, $recent);
+        $this->assertSame('2026-01-08T03:00:00Z', $recent[0]['closed_at']);
+    }
+
+    public function test_recent_closes_follow_the_symbols_filter(): void
+    {
+        $uniId = $this->makeMaster(['initial_deposit' => 1000]);
+        $this->makeClose($uniId, '2026-01-02 03:00:00', 10, 'LONG', 'LTCUSDT');
+        $this->makeClose($uniId, '2026-01-02 05:00:00', 10, 'LONG', 'BTCUSDT');
+
+        $recent = $this->getJson('/api/public/track-record?symbols=LTCUSDT')->assertOk()->json('recent_closes');
+
+        $this->assertSame(['LTCUSDT'], array_column($recent, 'symbol'));
+    }
+
+    public function test_nothing_to_publish_lists_no_recent_closes(): void
+    {
+        $this->getJson('/api/public/track-record')->assertOk()
+            ->assertJson(['available' => false, 'recent_closes' => []]);
+    }
+
     /* ============ per exchange ============ */
 
     private function makeMexcAccount(string $uniId, float $initialDeposit, string $apiKey = 'mexc-key'): void
@@ -565,6 +647,25 @@ class PublicTrackRecordTest extends EngineTestCase
         $mexc = $this->getJson('/api/public/track-record/mexc')->assertOk()->json();
         $this->assertEquals(10.0, $mexc['series'][0]['pct']);
         $this->assertSame('LTC_USDT', $mexc['series'][0]['assets'][0]['symbol']);
+    }
+
+    /**
+     * The channel's exit message measures a close on ITS venue's master
+     * balance, so the pooled record lists each close on its own exchange's
+     * capital, not on the pool's — the same close must read the same in both.
+     */
+    public function test_the_pooled_records_closes_are_measured_on_their_own_exchanges_capital(): void
+    {
+        $uniId = $this->makeMaster(['initial_deposit' => 1000]);
+        $this->makeMexcAccount($uniId, 4000);
+        $this->makeClose($uniId, '2026-01-02 03:00:00', 100);      // Binance: 10% of 1000
+        $this->makeMexcTrade($uniId, '2026-01-02 05:00:00', 200);  // MEXC: 5% of 4000
+
+        $all = $this->getJson('/api/public/track-record')->assertOk()->json();
+
+        $this->assertEquals(6.0, $all['series'][0]['pct']);   // the pooled day: 300 on 5000
+        $this->assertSame(['mexc', 'binance'], array_column($all['recent_closes'], 'exchange'));
+        $this->assertEquals([5.0, 10.0], array_column($all['recent_closes'], 'pct'));
     }
 
     public function test_an_exchange_the_master_does_not_trade_is_unavailable_not_empty_zeros(): void

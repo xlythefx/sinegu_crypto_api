@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\UserCredential;
 use App\Services\Exchanges\ExchangeSchema;
 use App\Services\Pnl\TradingFee;
+use App\Services\Positions\TradeSide;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -36,6 +37,9 @@ class PublicStatsController extends Controller
      */
     private const MAX_SYMBOLS = 5;
 
+    /** How many of the latest closes `recent_closes` lists. */
+    public const RECENT_CLOSES = 5;
+
     /**
      * GET /api/public/track-record[?symbols=LTCUSDT,…]
      * The master account's verified track record: daily percentage returns,
@@ -49,6 +53,15 @@ class PublicStatsController extends Controller
      * all of it — so a filtered `roc` is "what that strategy made on the
      * capital it had". The applied filter is echoed as `symbols` so the page
      * labels what it shows rather than claiming the whole account.
+     *
+     * `recent_closes` (2026-11-25) lists the latest closes in scope, newest
+     * first — the landing page's "latest closed trades" strip. Each one's
+     * `pct` is that close's P&L after fees over the capital its OWN
+     * exchange's master account started the day with: the basis the Telegram
+     * channel's exit message uses (one venue's master balance), so a close
+     * reads the same on the site as in the channel. On the pooled record that
+     * is NOT the pooled capital, so a day's closes need not add up to the
+     * pooled day's `pct` when the master trades the market on two venues.
      *
      * Always 200. `available: false` means there is nothing to publish yet
      * (no master account, or no closed trades in scope) — the landing page
@@ -237,6 +250,8 @@ class PublicStatsController extends Controller
                     // For the capital walk's fee correction below — the venue
                     // decides the taker rate, so each row carries its own.
                     'exchange_fee', 'exit_price', 'position_amt',
+                    // For `recent_closes`: the direction, read as TradeSide does.
+                    'position_side', 'side',
                 ]);
             $rows->each(fn ($row) => $row->exchange = $name);
             $trades = $trades->concat($rows);
@@ -353,6 +368,7 @@ class PublicStatsController extends Controller
         $growth = 1.0;        // compounded factor across the trading days so far
         $series = [];
         $dayPercents = [];
+        $capitalByDay = [];   // [day] => the capital the day was measured on
 
         foreach ($days as $day) {
             // Deposits/withdrawals land before the day's trades, so that day's
@@ -362,6 +378,7 @@ class PublicStatsController extends Controller
             $pnl = $pnlByDay[$day] ?? null;
             if ($pnl !== null && $capital > 0) {
                 $percent = $pnl / $capital * 100;
+                $capitalByDay[$day] = $capital;
                 // Floored at 0: a day that loses more than the whole account
                 // cannot compound into a negative factor, which would flip the
                 // sign of every day after it. The `$capital > 0` guard then
@@ -450,7 +467,78 @@ class PublicStatsController extends Controller
                 'last_trade_at' => $series[count($series) - 1]['date'],
             ],
             'series' => $series,
+            'recent_closes' => $exchange === null
+                ? $this->pooledRecentCloses($contributing, $symbols)
+                : $this->recentCloses($trades, $capitalByDay, $timezone),
         ];
+    }
+
+    /**
+     * The latest closes of one exchange's slice, newest first: each close's
+     * P&L over the capital that day was measured on — the share
+     * {@see rankAssets} gives its symbol, one close at a time. A close whose
+     * P&L is not recorded yet (the webhook writes the row before the venue
+     * indexes the fill) is left out rather than shown as 0.00%; the poller
+     * backfills it within minutes and it appears then.
+     *
+     * Percentages, a ticker, a direction and a time only — the same privacy
+     * rule as the rest of the payload, and all of it already posted by the
+     * public channel on the exit message.
+     *
+     * @param  \Illuminate\Support\Collection<int, object>  $trades  sorted by closed_at, oldest first
+     * @param  array<string, float>  $capitalByDay
+     * @return list<array<string, mixed>>
+     */
+    private function recentCloses($trades, array $capitalByDay, string $timezone): array
+    {
+        $out = [];
+        foreach ($trades->reverse() as $trade) {
+            if ($trade->realized_pnl === null) {
+                continue;
+            }
+            $day = $this->localDay($trade->closed_at, $timezone);
+            $capital = $capitalByDay[$day] ?? null;
+            if ($capital === null) {
+                continue;
+            }
+            $out[] = [
+                'closed_at' => Carbon::parse((string) $trade->closed_at, 'UTC')->toIso8601ZuluString(),
+                'date' => $day,
+                'symbol' => (string) $trade->symbol,
+                'side' => TradeSide::closed($trade->position_side, $trade->side),
+                'exchange' => (string) $trade->exchange,
+                'pct' => round((float) $trade->realized_pnl / $capital * 100, 3),
+                // Entry-sized increments the close took off, as `trades` counts them.
+                'trades' => max(1, (int) $trade->increments_closed),
+            ];
+            if (count($out) >= self::RECENT_CLOSES) {
+                break;
+            }
+        }
+
+        return $out;
+    }
+
+    /**
+     * The pooled record's latest closes, taken from each exchange's OWN slice
+     * (same cache, same computation as `/track-record/{exchange}`) so every
+     * close is measured on its venue's capital — see {@see trackRecord()}.
+     *
+     * @param  list<string>  $exchanges  the venues the master has a real account on
+     * @param  list<string>  $symbols
+     * @return list<array<string, mixed>>
+     */
+    private function pooledRecentCloses(array $exchanges, array $symbols): array
+    {
+        $all = [];
+        foreach ($exchanges as $name) {
+            foreach ($this->cached($name, $symbols)['recent_closes'] ?? [] as $close) {
+                $all[] = $close;
+            }
+        }
+        usort($all, fn ($a, $b) => strcmp($b['closed_at'], $a['closed_at']));
+
+        return array_slice($all, 0, self::RECENT_CLOSES);
     }
 
     /**
@@ -497,6 +585,7 @@ class PublicStatsController extends Controller
             'timezone' => $this->timezone(),
             'stats' => null,
             'series' => [],
+            'recent_closes' => [],
         ];
     }
 
