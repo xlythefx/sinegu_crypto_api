@@ -621,6 +621,10 @@ class PublicTrackRecordTest extends EngineTestCase
         $this->assertEquals(4.0, $body['series'][0]['pct']);
         $this->assertSame(1, $body['stats']['trades']);
         $this->assertSame(['LTCUSDT'], array_column($body['recent_closes'], 'symbol'));
+        // A close is measured on what the account REALLY held that day —
+        // the hidden BTC loss included — like the Telegram exit message:
+        // +40 on the 800 left is 5%, not the series' 4%.
+        $this->assertEquals(5.0, $body['recent_closes'][0]['pct']);
     }
 
     public function test_no_exclusion_is_the_whole_record_and_echoes_nothing(): void

@@ -65,8 +65,10 @@ class PublicStatsController extends Controller
      * `pct` is that close's P&L after fees over the capital its OWN
      * exchange's master account started the day with: the basis the Telegram
      * channel's exit message uses (one venue's master balance), so a close
-     * reads the same on the site as in the channel. On the pooled record that
-     * is NOT the pooled capital, so a day's closes need not add up to the
+     * reads the same on the site as in the channel — with a filter too: the
+     * capital is walked over EVERY trade, hidden coins included
+     * (`accountCapitalByDay`). On the pooled record that is NOT the pooled
+     * capital, so a day's closes need not add up to the
      * pooled day's `pct` when the master trades the market on two venues.
      *
      * Always 200. `available: false` means there is nothing to publish yet
@@ -290,6 +292,10 @@ class PublicStatsController extends Controller
             );
         }
 
+        // Every trade in the slice, before the filters: the account's REAL
+        // capital, which the latest closes are measured on (see below).
+        $allTrades = $trades;
+
         // The filter narrows the TRADES only; the transactions above still
         // seed the capital, because the whole account backs every position.
         if ($symbols) {
@@ -371,6 +377,17 @@ class PublicStatsController extends Controller
             $delta = (float) $tx->amount * ($tx->type === 'WITHDRAWAL' ? -1 : 1);
             $flowByDay[$day] = ($flowByDay[$day] ?? 0) + $delta;
         }
+
+        // The latest closes are measured on what the account REALLY held
+        // that day, every trade included. The series' walk below only adds
+        // the P&L of the trades in scope, so with a filter its capital is
+        // off by whatever the hidden coins made or lost (on 2026-11-25,
+        // hiding BTC + ALGO's losses overstated it and shrank every close's
+        // percentage below the one the Telegram channel posted). Unfiltered,
+        // the walk below already is the account's, so it is reused.
+        $accountCapitalByDay = ($symbols || $exclude)
+            ? $this->accountCapitalByDay($allTrades, $flowByDay, $openingCapital, $timezone)
+            : null;
 
         // --- Walk the timeline day by day ------------------------------------
         $days = array_unique(array_merge(array_keys($pnlByDay), array_keys($flowByDay)));
@@ -504,7 +521,7 @@ class PublicStatsController extends Controller
             'series' => $series,
             'recent_closes' => $exchange === null
                 ? $this->pooledRecentCloses($contributing, $symbols, $exclude)
-                : $this->recentCloses($trades, $capitalByDay, $timezone),
+                : $this->recentCloses($trades, $accountCapitalByDay ?? $capitalByDay, $timezone),
         ];
     }
 
@@ -552,6 +569,47 @@ class PublicStatsController extends Controller
         }
 
         return $out;
+    }
+
+    /**
+     * The capital each day STARTED with (after that day's transfers), walked
+     * over EVERY trade of the slice: the same walk as {@see compute()} —
+     * opening capital, net flows, realized P&L, and a gross row's estimated
+     * commission off the capital — just never filtered.
+     *
+     * @param  \Illuminate\Support\Collection<int, object>  $trades  every trade, any order
+     * @param  array<string, float>  $flowByDay
+     * @return array<string, float>  [day] => capital, for days it was positive
+     */
+    private function accountCapitalByDay($trades, array $flowByDay, float $openingCapital, string $timezone): array
+    {
+        $pnlByDay = [];
+        $feeByDay = [];
+        foreach ($trades as $trade) {
+            $day = $this->localDay($trade->closed_at, $timezone);
+            $pnlByDay[$day] = ($pnlByDay[$day] ?? 0.0) + (float) $trade->realized_pnl;
+            if ($trade->exchange_fee === null) {
+                $feeByDay[$day] = ($feeByDay[$day] ?? 0.0) + (TradingFee::estimate(
+                    (float) $trade->position_amt,
+                    $trade->exit_price === null ? null : (float) $trade->exit_price,
+                    (string) $trade->exchange,
+                ) ?? 0.0);
+            }
+        }
+        $days = array_unique(array_merge(array_keys($pnlByDay), array_keys($flowByDay)));
+        sort($days);
+
+        $capital = $openingCapital;
+        $byDay = [];
+        foreach ($days as $day) {
+            $capital += $flowByDay[$day] ?? 0.0;
+            if ($capital > 0) {
+                $byDay[$day] = $capital;
+            }
+            $capital += ($pnlByDay[$day] ?? 0.0) - ($feeByDay[$day] ?? 0.0);
+        }
+
+        return $byDay;
     }
 
     /**
