@@ -595,10 +595,10 @@ class AdminInsights
                 return null;
             }
             $user = $users[$a->uni_id] ?? null;
-            $rate = (float) ($user?->realized_percentage ?? 20);
+            $rate = (float) ($user?->realized_percentage ?? \App\Models\UserCredential::DEFAULT_REALIZED_PERCENTAGE);
             $inv = $this->invoices->computeForAccount($model, $month, [
                 'realized' => $rate,
-                'unrealized' => (float) ($user?->unrealized_percentage ?? 6),
+                'unrealized' => (float) ($user?->unrealized_percentage ?? \App\Models\UserCredential::DEFAULT_UNREALIZED_PERCENTAGE),
             ], $a->exchange);
             $realized = (float) $inv['realized_pnl'];
 

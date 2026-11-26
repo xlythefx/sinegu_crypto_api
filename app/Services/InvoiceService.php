@@ -68,7 +68,7 @@ class InvoiceService
      * Compute and upsert one invoice for an account + month. Idempotent per
      * (exchange, account, month): regenerating updates the existing row.
      *
-     * @param  array{realized: float, unrealized: float}  $rates  fee percentages (e.g. 20, 6)
+     * @param  array{realized: float, unrealized: float}  $rates  fee percentages (e.g. 20, 0)
      *
      * @throws \DomainException for an account that is never invoiced
      */
@@ -261,7 +261,7 @@ class InvoiceService
      * @param  float  $equityNow    balance + open P&L, as read now
      * @param  float  $flowInMonth  net deposits − withdrawals inside the month
      * @param  float  $flowAfter    net deposits − withdrawals after it ended, before the read
-     * @param  array{realized?: float, unrealized?: float}  $rates  fee percentages (e.g. 20, 6)
+     * @param  array{realized?: float, unrealized?: float}  $rates  fee percentages (e.g. 20, 0)
      * @return array{performance_equity: float, hwm_after: float, new_realized_profit: float, new_unrealized_profit: float, fee_realized: float, fee_unrealized: float, total_fee: float}
      */
     public static function applyHighWaterMark(
@@ -273,8 +273,8 @@ class InvoiceService
         float $unrealized,
         array $rates
     ): array {
-        $realizedRate = (float) ($rates['realized'] ?? 20) / 100;
-        $unrealizedRate = (float) ($rates['unrealized'] ?? 6) / 100;
+        $realizedRate = (float) ($rates['realized'] ?? \App\Models\UserCredential::DEFAULT_REALIZED_PERCENTAGE) / 100;
+        $unrealizedRate = (float) ($rates['unrealized'] ?? \App\Models\UserCredential::DEFAULT_UNREALIZED_PERCENTAGE) / 100;
 
         $performanceEquity = $equityNow - $flowInMonth - $flowAfter;
 

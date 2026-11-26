@@ -836,8 +836,8 @@ class AdminUserController extends Controller
 
         $month = now()->format('Y-m');
         $rates = [
-            'realized' => (float) ($user->realized_percentage ?? 20),
-            'unrealized' => (float) ($user->unrealized_percentage ?? 6),
+            'realized' => (float) ($user->realized_percentage ?? \App\Models\UserCredential::DEFAULT_REALIZED_PERCENTAGE),
+            'unrealized' => (float) ($user->unrealized_percentage ?? \App\Models\UserCredential::DEFAULT_UNREALIZED_PERCENTAGE),
         ];
         $total = 0.0;
         $counted = 0;

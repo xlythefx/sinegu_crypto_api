@@ -67,6 +67,20 @@ class UserCredential extends Authenticatable
     /** Roles whose accounts follow a feed of their own, never the main one. */
     public const PRIVATE_FEED_ROLES = [self::TESTER, self::SUBMASTER];
 
+    /**
+     * The standard fee rates, in percent, a new user starts on (the columns'
+     * DB defaults) and the fallback wherever a row has none.
+     *
+     * 20% flat (owner, 2026-11-26): the fee is 20% of the month's CLOSED
+     * profit and nothing on positions still open when the bill is made. It
+     * was 20% + 6% of open profit until then; every row on 6 was moved to 0
+     * (migration 2026_11_26_000002), so November 2026's invoices, made on
+     * 1 Dec, are the first under it. A per-user rate still overrides both.
+     */
+    public const DEFAULT_REALIZED_PERCENTAGE = 20.0;
+
+    public const DEFAULT_UNREALIZED_PERCENTAGE = 0.0;
+
     protected $table = 'user_credentials';
 
     protected $primaryKey = 'uni_id';

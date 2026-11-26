@@ -127,8 +127,8 @@ class EngineInvoiceController extends Controller
 
             try {
                 $invoice = $this->invoices->generateForAccount($account, $month, [
-                    'realized' => (float) ($account->realized_percentage ?? 20),
-                    'unrealized' => (float) ($account->unrealized_percentage ?? 6),
+                    'realized' => (float) ($account->realized_percentage ?? \App\Models\UserCredential::DEFAULT_REALIZED_PERCENTAGE),
+                    'unrealized' => (float) ($account->unrealized_percentage ?? \App\Models\UserCredential::DEFAULT_UNREALIZED_PERCENTAGE),
                 ], $exchange);
                 // Day 0 of the schedule: "your invoice is ready". Only a real
                 // fee — a $0 month is stored paid and owes nothing.

@@ -61,6 +61,34 @@ class EngineMonthlyInvoiceTest extends EngineTestCase
         $this->assertSame('pnl', $invoice->fee_source);
     }
 
+    /**
+     * 20% flat (owner, 2026-11-26): a customer on the standard rates pays 20%
+     * of the month's closed profit and nothing on a position still open when
+     * the bill is made. Until then the same month also billed 6% of the open
+     * profit: here 6% × 300 = 18 on top.
+     */
+    public function test_standard_rates_bill_closed_profit_only(): void
+    {
+        $id = $this->profitableCustomer([], ['balance' => 1500, 'unrealized_pnl' => 300]);
+
+        $this->run_()->assertOk()->assertJsonPath('totals.amount', 100); // 20% of 500, nothing on the 300 open
+
+        $invoice = Invoice::where(['account_id' => $id, 'month_year' => self::MONTH])->firstOrFail();
+        $this->assertEqualsWithDelta(300, (float) $invoice->unrealized_pnl, 0.001);
+        $this->assertEqualsWithDelta(0, (float) $invoice->fee_unrealized, 0.001);
+        $this->assertEqualsWithDelta(100, (float) $invoice->total_fee, 0.001);
+    }
+
+    /** A rate an admin set on the person still wins over the standard one. */
+    public function test_a_persons_own_open_profit_rate_is_still_billed(): void
+    {
+        $id = $this->profitableCustomer(['unrealized_percentage' => 6], ['balance' => 1500, 'unrealized_pnl' => 300]);
+
+        $this->run_()->assertOk()->assertJsonPath('totals.amount', 118); // 100 + 6% of 300
+
+        $this->assertEqualsWithDelta(18, (float) Invoice::where('account_id', $id)->value('fee_unrealized'), 0.001);
+    }
+
     public function test_never_bills_master_staff_demo_or_sandbox(): void
     {
         $this->profitableCustomer(['type' => 'master']);

@@ -39,11 +39,11 @@ class InvoiceNotifier
             period: $this->period($invoice),
             exchange: 'Binance',
             profit: round((float) $invoice->new_realized_profit, 2),
-            feeRate: (float) ($c->realized_percentage ?? 20),
+            feeRate: (float) ($c->realized_percentage ?? \App\Models\UserCredential::DEFAULT_REALIZED_PERCENTAGE),
             amount: round((float) $invoice->total_fee, 2),
             dueDate: $this->day($invoice->due_date),
             unrealizedFee: round((float) $invoice->fee_unrealized, 2),
-            unrealizedRate: (float) ($c->unrealized_percentage ?? 6),
+            unrealizedRate: (float) ($c->unrealized_percentage ?? \App\Models\UserCredential::DEFAULT_UNREALIZED_PERCENTAGE),
             unrealizedProfit: round((float) $invoice->new_unrealized_profit, 2),
         ));
     }

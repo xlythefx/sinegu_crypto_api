@@ -119,8 +119,9 @@ final class GuideTools implements Toolset
                 'deposits' => 'Deposits and withdrawals are never profit or loss.',
             ],
             'billing_rules' => [
-                'fee' => 'Each month, per account: 20% of new realized profit + 6% of unrealized profit (rates can differ per '
-                    .'person — see users). Only profit above the account\'s high-water mark (its previous best) is billed, so '
+                'fee' => 'Each month, per account: 20% of new realized (closed) profit, nothing on positions still open at '
+                    .'month end. That is the rule from the November 2026 invoices on; earlier invoices also billed 6% of '
+                    .'unrealized profit. Rates can differ per person — see users. Only profit above the account\'s high-water mark (its previous best) is billed, so '
                     .'a loss must be recovered before fees resume.',
                 'schedule' => 'Invoices are issued on the 1st for the previous month; reminders on the 2nd and 3rd; on the 4th '
                     .'(the due date) unpaid accounts are paused — the bot stops trading them — until paid.',

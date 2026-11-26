@@ -53,9 +53,10 @@ class AdminUserCreateTest extends EngineTestCase
         // Real account: the engine and invoicing must treat it like any other.
         $this->assertFalse((bool) $created->is_sandbox);
         $this->assertTrue((bool) $created->email_verified);
-        // Untouched fee columns keep their DB defaults.
+        // Untouched fee columns keep their DB defaults: 20% flat, nothing on
+        // open profit (2026-11-26).
         $this->assertSame('20.00', (string) $created->realized_percentage);
-        $this->assertSame('6.00', (string) $created->unrealized_percentage);
+        $this->assertSame('0.00', (string) $created->unrealized_percentage);
     }
 
     public function test_role_status_and_fee_percentages_are_settable_up_front(): void

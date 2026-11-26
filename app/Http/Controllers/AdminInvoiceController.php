@@ -180,8 +180,8 @@ class AdminInvoiceController extends Controller
         foreach ($accounts as $account) {
             $cred = DB::table('user_credentials')->where('uni_id', $account->uni_id)->first();
             $rates = [
-                'realized' => (float) ($cred->realized_percentage ?? 20),
-                'unrealized' => (float) ($cred->unrealized_percentage ?? 6),
+                'realized' => (float) ($cred->realized_percentage ?? \App\Models\UserCredential::DEFAULT_REALIZED_PERCENTAGE),
+                'unrealized' => (float) ($cred->unrealized_percentage ?? \App\Models\UserCredential::DEFAULT_UNREALIZED_PERCENTAGE),
             ];
             $created[] = $this->invoices->generateForAccount($account, $validated['month_year'], $rates, $exchange, $sandbox);
         }
