@@ -444,6 +444,9 @@ class AiAccessTest extends EngineTestCase
         $out = $this->tool('users', ['who' => 'customers']);
         $byName = collect($out['users'])->keyBy('name');
         $this->assertSame('@juan_tg_handle', $byName['Juan Dela Cruz']['telegram_username']);
+        // last_activity is written at sign-in only, so Grok is told "last sign-in", never "last active".
+        $this->assertArrayHasKey('last_sign_in', $byName['Juan Dela Cruz']);
+        $this->assertArrayNotHasKey('last_active', $byName['Juan Dela Cruz']);
         $this->assertNull($byName['Ana Reyes']['telegram_username'], 'No username given reads null, never a guess.');
         $this->assertSame(1, $out['with_telegram']);
 

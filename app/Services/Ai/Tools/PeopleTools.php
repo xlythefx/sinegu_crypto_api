@@ -51,7 +51,8 @@ final class PeopleTools implements KeyScopedToolset
             'users' => [
                 'title' => 'Users',
                 'description' => 'People registered on Pixel Alpha: name, role (customer, master, staff), status (pending '
-                    .'approval, active, suspended), email verified, when they joined, last active, their fee rates, how many '
+                    .'approval, active, suspended), email verified, when they joined, when they last signed in (not when '
+                    .'they were last active — that is not recorded), their fee rates, how many '
                     .'exchange accounts they have connected and how many invoices they owe. On a key an admin allowed to see '
                     .'contact details, also each person\'s Telegram username (typed by them at sign-up, not verified; null = '
                     .'not given), and search matches it. Use it for "how many sign-ups this week", "who is waiting for '
@@ -272,7 +273,8 @@ final class PeopleTools implements KeyScopedToolset
                 'status' => $u->status,
                 'email_verified' => (bool) $u->email_verified,
                 'joined' => $u->created_at ? Carbon::parse($u->created_at, 'UTC')->toIso8601String() : null,
-                'last_active' => $u->last_activity ? Carbon::parse($u->last_activity, 'UTC')->toIso8601String() : null,
+                // Written at sign-in only, so it is NOT "last active" (2026-11-26).
+                'last_sign_in' => $u->last_activity ? Carbon::parse($u->last_activity, 'UTC')->toIso8601String() : null,
                 // `telegram_username`, never `telegram`: AiRedactor drops this name for any key not allowed to see it.
                 ...($telegram ? ['telegram_username' => isset($handles[$u->uni_id]) ? '@'.$handles[$u->uni_id] : null] : []),
                 'fee_on_realized_profit_pct' => $u->realized_percentage !== null ? (float) $u->realized_percentage : null,

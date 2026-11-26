@@ -235,4 +235,17 @@ class AdminUserExchangeFilterTest extends EngineTestCase
         $this->assertEquals(1000, $accounts['binance']['balance']);
         $this->assertStringNotContainsString('mexc-key', json_encode($user));
     }
+
+    /** User Management's "Connected exchange" filter leaves sandbox scratch accounts out (2026-11-26). */
+    public function test_the_users_list_says_which_accounts_are_sandbox(): void
+    {
+        DB::table('binance_accounts')->where('id', $this->binanceId)->update(['is_sandbox' => 1]);
+
+        $user = collect($this->getJson('/api/admin/users')->assertOk()->json('users'))
+            ->firstWhere('uni_id', $this->uniId);
+        $accounts = collect($user['accounts'])->keyBy('exchange');
+
+        $this->assertTrue($accounts['binance']['sandbox']);
+        $this->assertFalse($accounts['mexc']['sandbox']);
+    }
 }

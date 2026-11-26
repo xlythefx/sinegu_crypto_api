@@ -540,6 +540,10 @@ class AdminController extends Controller
                     'exchange' => $exchange,
                     'api_key' => $this->maskKey($a->api_key),
                     'demo' => (bool) $a->demo,
+                    // A sandbox / invoice-scenario scratch account is not a
+                    // connection: User Management's "Connected exchange" filter
+                    // leaves it out, as CustomerStatus does (2026-11-26).
+                    'sandbox' => (bool) $a->is_sandbox,
                     'enabled' => (bool) $a->enabled,
                     'balance' => round((float) $a->balance, 2),
                     'unrealized_pnl' => round((float) $a->unrealized_pnl, 2),
