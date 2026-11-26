@@ -73,7 +73,9 @@ final class McpServer
                         'title' => $key?->can_create ? 'Pixel Alpha' : 'Pixel Alpha (read-only)',
                         'version' => self::SERVER_VERSION,
                     ],
-                    'instructions' => GuideTools::INSTRUCTIONS.($key?->can_create ? GuideTools::CREATE_INSTRUCTIONS : ''),
+                    'instructions' => GuideTools::INSTRUCTIONS
+                        .($key?->can_create ? GuideTools::CREATE_INSTRUCTIONS : '')
+                        .($key?->can_see_contacts ? GuideTools::CONTACT_INSTRUCTIONS : ''),
                 ]);
                 break;
 

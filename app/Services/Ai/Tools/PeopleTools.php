@@ -2,6 +2,7 @@
 
 namespace App\Services\Ai\Tools;
 
+use App\Models\AiAccessKey;
 use App\Services\Exchanges\ExchangeSchema;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
@@ -10,9 +11,26 @@ use Illuminate\Support\Facades\DB;
  * People and their exchange accounts. Selects named columns only — never an
  * account's api_key / secret_key, never a user's email, password or codes.
  * (api_key is read for joining and dropped before the row leaves.)
+ *
+ * The one contact detail it may read: the Telegram username a person gave at
+ * sign-up, and only for a key a full admin allowed to see contacts
+ * (`can_see_contacts`, 2026-11-26 — Dima's Grok asked who registered and
+ * could not reach them). Never the WhatsApp number or the Discord username.
  */
-final class PeopleTools implements Toolset
+final class PeopleTools implements KeyScopedToolset
 {
+    private ?AiAccessKey $key = null;
+
+    public function withKey(?AiAccessKey $key): void
+    {
+        $this->key = $key;
+    }
+
+    private function seesTelegram(): bool
+    {
+        return $this->key !== null && (bool) $this->key->can_see_contacts;
+    }
+
     public function definitions(): array
     {
         return [
@@ -34,10 +52,16 @@ final class PeopleTools implements Toolset
                 'title' => 'Users',
                 'description' => 'People registered on Pixel Alpha: name, role (customer, master, staff), status (pending '
                     .'approval, active, suspended), email verified, when they joined, last active, their fee rates, how many '
-                    .'exchange accounts they have connected and how many invoices they owe. Use it for "how many sign-ups '
-                    .'this week", "who is waiting for approval".',
+                    .'exchange accounts they have connected and how many invoices they owe. On a key an admin allowed to see '
+                    .'contact details, also each person\'s Telegram username (typed by them at sign-up, not verified; null = '
+                    .'not given), and search matches it. Use it for "how many sign-ups this week", "who is waiting for '
+                    .'approval", "what is the Telegram of the people who joined today".',
                 'schema' => Props::object([
-                    'search' => Props::owner(),
+                    'search' => [
+                        'type' => 'string',
+                        'description' => 'Part of a person\'s name, e.g. "Juan" — or of their Telegram username, e.g. "@juan", '
+                            .'on a key allowed to see contact details. Default: everyone.',
+                    ],
                     'status' => ['type' => 'string', 'enum' => ['pending', 'active', 'suspended', 'all'], 'description' => 'Default: all.'],
                     'who' => Props::who('all'),
                     'joined_from' => ['type' => 'string', 'description' => 'Joined on or after, YYYY-MM-DD.'],
@@ -186,8 +210,18 @@ final class PeopleTools implements Toolset
             'staff' => $q->whereNotIn('type', ['user', 'master']),
             default => null,
         };
+        $telegram = $this->seesTelegram();
         if ($search !== null) {
-            $q->whereRaw('LOWER(name) LIKE ?', ['%'.mb_strtolower($search).'%']);
+            $like = '%'.mb_strtolower($search).'%';
+            // A Telegram username is stored without its "@".
+            $handle = ltrim(mb_strtolower($search), '@');
+            $q->where(function ($w) use ($like, $handle, $telegram) {
+                $w->whereRaw('LOWER(name) LIKE ?', [$like]);
+                if ($telegram && $handle !== '') {
+                    $w->orWhereIn('uni_id', DB::table('user_contact_handles')
+                        ->whereRaw('LOWER(telegram) LIKE ?', ['%'.$handle.'%'])->select('uni_id'));
+                }
+            });
         }
         if ($from) {
             $q->where('created_at', '>=', $from.' 00:00:00');
@@ -198,6 +232,10 @@ final class PeopleTools implements Toolset
 
         $total = (clone $q)->count();
         $byStatus = (clone $q)->groupBy('status')->select('status')->selectRaw('COUNT(*) AS n')->pluck('n', 'status');
+        // Of everyone matched (not just the rows returned), how many gave a Telegram username.
+        $withTelegram = $telegram
+            ? (clone $q)->whereIn('uni_id', DB::table('user_contact_handles')->whereNotNull('telegram')->select('uni_id'))->count()
+            : null;
         $users = $q->orderByDesc('created_at')->limit($limit)->get([
             'uni_id', 'name', 'type', 'status', 'email_verified', 'created_at', 'last_activity',
             'realized_percentage', 'unrealized_percentage',
@@ -217,9 +255,15 @@ final class PeopleTools implements Toolset
             ->where(fn ($w) => $w->whereNull('api_key')->orWhere('api_key', 'not like', 'SBXINV-%'))
             ->groupBy('user_id')->select('user_id')->selectRaw('COUNT(*) AS n')->pluck('n', 'user_id');
 
+        // Telegram only — never whatsapp / discord from the same row.
+        $handles = $telegram
+            ? DB::table('user_contact_handles')->whereIn('uni_id', $ids)->whereNotNull('telegram')->pluck('telegram', 'uni_id')
+            : collect();
+
         return [
             'total' => $total,
             'by_status' => $byStatus,
+            ...($telegram ? ['with_telegram' => $withTelegram] : []),
             'returned' => $users->count(),
             'users' => $users->map(fn ($u) => [
                 'user_id' => $u->uni_id,
@@ -229,6 +273,8 @@ final class PeopleTools implements Toolset
                 'email_verified' => (bool) $u->email_verified,
                 'joined' => $u->created_at ? Carbon::parse($u->created_at, 'UTC')->toIso8601String() : null,
                 'last_active' => $u->last_activity ? Carbon::parse($u->last_activity, 'UTC')->toIso8601String() : null,
+                // `telegram_username`, never `telegram`: AiRedactor drops this name for any key not allowed to see it.
+                ...($telegram ? ['telegram_username' => isset($handles[$u->uni_id]) ? '@'.$handles[$u->uni_id] : null] : []),
                 'fee_on_realized_profit_pct' => $u->realized_percentage !== null ? (float) $u->realized_percentage : null,
                 'fee_on_unrealized_profit_pct' => $u->unrealized_percentage !== null ? (float) $u->unrealized_percentage : null,
                 'exchanges_connected' => $connected[$u->uni_id] ?? [],

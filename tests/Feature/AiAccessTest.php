@@ -24,6 +24,8 @@ class AiAccessTest extends EngineTestCase
 
     private string $plain;
 
+    private AiAccessKey $key;
+
     private string $master;
 
     private string $customer;
@@ -35,7 +37,7 @@ class AiAccessTest extends EngineTestCase
     protected function setUp(): void
     {
         parent::setUp();
-        [, $this->plain] = app(AiAccessKeys::class)->issue('Owner Grok', 90, null, 'Test Admin');
+        [$this->key, $this->plain] = app(AiAccessKeys::class)->issue('Owner Grok', 90, null, 'Test Admin');
     }
 
     private function mcp(array $message, ?string $key = null, string $uri = '/api/mcp'): TestResponse
@@ -55,6 +57,7 @@ class AiAccessTest extends EngineTestCase
 
     private function adminHeaders(string $type = 'admin'): array
     {
+        $this->app['auth']->forgetGuards();
         $uni = $this->makeUser(['type' => $type, 'name' => 'Staff '.$type]);
 
         return ['Authorization' => 'Bearer '.UserCredential::find($uni)->createToken('spa')->plainTextToken];
@@ -388,6 +391,99 @@ class AiAccessTest extends EngineTestCase
             }
             $this->assertDoesNotMatchRegularExpression('/"(api_key|secret_key|email|password)"/', $text, "{$tool} carries a forbidden field");
         }
+    }
+
+    // --- Telegram usernames, per key (Dima's Grok, 2026-11-26) -------------
+
+    /** Juan gave every contact; Ana gave none. */
+    private function seedContacts(): string
+    {
+        DB::table('user_contact_handles')->updateOrInsert(
+            ['uni_id' => $this->customer],
+            ['telegram' => 'juan_tg_handle', 'discord' => 'juan_dc_name', 'whatsapp' => '+639171234567', 'created_at' => now(), 'updated_at' => now()],
+        );
+
+        return $this->makeUser(['name' => 'Ana Reyes'], withContacts: false);
+    }
+
+    private function allowContacts(bool $on = true): void
+    {
+        $this->putJson("/api/admin/ai-access/keys/{$this->key->id}", ['can_see_contacts' => $on], $this->adminHeaders())
+            ->assertOk()
+            ->assertJsonPath('key.can_see_contacts', $on)
+            ->assertJsonPath('key.can_see_contacts_changed_by_name', 'Staff admin')
+            // The other switch is left alone.
+            ->assertJsonPath('key.can_create', false);
+    }
+
+    public function test_a_key_sees_no_telegram_username_until_an_admin_allows_it(): void
+    {
+        $this->seedPlatform();
+        $this->seedContacts();
+
+        $out = $this->tool('users', ['who' => 'customers']);
+        $this->assertArrayNotHasKey('with_telegram', $out);
+        foreach ($out['users'] as $u) {
+            $this->assertArrayNotHasKey('telegram_username', $u);
+        }
+        $this->assertStringNotContainsString('juan_tg_handle', json_encode($out));
+        // Searching by the handle finds nobody: the key may not look it up.
+        $this->assertSame(0, $this->tool('users', ['search' => '@juan_tg'])['total']);
+        $this->assertStringNotContainsString(
+            'Telegram username',
+            (string) $this->mcp(['jsonrpc' => '2.0', 'id' => 1, 'method' => 'initialize'])->json('result.instructions'),
+        );
+    }
+
+    public function test_an_allowed_key_reads_telegram_usernames_and_nothing_else(): void
+    {
+        $this->seedPlatform();
+        $this->seedContacts();
+        $this->allowContacts();
+
+        $out = $this->tool('users', ['who' => 'customers']);
+        $byName = collect($out['users'])->keyBy('name');
+        $this->assertSame('@juan_tg_handle', $byName['Juan Dela Cruz']['telegram_username']);
+        $this->assertNull($byName['Ana Reyes']['telegram_username'], 'No username given reads null, never a guess.');
+        $this->assertSame(1, $out['with_telegram']);
+
+        // Search matches the handle, with or without its "@".
+        foreach (['@juan_tg', 'JUAN_TG_HANDLE'] as $search) {
+            $found = $this->tool('users', ['search' => $search]);
+            $this->assertSame(['Juan Dela Cruz'], array_column($found['users'], 'name'), $search);
+        }
+
+        // WhatsApp, Discord and email stay hidden from every tool, even on this key.
+        foreach (['users' => ['who' => 'customers'], 'accounts' => ['status' => 'all'], 'invoices' => ['status' => 'all']] as $tool => $arguments) {
+            $text = json_encode($this->tool($tool, $arguments));
+            foreach (['+639171234567', 'juan_dc_name', $this->customerEmail, $this->customerApiKey] as $secret) {
+                $this->assertStringNotContainsString($secret, $text, "{$tool} leaked a contact or credential");
+            }
+        }
+
+        // Grok is told what the field is and that it is private.
+        $this->assertStringContainsString(
+            'Telegram username',
+            (string) $this->mcp(['jsonrpc' => '2.0', 'id' => 1, 'method' => 'initialize'])->json('result.instructions'),
+        );
+
+        // Switched off again: gone at once.
+        $this->allowContacts(false);
+        $this->assertArrayNotHasKey('telegram_username', $this->tool('users', ['who' => 'customers'])['users'][0]);
+    }
+
+    public function test_only_a_full_admin_may_allow_contacts_and_only_on_an_active_key(): void
+    {
+        $url = "/api/admin/ai-access/keys/{$this->key->id}";
+        $this->putJson($url, ['can_see_contacts' => true], $this->adminHeaders('collaborator'))->assertForbidden();
+        $this->putJson($url, [], $this->adminHeaders())->assertStatus(422)->assertJsonPath('error_code', 'NOTHING_TO_CHANGE');
+
+        app(AiAccessKeys::class)->revoke($this->key, 'Test Admin');
+        $this->putJson($url, ['can_see_contacts' => true], $this->adminHeaders())
+            ->assertStatus(422)->assertJsonPath('error_code', 'KEY_NOT_ACTIVE');
+        // Switching OFF a revoked key is always allowed.
+        $this->putJson($url, ['can_see_contacts' => false], $this->adminHeaders())->assertOk();
+        $this->assertFalse((bool) $this->key->fresh()->can_see_contacts);
     }
 
     public function test_every_call_is_logged_against_its_key(): void

@@ -144,6 +144,10 @@ final class AiAccessKeys
             'can_create' => (bool) $key->can_create,
             'can_create_changed_by_name' => $key->can_create_changed_by_name,
             'can_create_changed_at' => $key->can_create_changed_at?->toIso8601String(),
+            // May read the Telegram usernames people gave at sign-up (off until a full admin switches it on).
+            'can_see_contacts' => (bool) $key->can_see_contacts,
+            'can_see_contacts_changed_by_name' => $key->can_see_contacts_changed_by_name,
+            'can_see_contacts_changed_at' => $key->can_see_contacts_changed_at?->toIso8601String(),
         ];
     }
 

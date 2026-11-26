@@ -9,6 +9,7 @@ use App\Services\Ai\AiTools;
 use App\Services\Ai\Tools\CreativeMakeTools;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
 
@@ -117,29 +118,43 @@ class AdminAiAccessController extends Controller
     }
 
     /**
-     * PUT /api/admin/ai-access/keys/{id} {can_create} — switch on (or off) this
-     * key's right to make images / clips and Idea plans in Creatives. Who and
-     * when is kept on the key. A revoked or expired key cannot be switched on.
+     * PUT /api/admin/ai-access/keys/{id} {can_create?, can_see_contacts?} —
+     * switch on (or off) one of this key's two extra rights: making images /
+     * clips and Idea plans in Creatives, and reading the Telegram usernames
+     * people gave at sign-up (2026-11-26). Who and when is kept on the key, per
+     * switch. A revoked or expired key cannot be switched on.
      */
     public function update(Request $request, int $id): JsonResponse
     {
-        $data = $request->validate(['can_create' => ['required', 'boolean']]);
+        $data = $request->validate([
+            'can_create' => ['sometimes', 'boolean'],
+            'can_see_contacts' => ['sometimes', 'boolean'],
+        ]);
+        if ($data === []) {
+            return response()->json([
+                'success' => false,
+                'error_code' => 'NOTHING_TO_CHANGE',
+                'message' => 'Send can_create or can_see_contacts.',
+            ], 422);
+        }
         $key = AiAccessKey::find($id);
         if (! $key) {
             return response()->json(['success' => false, 'error_code' => 'NOT_FOUND', 'message' => 'Key not found.'], 404);
         }
-        if ($data['can_create'] && $key->state() !== 'active') {
+        if (in_array(true, array_map('boolval', $data), true) && $key->state() !== 'active') {
             return response()->json([
                 'success' => false,
                 'error_code' => 'KEY_NOT_ACTIVE',
-                'message' => 'Only an active key can be allowed to create.',
+                'message' => 'Only an active key can be given more access.',
             ], 422);
         }
-        $key->forceFill([
-            'can_create' => (bool) $data['can_create'],
-            'can_create_changed_by_name' => $request->user()?->name,
-            'can_create_changed_at' => now(),
-        ])->save();
+        $changes = [];
+        foreach ($data as $switch => $on) {
+            $changes[$switch] = (bool) $on;
+            $changes["{$switch}_changed_by_name"] = $request->user()?->name;
+            $changes["{$switch}_changed_at"] = now();
+        }
+        $key->forceFill($changes)->save();
 
         return response()->json(['success' => true, 'key' => $this->keys->present($key->fresh())]);
     }
@@ -188,7 +203,7 @@ class AdminAiAccessController extends Controller
                 'response_bytes' => $r->response_bytes !== null ? (int) $r->response_bytes : null,
                 'duration_ms' => $r->duration_ms !== null ? (int) $r->duration_ms : null,
                 'ip' => $r->ip,
-                'created_at' => \Illuminate\Support\Carbon::parse($r->created_at, 'UTC')->toIso8601String(),
+                'created_at' => Carbon::parse($r->created_at, 'UTC')->toIso8601String(),
             ])->values(),
             'has_more' => $rows->count() > $limit,
             'last_24h' => [

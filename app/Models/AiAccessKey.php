@@ -3,6 +3,7 @@
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Support\Carbon;
 
 /**
  * A key the employer's AI connector (Grok) presents to POST /api/mcp.
@@ -12,9 +13,11 @@ use Illuminate\Database\Eloquent\Model;
  * @property string $name
  * @property string $prefix
  * @property string $key_hash
- * @property \Illuminate\Support\Carbon|null $expires_at
- * @property \Illuminate\Support\Carbon|null $last_used_at
- * @property \Illuminate\Support\Carbon|null $revoked_at
+ * @property Carbon|null $expires_at
+ * @property Carbon|null $last_used_at
+ * @property Carbon|null $revoked_at
+ * @property bool $can_create May make images / clips and Idea plans in Creatives
+ * @property bool $can_see_contacts May read the Telegram usernames people gave at sign-up
  */
 class AiAccessKey extends Model
 {
@@ -24,6 +27,7 @@ class AiAccessKey extends Model
         'name', 'prefix', 'key_hash', 'created_by', 'created_by_name',
         'expires_at', 'last_used_at', 'last_used_ip', 'revoked_at', 'revoked_by_name',
         'can_create', 'can_create_changed_by_name', 'can_create_changed_at',
+        'can_see_contacts', 'can_see_contacts_changed_by_name', 'can_see_contacts_changed_at',
     ];
 
     /** The hash never leaves the server, not even to an admin. */
@@ -37,6 +41,8 @@ class AiAccessKey extends Model
             'revoked_at' => 'datetime',
             'can_create' => 'boolean',
             'can_create_changed_at' => 'datetime',
+            'can_see_contacts' => 'boolean',
+            'can_see_contacts_changed_at' => 'datetime',
         ];
     }
 

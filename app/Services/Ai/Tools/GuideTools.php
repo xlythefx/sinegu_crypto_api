@@ -29,6 +29,14 @@ final class GuideTools implements Toolset
         .'"Grok" for the team. Never put a money amount, a balance or a customer\'s name in a prompt or a post: those '
         .'figures are private even though you can read them.';
 
+    /**
+     * Added to the instructions for a key allowed to see contact details
+     * (ai_access_keys.can_see_contacts, 2026-11-26), and only for that key.
+     */
+    public const CONTACT_INSTRUCTIONS = ' This key may also read the Telegram username each person gave at sign-up '
+        .'(the users tool returns it as `telegram_username` and its search matches it). It was typed by the person and is not '
+        .'verified; null means they gave none. It is private: give it only to the person asking you, never in a post.';
+
     public function definitions(): array
     {
         return [
@@ -58,7 +66,8 @@ final class GuideTools implements Toolset
                 'asset_performance' => 'Which coins are up or down over a period, master vs customers.',
                 'assets / asset_changes' => 'Each coin\'s trading settings, and who changed them when.',
                 'accounts' => 'Each exchange account: balance, deposits, paused or trading, key working, P&L.',
-                'users' => 'People: role, status, joined, fee rates, accounts, unpaid invoices.',
+                'users' => 'People: role, status, joined, fee rates, accounts, unpaid invoices — and their Telegram username, '
+                    .'on a key allowed to see it.',
                 'invoices' => 'Monthly fees: paid, unpaid, overdue.',
                 'platform_summary / business_stats' => 'The admin dashboard totals: money managed, P&L, sign-ups, revenue.',
                 'creative_plans' => 'Creatives: the X / TikTok content plan (idea → posted).',
@@ -91,6 +100,10 @@ final class GuideTools implements Toolset
                     .'ends the run like a win.',
                 'streak sizing' => 'Per coin: after N losses (or wins) in a row, the next entry uses a different size. Since 2026-11-13 customers follow the run of the MASTER on the coin, not their own; testers and venues with no real-money master count their own.',
                 'deposit minimum' => 'An account needs at least 1,000 USDT deposited (net of withdrawals) before the bot opens trades.',
+                'contact details' => 'The users tool shows the Telegram username a person gave at sign-up ONLY on a key an '
+                    .'admin allowed to see it (Admin → AI Access → "Allow Telegram usernames"); on any other key the field is '
+                    .'absent. Usernames are typed by the person and never verified, and people who registered before '
+                    .'16 Nov 2026 may have none (null). WhatsApp numbers, emails and phone numbers are never shared.',
                 'API key problems' => 'A key the exchange refuses ("key refused", usually our server IP not allowed or futures '
                     .'permission missing) stops that account trading. After 3 days it is disconnected automatically.',
             ],

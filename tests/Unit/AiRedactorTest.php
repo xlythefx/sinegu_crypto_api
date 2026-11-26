@@ -29,6 +29,29 @@ class AiRedactorTest extends TestCase
         $this->assertSame(['name' => 'Juan Dela Cruz', 'profile' => []], $clean);
     }
 
+    /**
+     * A key a full admin allowed to see contacts (2026-11-26) keeps the
+     * Telegram username — and only it: the phone, WhatsApp, Discord and the
+     * `contacts` block are dropped whatever the key.
+     */
+    public function test_an_allowed_key_keeps_the_telegram_username_only(): void
+    {
+        $row = [
+            'name' => 'Juan Dela Cruz',
+            'telegram_username' => '@juan',
+            'discord_username' => 'juan.dc',
+            'whatsapp' => '+639171234567',
+            'contacts' => ['telegram' => 'juan'],
+            'email' => 'juan@example.com',
+        ];
+
+        $this->assertSame(['name' => 'Juan Dela Cruz'], AiRedactor::clean($row));
+        $this->assertSame(
+            ['name' => 'Juan Dela Cruz', 'telegram_username' => '@juan'],
+            AiRedactor::clean($row, AiRedactor::CONTACT_FIELDS),
+        );
+    }
+
     public function test_counts_keyed_by_a_platform_name_survive(): void
     {
         // "Where did you hear about us" counts are keyed by source slug; a

@@ -2,6 +2,8 @@
 
 namespace App\Services\Ai;
 
+use App\Models\AiAccessKey;
+
 /**
  * The last thing every AI tool answer passes through: drops any field whose
  * NAME says it is a credential or personal contact data, at any depth.
@@ -14,6 +16,11 @@ namespace App\Services\Ai;
  * browser strings, Discord ids, and how to reach a person — the `contacts`
  * block (Telegram, Discord, WhatsApp), phone numbers and the usernames on
  * their own. Names stay — the owner asked for real names.
+ *
+ * ONE exception, per key (2026-11-26, Dima's Grok): a key a full admin
+ * allowed to see contacts (`ai_access_keys.can_see_contacts`) keeps the
+ * fields in CONTACT_FIELDS — the Telegram username, and nothing else. A
+ * WhatsApp number, an email or a phone number is dropped for every key.
  */
 final class AiRedactor
 {
@@ -22,7 +29,22 @@ final class AiRedactor
         .'|user_agent|discord_id|server_ip|key_hash|cacert'
         .'|contacts|whatsapp|.*_whatsapp|phone|.*_phone|phone_.*|discord_username|telegram_username|telegram_handle)$/i';
 
-    public static function clean(mixed $value): mixed
+    /**
+     * What a key allowed to see contacts keeps. Never a WhatsApp number, an
+     * email or a phone. (A bare `telegram` key is NOT a contact — it is a
+     * "where did you hear about us" count — which is why the users tool names
+     * the username `telegram_username`, a name DROP removes for every other key.)
+     */
+    public const CONTACT_FIELDS = ['telegram_username'];
+
+    /** @return list<string> the dropped field names this key may still receive */
+    public static function allowedFor(?AiAccessKey $key): array
+    {
+        return $key !== null && $key->can_see_contacts ? self::CONTACT_FIELDS : [];
+    }
+
+    /** @param  list<string>  $allow  field names kept although DROP matches them (lower case) */
+    public static function clean(mixed $value, array $allow = []): mixed
     {
         if (is_object($value)) {
             $value = json_decode(json_encode($value), true);
@@ -32,10 +54,10 @@ final class AiRedactor
         }
         $out = [];
         foreach ($value as $k => $v) {
-            if (is_string($k) && preg_match(self::DROP, $k)) {
+            if (is_string($k) && preg_match(self::DROP, $k) && ! in_array(strtolower($k), $allow, true)) {
                 continue;
             }
-            $out[$k] = self::clean($v);
+            $out[$k] = self::clean($v, $allow);
         }
 
         return $out;

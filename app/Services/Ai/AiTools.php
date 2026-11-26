@@ -8,6 +8,7 @@ use App\Services\Ai\Tools\CreativeMakeTools;
 use App\Services\Ai\Tools\CreativeTools;
 use App\Services\Ai\Tools\GuideTools;
 use App\Services\Ai\Tools\KeyAwareToolset;
+use App\Services\Ai\Tools\KeyScopedToolset;
 use App\Services\Ai\Tools\MoneyTools;
 use App\Services\Ai\Tools\PeopleTools;
 use App\Services\Ai\Tools\SignalTools;
@@ -31,6 +32,10 @@ use Throwable;
  * Creatives assistant's query_data runs the data tools only
  * ({@see dataToolNames()}), because its tool list must stay byte-identical
  * within a chat and it has Creatives tools of its own.
+ *
+ * Contact details are the one thing a key's switch can add to a READ
+ * (`can_see_contacts`, 2026-11-26): the Telegram usernames people gave at
+ * sign-up, in the users tool. See AiRedactor::allowedFor().
  *
  * Every answer passes through AiRedactor before it leaves, and is capped at
  * MAX_BYTES: an answer too big for the AI's context helps nobody, so it is
@@ -131,12 +136,12 @@ final class AiTools
         if ($set === null || ($set instanceof KeyAwareToolset && ! $set->allows($key))) {
             return [false, "Unknown tool: {$name}"];
         }
-        if ($set instanceof KeyAwareToolset) {
+        if ($set instanceof KeyScopedToolset) {
             $set->withKey($key);
         }
 
         try {
-            $answer = AiRedactor::clean($set->call($name, $arguments));
+            $answer = AiRedactor::clean($set->call($name, $arguments), AiRedactor::allowedFor($key));
         } catch (ToolError $e) {
             return [false, $e->getMessage()];
         } catch (Throwable $e) {
