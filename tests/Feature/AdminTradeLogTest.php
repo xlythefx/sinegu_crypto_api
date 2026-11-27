@@ -172,7 +172,30 @@ class AdminTradeLogTest extends EngineTestCase
             ->assertOk()
             ->assertJsonPath('logs.0.details.0.reason', 'asset_not_configured')
             ->assertJsonPath('logs.0.details.0.sizing', null)
-            ->assertJsonPath('logs.0.details.0.account', null);
+            ->assertJsonPath('logs.0.details.0.account', null)
+            ->assertJsonPath('logs.0.details.0.leverage_fallback', null);
+    }
+
+    /** An entry the exchange refused 25x on and that traded at 15x (engine, 2026-11-27). */
+    public function test_a_leverage_step_down_reaches_the_signal_log(): void
+    {
+        $admin = $this->makeUser(['type' => 'admin']);
+        TradeLog::create([
+            'exchange' => 'binance', 'action' => 'SELL', 'ticker' => 'SANTOSUSDT',
+            'success' => true, 'category' => 'signal', 'target_count' => 1,
+            'filled' => 1, 'failed' => 0, 'skipped' => 0, 'leverage' => 25,
+            'ts' => '2026-11-27 04:00:00',
+            'details' => [[
+                'status' => 'filled', 'account' => 'Main', 'quantity' => 400, 'leverage' => 15,
+                'leverage_fallback' => ['asked' => 25, 'used' => 15, 'refused' => '-4028 Leverage 25 is not valid', 'also_refused' => []],
+            ]],
+        ]);
+
+        $this->getJson('/api/admin/trade-logs', $this->headersFor($admin))
+            ->assertOk()
+            ->assertJsonPath('logs.0.details.0.leverage_fallback', [
+                'asked' => 25, 'used' => 15, 'refused' => '-4028 Leverage 25 is not valid',
+            ]);
     }
 
     /**

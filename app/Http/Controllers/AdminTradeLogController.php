@@ -757,6 +757,13 @@ class AdminTradeLogController extends Controller
                 'requested_qty' => isset($sizing['limit']['requested_qty']) ? (float) $sizing['limit']['requested_qty'] : null,
                 'open_usd' => isset($sizing['limit']['open_usd']) ? (float) $sizing['limit']['open_usd'] : null,
             ] : null,
+            // The exchange refused the leverage asked and the entry stepped
+            // down (engine, 2026-11-27: 15x, then 10x). Null when it did not.
+            'leverage_fallback' => is_array($row['leverage_fallback'] ?? null) && isset($row['leverage_fallback']['used']) ? [
+                'asked' => isset($row['leverage_fallback']['asked']) ? (int) $row['leverage_fallback']['asked'] : null,
+                'used' => (int) $row['leverage_fallback']['used'],
+                'refused' => isset($row['leverage_fallback']['refused']) ? (string) $row['leverage_fallback']['refused'] : null,
+            ] : null,
             'sizing' => $sizing === null ? null : [
                 'balance' => isset($sizing['balance']) ? (float) $sizing['balance'] : null,
                 // Deposit gate. A gate-blocked skip writes only these three
