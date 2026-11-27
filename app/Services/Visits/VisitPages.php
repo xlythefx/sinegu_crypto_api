@@ -15,6 +15,7 @@ final class VisitPages
 {
     public const PATHS = [
         '/',
+        '/classic', // the home page before the 2026-11-27 redesign
         '/v2',
         '/auth',
         '/trading-bot',
