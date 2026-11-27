@@ -48,6 +48,14 @@ class AdminInsights
     /** When the test signal feed went live (UTC); tester trades before it followed the main feed. */
     public const TEST_FEED_SINCE = '2026-10-15 12:00:00';
 
+    /**
+     * When QuantLab began sending the sub-master's signals (UTC; 20 Nov 2026,
+     * 11:48 Singapore time). The sub-master's few trades before it came from
+     * TradingView alerts under the main strategy's name, and would fold into
+     * that card.
+     */
+    public const SUBMASTER_STRATEGIES_SINCE = '2026-11-20 03:48:00';
+
     public function __construct(
         private PaymentEnvironment $env,
         private UserStatsService $stats,
@@ -699,6 +707,11 @@ class AdminInsights
      * account may have followed the main feed before it became one, and
      * those demo trades would otherwise fold into the real strategy's card.
      *
+     * `all` also carries the SUB-MASTER's real-money trades (2026-11-27,
+     * "QuantLab shall be seen on this page") from SUBMASTER_STRATEGIES_SINCE.
+     * QuantLab names them "VWMA-Reversion - QuantLab", so they get their own
+     * card and never fold into the master's.
+     *
      * @param  'master'|'customers'|'all'  $scope
      */
     public function strategyTrades(string $scope, ?string $exchange = null): Collection
@@ -709,13 +722,16 @@ class AdminInsights
             default => $this->masterAccounts()->concat($this->customerAccounts()),
         };
         $testers = $scope === 'all' ? $this->testerAccounts() : collect();
+        $submasters = $scope === 'all' ? $this->submasterAccounts() : collect();
         if ($exchange) {
             $accounts = $accounts->where('exchange', $exchange);
             $testers = $testers->where('exchange', $exchange);
+            $submasters = $submasters->where('exchange', $exchange);
         }
 
         $rows = $this->pastRows($accounts)
             ->concat($this->pastRows($testers, Carbon::parse(self::TEST_FEED_SINCE, 'UTC')))
+            ->concat($this->pastRows($submasters, Carbon::parse(self::SUBMASTER_STRATEGIES_SINCE, 'UTC')))
             ->filter(fn ($p) => trim((string) $p->strategy) !== '');
 
         // Whose trade it was: the owner's name and role, so the strategy page
@@ -879,6 +895,16 @@ class AdminInsights
         $ids = UserCredential::where('type', 'tester')->pluck('uni_id')->flip();
 
         return $this->accounts()->filter(fn ($a) => isset($ids[$a->uni_id]))->values();
+    }
+
+    /** Sub-master accounts (type = submaster), real money only — the sub-master feed's accounts. */
+    private function submasterAccounts(): Collection
+    {
+        $ids = UserCredential::where('type', UserCredential::SUBMASTER)->pluck('uni_id')->flip();
+
+        return $this->accounts()->filter(
+            fn ($a) => isset($ids[$a->uni_id]) && (int) $a->demo === 0
+        )->values();
     }
 
     /** Every non-sandbox account on every exchange, tagged with its exchange. */

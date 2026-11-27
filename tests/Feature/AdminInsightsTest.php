@@ -392,6 +392,68 @@ class AdminInsightsTest extends EngineTestCase
         $this->assertCount(0, $this->getJson('/api/admin/strategies?exchange=mexc', $h)->json('trades'));
     }
 
+    public function test_all_scope_shows_the_submasters_quantlab_trades_from_when_quantlab_started(): void
+    {
+        $admin = $this->makeUser(['type' => 'admin']);
+        $master = $this->makeUser(['type' => 'master']);
+        $this->closeTrade('binance', $this->makeAccount($master), ['strategy' => 'VWMA-Reversion']);
+        $sub = $this->makeUser(['type' => 'submaster']);
+        $subLive = $this->makeAccount($sub);
+        $subDemo = $this->makeAccount($sub, ['demo' => 1]);
+
+        // 19 Nov: TradingView alerts under the main strategy's name — before QuantLab.
+        $this->closeTrade('binance', $subLive, ['strategy' => 'VWMA-Reversion', 'closed_at' => '2026-11-19 20:00:00']);
+        // QuantLab's, real money: its own card.
+        $this->closeTrade('binance', $subLive, ['strategy' => 'VWMA-Reversion - QuantLab', 'realized_pnl' => -4, 'closed_at' => '2026-11-21 09:00:00']);
+        // Play money never counts.
+        $this->closeTrade('binance', $subDemo, ['strategy' => 'VWMA-Reversion - QuantLab', 'closed_at' => '2026-11-21 10:00:00']);
+
+        $h = $this->headersFor($admin);
+        $all = collect($this->getJson('/api/admin/strategies', $h)->assertOk()->json('trades'));
+        $this->assertSame(['VWMA-Reversion', 'VWMA-Reversion - QuantLab'], $all->pluck('strategy')->sort()->values()->all());
+        $quantlab = $all->firstWhere('strategy', 'VWMA-Reversion - QuantLab');
+        $this->assertSame('submaster', $quantlab['owner_role']);
+        $this->assertSame(-4.0, (float) $quantlab['realized_pnl']);
+
+        // The master / customers scopes never carry it.
+        $this->assertSame(['VWMA-Reversion'], array_column($this->getJson('/api/admin/strategies?scope=master', $h)->json('trades'), 'strategy'));
+        $this->assertCount(0, $this->getJson('/api/admin/strategies?scope=customers', $h)->json('trades'));
+    }
+
+    public function test_the_submasters_earlier_quantlab_trades_are_renamed_and_nobody_elses(): void
+    {
+        $master = $this->makeUser(['type' => 'master']);
+        $masterAcc = $this->makeAccount($master);
+        $sub = $this->makeUser(['type' => 'submaster']);
+        $subLive = $this->makeAccount($sub);
+
+        $this->closeTrade('binance', $masterAcc, ['strategy' => 'VWMA-Reversion', 'closed_at' => '2026-11-22 09:00:00']);
+        $this->closeTrade('binance', $subLive, ['strategy' => 'VWMA-Reversion', 'closed_at' => '2026-11-19 20:00:00']);
+        $this->closeTrade('binance', $subLive, ['strategy' => 'VWMA-Reversion', 'closed_at' => '2026-11-22 09:00:00']);
+        $subKey = DB::table('binance_accounts')->where('id', $subLive)->value('api_key');
+        $masterKey = DB::table('binance_accounts')->where('id', $masterAcc)->value('api_key');
+        foreach ([$subKey, $masterKey] as $key) {
+            DB::table('open_strategies')->insert([
+                'exchange' => 'binance', 'api_key' => $key, 'symbol' => 'SANTOSUSDT',
+                'position_side' => 'LONG', 'strategy' => 'VWMA-Reversion',
+            ]);
+        }
+
+        $migration = require database_path('migrations/2026_11_27_000001_name_quantlab_submaster_trades.php');
+        $migration->up();
+
+        $labels = fn (string $key) => DB::table('binance_pastpositions')->where('api_key', $key)
+            ->orderBy('closed_at')->pluck('strategy')->all();
+        $this->assertSame(['VWMA-Reversion', 'VWMA-Reversion - QuantLab'], $labels($subKey));
+        $this->assertSame(['VWMA-Reversion'], $labels($masterKey));
+        $this->assertSame('VWMA-Reversion - QuantLab', DB::table('open_strategies')->where('api_key', $subKey)->value('strategy'));
+        $this->assertSame('VWMA-Reversion', DB::table('open_strategies')->where('api_key', $masterKey)->value('strategy'));
+
+        $migration->down();
+        $this->assertSame(['VWMA-Reversion', 'VWMA-Reversion'], $labels($subKey));
+        $this->assertSame('VWMA-Reversion', DB::table('open_strategies')->where('api_key', $subKey)->value('strategy'));
+    }
+
     public function test_admin_can_read_any_users_analytics(): void
     {
         $admin = $this->makeUser(['type' => 'admin']);
