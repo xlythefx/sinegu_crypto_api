@@ -14,6 +14,7 @@ use App\Models\Asset;
 use App\Models\ExchangeAccount;
 use App\Models\Invoice;
 use App\Models\OpenStrategy;
+use App\Models\Strategy;
 use App\Models\TradeLog;
 use App\Models\UserCredential;
 use App\Services\Admin\SignalDelivery;
@@ -183,6 +184,11 @@ class EngineController extends Controller
      * the kill switch") rather than the old `asset_not_configured`, which read
      * the same for a coin an admin paused and a coin nobody ever added. An
      * engine older than the key ignores it.
+     *
+     * `paused_strategies` (2026-11-27): the strategy names switched off on
+     * Admin → Strategies. The engine refuses an ENTRY whose alert names one;
+     * exits still run. Global, so every venue's answer carries the same list.
+     * Until then the switch was stored and shown but read by nothing.
      */
     public function assets(string $exchange, Request $request): JsonResponse
     {
@@ -200,6 +206,8 @@ class EngineController extends Controller
 
         return response()->json([
             'success' => true,
+            'paused_strategies' => Strategy::where('enabled', false)->orderBy('strategy_key')
+                ->pluck('strategy_key')->values(),
             'disabled' => $disabled->orderBy('ticker')
                 ->get(['ticker', 'killed_at', 'killed_reason', 'enabled'])
                 ->map(fn (Asset $a) => [

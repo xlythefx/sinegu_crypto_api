@@ -90,6 +90,7 @@ class SignalHealthTest extends EngineTestCase
         $rejected = [
             ['asset_not_configured', 'rejected', 'problem'],
             ['asset_disabled', 'asset_off', 'normal'],
+            ['strategy_paused', 'strategy_off', 'normal'],
             ['asset_not_added', 'asset_missing', 'problem'],
             ['assets_unavailable', 'assets_unavailable', 'problem'],
             ['side_LONG_blocks_SELL', 'rejected', 'problem'],

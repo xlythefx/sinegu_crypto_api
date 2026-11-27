@@ -3,7 +3,9 @@
 namespace Tests\Feature;
 
 use App\Models\Asset;
+use App\Models\UserCredential;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Http;
 
 /**
  * GET /api/engine/{exchange}/assets names the coins that exist but are
@@ -53,6 +55,31 @@ class EngineAssetListTest extends EngineTestCase
             'killed' => true,
             'killed_reason' => 'The master lost 3 trades in a row on LTCUSDT.',
         ]], $disabled);
+    }
+
+    /**
+     * Admin → Strategies' on/off switch (2026-11-27). It was stored and shown
+     * but nothing read it, so switching a strategy off stopped no trade. Now
+     * the engine gets the paused names with the coin list, and the switch
+     * drops the engine's cached list at once.
+     */
+    public function test_a_strategy_switched_off_reaches_the_engine_at_once(): void
+    {
+        Http::fake();
+        config(['services.engine.targets.local' => 'http://127.0.0.1:5010']);
+        $admin = UserCredential::find($this->makeUser(['type' => 'admin']));
+        $h = ['Authorization' => 'Bearer '.$admin->createToken('spa')->plainTextToken];
+        $key = 'VWMA-Reversion - QuantLab';
+
+        $this->putJson('/api/admin/strategies/'.rawurlencode($key), ['enabled' => false], $h)->assertOk();
+
+        Http::assertSent(fn ($r) => $r->url() === 'http://127.0.0.1:5010/admin/refresh-assets');
+        $paused = fn (string $x) => $this->getJson("/api/engine/{$x}/assets", $this->engineHeaders())->json('paused_strategies');
+        $this->assertSame([$key], $paused('binance'));
+        $this->assertSame([$key], $paused('mexc')); // global: every venue
+
+        $this->putJson('/api/admin/strategies/'.rawurlencode($key), ['enabled' => true], $h)->assertOk();
+        $this->assertSame([], $paused('binance'));
     }
 
     public function test_each_venue_lists_only_its_own_switched_off_coins(): void

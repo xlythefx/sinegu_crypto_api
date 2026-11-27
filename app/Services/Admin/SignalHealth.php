@@ -54,6 +54,9 @@ final class SignalHealth
         // `asset_not_configured` (older rows, and an API too old to say)
         // stays the generic `rejected`: it meant either.
         'asset_off' => ['Coin turned off', self::NORMAL, 'Open Trading Assets', '/admin/assets'],
+        // The strategy is switched off on Admin → Strategies (2026-11-27):
+        // its entries are refused on purpose, exits still run.
+        'strategy_off' => ['Strategy paused', self::NORMAL, 'Open Strategies', '/admin/strategies'],
         'asset_missing' => ['Coin not added yet', self::PROBLEM, 'Add it in Trading Assets', '/admin/assets'],
         'assets_unavailable' => ['Coin list could not be loaded', self::PROBLEM, 'Check the bot engine', '/admin/engine'],
         'other_skip' => ['Skipped for another reason', self::PROBLEM, null, null],
@@ -87,6 +90,7 @@ final class SignalHealth
         if ($category === 'rejected') {
             return self::reason(match (strtolower((string) ($detail['reason'] ?? ''))) {
                 'asset_disabled' => 'asset_off',
+                'strategy_paused' => 'strategy_off',
                 'asset_not_added' => 'asset_missing',
                 'assets_unavailable' => 'assets_unavailable',
                 default => 'rejected',

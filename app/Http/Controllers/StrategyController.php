@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\Strategy;
 use App\Services\Admin\AdminInsights;
+use App\Services\EngineCache;
 use App\Services\Exchanges\ExchangeSchema;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -52,8 +53,14 @@ class StrategyController extends Controller
     /**
      * PUT /api/admin/strategies/{key}
      * Toggle a strategy globally (upserts the config row).
+     *
+     * Paused = the engine refuses every ENTRY whose alert names this
+     * strategy, on every exchange; exits still close what is open
+     * (GET /engine/{x}/assets → paused_strategies). The engine's list is
+     * dropped at once (EngineCache, best-effort — its 90 s TTL is the net),
+     * so the switch acts on the next signal. Until 2026-11-27 nothing read it.
      */
-    public function setEnabled(Request $request, string $key): JsonResponse
+    public function setEnabled(Request $request, string $key, EngineCache $engine): JsonResponse
     {
         $validated = $request->validate([
             'enabled' => ['required', 'boolean'],
@@ -63,6 +70,7 @@ class StrategyController extends Controller
             ['strategy_key' => $key],
             ['enabled' => $validated['enabled']],
         );
+        $engine->refreshAssets();
 
         return response()->json([
             'success' => true,
